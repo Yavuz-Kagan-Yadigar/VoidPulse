@@ -9,7 +9,6 @@ import sys, os, json, threading, enum, random, math
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List
-from collections import deque
 
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore    import *
@@ -47,6 +46,8 @@ def make_acch(acc_hex: str) -> str:
 SUPPORTED_EXT = frozenset({'.flac', '.mp3', '.opus', '.m4a', '.aac', '.ogg'})
 CONFIG_PATH   = Path.home() / '.config' / 'blackplayer' / 'config.json'
 VIZ_BANDS     = 256
+GST_BANDS     = 2048  # high-res spectrum for better log/lin mapping
+OV_VIZ_H      = 60    # overlay visualization height px
 MIN_DB        = -70.0
 RAD           = 10   # global corner radius
 
@@ -207,17 +208,43 @@ SS = make_stylesheet()  # initial
 #  Toggle switch (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 class ToggleSwitch(QWidget):
+    """Toggle switch with optional two-sided labels.
+
+    Single label:  ToggleSwitch('LABEL', parent)  — label shown on right
+    Two-sided:     ToggleSwitch('OFF', 'ON', parent) — left=off, right=on
+    """
     toggled = pyqtSignal(bool)
     W, H, R = 42, 22, 11
+    PAD = 6   # gap between label and switch track
 
-    def __init__(self, label: str = '', parent=None):
+    def __init__(self, label_off: str = '', label_on_or_parent=None, parent=None):
+        # Resolve overloaded signature
+        if isinstance(label_on_or_parent, str):
+            self._lbl_off = label_off          # left side / off state
+            self._lbl_on  = label_on_or_parent # right side / on state
+            self._two_sided = True
+        else:
+            # Backward compat: single label shown on right
+            self._lbl_off  = ''
+            self._lbl_on   = label_off
+            self._two_sided = False
+            if label_on_or_parent is not None and parent is None:
+                parent = label_on_or_parent
+
         super().__init__(parent)
-        self._on = False; self._label = label; self._anim = 0.0
+        self._on = False; self._anim = 0.0
         self._timer = QTimer(self); self._timer.setInterval(16)
         self._timer.timeout.connect(self._step)
-        lw = self.fontMetrics().horizontalAdvance(label)+4 if label else 0
-        self.setFixedSize(self.W + lw + (6 if label else 0), max(self.H, 18))
+        self._recalc_size()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _recalc_size(self):
+        fm = self.fontMetrics()
+        lw_off = fm.horizontalAdvance(self._lbl_off) + self.PAD if self._lbl_off else 0
+        lw_on  = fm.horizontalAdvance(self._lbl_on)  + self.PAD if self._lbl_on  else 0
+        total_w = lw_off + self.W + lw_on
+        self.setFixedSize(max(total_w, self.W), max(self.H, 18))
+        self._lw_off = lw_off  # cached left-label pixel width (including pad)
 
     def isChecked(self) -> bool: return self._on
 
@@ -240,12 +267,15 @@ class ToggleSwitch(QWidget):
     def paintEvent(self, _):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         t = self._anim
-        # Darker, desaturated accent for the track when ON
+        h_c = self.height()
+        lw_off = self._lw_off
+
+        # ── Track ──────────────────────────────────────────────────────────────
         _acc = QColor(ACC)
-        h, s, v, _ = _acc.getHsvF()
-        _track_on = QColor(); _track_on.setHsvF(h, s*0.55, v*0.38)
-        _border_on = QColor(); _border_on.setHsvF(h, s*0.65, v*0.55)
-        _off = QColor(0x20, 0x20, 0x20)
+        ah, as_, av, _ = _acc.getHsvF()
+        _track_on = QColor(); _track_on.setHsvF(ah, as_*0.55, av*0.38)
+        _border_on = QColor(); _border_on.setHsvF(ah, as_*0.65, av*0.55)
+        _off  = QColor(0x20, 0x20, 0x20)
         _boff = QColor(0x3e, 0x3e, 0x3e)
         tc = QColor(
             int(_off.red()   + t*(_track_on.red()   - _off.red())),
@@ -255,15 +285,45 @@ class ToggleSwitch(QWidget):
             int(_boff.red()   + t*(_border_on.red()   - _boff.red())),
             int(_boff.green() + t*(_border_on.green() - _boff.green())),
             int(_boff.blue()  + t*(_border_on.blue()  - _boff.blue())))
+        track_x = lw_off
         p.setPen(QPen(bc, 1.5)); p.setBrush(QBrush(tc))
-        p.drawRoundedRect(QRectF(0,(self.height()-self.H)/2,self.W,self.H), self.R, self.R)
-        kx = 3 + t*(self.W-2*self.R-2); ky = (self.height()-self.H)/2+(self.H-self.R*2)/2
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(ACCH if self._on else FG2)))
+        p.drawRoundedRect(QRectF(track_x, (h_c-self.H)/2, self.W, self.H), self.R, self.R)
+
+        # ── Knob ───────────────────────────────────────────────────────────────
+        kx = track_x + 3 + t*(self.W - 2*self.R - 2)
+        ky = (h_c - self.H)/2 + (self.H - self.R*2)/2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(ACCH if self._on else FG2)))
         p.drawEllipse(QRectF(kx, ky, self.R*2, self.R*2))
-        if self._label:
-            p.setPen(QColor(FG2)); p.setFont(self.font())
-            p.drawText(self.W+6, 0, self.width()-self.W-6, self.height(),
-                       Qt.AlignmentFlag.AlignVCenter, self._label)
+
+        # ── Labels ─────────────────────────────────────────────────────────────
+        f = p.font(); p.setFont(f)
+        DIM  = QColor(FG2)
+        BRIGHT = QColor(FG)
+
+        if self._lbl_off:
+            # Left label: bright when OFF, dim when ON
+            mix = 1.0 - t   # 1=off, 0=on
+            c = QColor(
+                int(DIM.red()   + mix*(BRIGHT.red()   - DIM.red())),
+                int(DIM.green() + mix*(BRIGHT.green() - DIM.green())),
+                int(DIM.blue()  + mix*(BRIGHT.blue()  - DIM.blue())))
+            p.setPen(c)
+            p.drawText(QRectF(0, 0, lw_off - self.PAD, h_c),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       self._lbl_off)
+
+        if self._lbl_on:
+            # Right label: bright when ON, dim when OFF
+            c2 = QColor(
+                int(DIM.red()   + t*(BRIGHT.red()   - DIM.red())),
+                int(DIM.green() + t*(BRIGHT.green() - DIM.green())),
+                int(DIM.blue()  + t*(BRIGHT.blue()  - DIM.blue())))
+            p.setPen(c2)
+            rstart = track_x + self.W + self.PAD
+            p.drawText(QRectF(rstart, 0, self.width()-rstart, h_c),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       self._lbl_on)
         p.end()
 
 
@@ -351,7 +411,10 @@ class SettingsPopup(QFrame):
     cover_toggled      = pyqtSignal(bool)
     accent_changed     = pyqtSignal(str)
     lyrics_fetch_toggled = pyqtSignal(bool)
+    overlay_viz_toggled    = pyqtSignal(bool)
+    overlay_lyrics_toggled = pyqtSignal(bool)
     cover_fetch_toggled = pyqtSignal()   # emitted when user clicks "Fetch Covers" button
+    lyric_fetch_toggled = pyqtSignal()   # emitted when user clicks "Fetch Lyrics" button
     tag_fetch_toggled    = pyqtSignal()   # emitted when user clicks "Fetch Tags" button
 
     def __init__(self, parent=None):
@@ -375,6 +438,23 @@ class SettingsPopup(QFrame):
         div.setStyleSheet(f'background:{BORD}; margin:0;')
         root.addWidget(div)
 
+        # ── Overlay ──────────────────────────────────────────────────────
+        ov_hdr = QLabel('OVERLAY')
+        ov_hdr.setStyleSheet(f'color:{FG2};font-size:9px;letter-spacing:2px;background:transparent;')
+        root.addWidget(ov_hdr)
+        ov_row = QHBoxLayout(); ov_row.setSpacing(16)
+        ov_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._ov_viz_sw    = ToggleSwitch('VIZ',    self)
+        self._ov_lyrics_sw = ToggleSwitch('LYRICS', self)
+        self._ov_viz_sw.setChecked(False); self._ov_lyrics_sw.setChecked(False)
+        self._ov_viz_sw.toggled.connect(self.overlay_viz_toggled)
+        self._ov_lyrics_sw.toggled.connect(self.overlay_lyrics_toggled)
+        ov_row.addWidget(self._ov_viz_sw); ov_row.addWidget(self._ov_lyrics_sw)
+        root.addLayout(ov_row)
+        ov_div = QFrame(); ov_div.setFixedHeight(1)
+        ov_div.setStyleSheet(f'background:{BORD}; margin:0;')
+        root.addWidget(ov_div)
+
         # Volume
         vol_row = QHBoxLayout(); vol_row.setSpacing(6)
         vol_lbl = QLabel('Volume'); vol_lbl.setObjectName('setting_lbl')
@@ -396,7 +476,7 @@ class SettingsPopup(QFrame):
         sw_row = QHBoxLayout(); sw_row.setSpacing(16)
         sw_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._viz_sw = ToggleSwitch('VIZ',     self)
-        self._log_sw = ToggleSwitch('LOG/LIN', self)
+        self._log_sw = ToggleSwitch('LIN', 'LOG', self)
         self._viz_sw.setChecked(True); self._log_sw.setChecked(True)
         self._viz_sw.toggled.connect(self.viz_toggled)
         self._log_sw.toggled.connect(self.log_toggled)
@@ -415,15 +495,19 @@ class SettingsPopup(QFrame):
         sw2.addWidget(self._lyrics_fetch_sw); sw2.addWidget(self._cover_sw)
         root.addLayout(sw2)
 
-        # Action buttons row: Fetch Covers + Fetch Tags 
-        action_row = QHBoxLayout(); action_row.setSpacing(8)
-        self._btn_fetch_covers = QPushButton('Fetch Covers…')
-        self._btn_fetch_covers.setFixedHeight(22)
+        # Action buttons row: Fetch Covers | Fetch Lyrics | Fetch Tags  (compact)
+        action_row = QHBoxLayout(); action_row.setSpacing(4)
+        self._btn_fetch_covers = QPushButton('Covers…')
+        self._btn_fetch_lyrics = QPushButton('Lyrics…')
+        self._btn_fetch_tags   = QPushButton('Tags…')
+        for b in (self._btn_fetch_covers, self._btn_fetch_lyrics, self._btn_fetch_tags):
+            b.setFixedHeight(22)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
-        self._btn_fetch_tags = QPushButton('Fetch Tags…')
-        self._btn_fetch_tags.setFixedHeight(22)
+        self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_toggled)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
         action_row.addWidget(self._btn_fetch_covers)
+        action_row.addWidget(self._btn_fetch_lyrics)
         action_row.addWidget(self._btn_fetch_tags)
         root.addLayout(action_row)
         root.addSpacing(16)
@@ -511,6 +595,10 @@ class SettingsPopup(QFrame):
         self._accent_hex.setText(v)
     def set_viz(self, v):    self._viz_sw.setChecked(v)
     def set_log(self, v):    self._log_sw.setChecked(v)
+    def overlay_viz_on(self)    -> bool: return self._ov_viz_sw.isChecked()
+    def overlay_lyrics_on(self) -> bool: return self._ov_lyrics_sw.isChecked()
+    def set_overlay_viz(self, v):    self._ov_viz_sw.setChecked(v)
+    def set_overlay_lyrics(self, v): self._ov_lyrics_sw.setChecked(v)
     def lyrics_fetch_on(self) -> bool: return self._lyrics_fetch_sw.isChecked()
     def set_lyrics_fetch(self, v): self._lyrics_fetch_sw.setChecked(v)
     def cover_fetch_on(self) -> bool: return True   # always enabled; user triggers manually
@@ -1443,7 +1531,8 @@ class LyricsFetcher(QObject):
 # ── Panel ─────────────────────────────────────────────────────────────────────
 class LyricsPanel(QWidget):
     status_msg = pyqtSignal(str)   # forwarded to status bar
-    seek_requested = pyqtSignal(int)  # seek to ms
+    seek_requested = pyqtSignal(int)          # seek to ms
+    lyrics_context = pyqtSignal(str, str, str)  # prev, cur, next
 
     _LINE_H  = 38
     _LINE_SP = 4
@@ -1631,7 +1720,7 @@ class LyricsPanel(QWidget):
             lbl = ClickableLyricLine(txt if txt else '·', ms)
             lbl.setWordWrap(True)
             lbl.setFixedHeight(self._LINE_H)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             self._style_lbl(lbl, False)
             lbl.clicked.connect(self.seek_requested)
             self._lbls.append(lbl)
@@ -1642,7 +1731,7 @@ class LyricsPanel(QWidget):
         self._clear()
         lbl = QLabel(self._plain)
         lbl.setWordWrap(True)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         lbl.setStyleSheet(
             f'color:{FG2};font-size:14px;line-height:1.7;background:transparent;')
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1659,6 +1748,10 @@ class LyricsPanel(QWidget):
             self._style_lbl(self._lbls[self._cur_idx], False)
         self._cur_idx = idx
         self._style_lbl(self._lbls[idx], True)
+        prev_t = self._synced[idx-1][1] if idx > 0 else ''
+        cur_t  = self._synced[idx][1]
+        nxt_t  = self._synced[idx+1][1] if idx < len(self._synced)-1 else ''
+        self.lyrics_context.emit(prev_t, cur_t, nxt_t)
         # Inertia scroll via QPropertyAnimation
         step   = self._LINE_H + self._LINE_SP
         target = idx * step - self._scroll.height() // 2 + self._LINE_H // 2
@@ -2210,8 +2303,17 @@ class BlackoutOverlay(QWidget):
         # Track / position state
         self._title  = ''
         self._artist = ''
+        self._album  = ''
         self._pos_ms = 0
         self._dur_ms = 0
+        # Overlay feature flags
+        self._ctrlbar_ref  = None
+        self._ov_viz    = False
+        self._ov_lyrics = False
+        # Visualization data (list of normalised 0..1 values, VIZ_BANDS long)
+        self._viz_data: list = []
+        # Lyrics state (prev, cur, next)
+        self._lyr_prev = ''; self._lyr_cur = ''; self._lyr_next = ''
 
         # Widget offset (randomised each cycle)
         self._ox = 0.3; self._oy = 0.35   # fractional position 0..1
@@ -2237,13 +2339,38 @@ class BlackoutOverlay(QWidget):
         self._cycle_timer.timeout.connect(self._start_fade_out)
 
     # ── public api ────────────────────────────────────────────────────────────
-    def set_track(self, title: str, artist: str):
-        self._title = title; self._artist = artist
+    def set_track(self, title: str, artist: str, album: str = ''):
+        self._title = title; self._artist = artist; self._album = album
         if self.isVisible(): self._container.update()
 
     def set_pos(self, pos_ms: int, dur_ms: int):
         self._pos_ms = pos_ms; self._dur_ms = dur_ms
         if self.isVisible(): self._container.update()
+
+    def set_album(self, album: str):
+        self._album = album
+
+    def set_overlay_viz(self, on: bool):
+        self._ov_viz = on
+        self._resize_container()
+        if self.isVisible(): self._container.update()
+        if self._ctrlbar_ref is not None:
+            self._ctrlbar_ref._player._update_spec_active()
+
+    def set_overlay_lyrics(self, on: bool):
+        self._ov_lyrics = on
+        self._resize_container()
+        if self.isVisible(): self._container.update()
+
+    def push_viz_frame(self, spec_normalised: list):
+        """Called from ControlBar with normalised (0..1) bar heights."""
+        self._viz_data = list(spec_normalised)
+        if self._ov_viz and self.isVisible():
+            self._container.update()
+
+    def set_lyrics_context(self, prev: str, cur: str, nxt: str):
+        self._lyr_prev = prev; self._lyr_cur = cur; self._lyr_next = nxt
+        if self.isVisible() and self._ov_lyrics: self._container.update()
 
     # ── dismiss ───────────────────────────────────────────────────────────────
     def _dismiss(self):
@@ -2268,6 +2395,10 @@ class BlackoutOverlay(QWidget):
         self.showFullScreen(); self.raise_(); self.activateWindow()
         self._clock_timer.start()
         self._start_fade_in()
+        # Notify ControlBar so spectrum runs for overlay viz if needed
+        if self._ov_viz and self._ctrlbar_ref is not None:
+            self._ctrlbar_ref.ensure_overlay_spec()
+
 
     def _reposition(self):
         """Randomise container position (keep it well inside screen bounds)."""
@@ -2298,10 +2429,15 @@ class BlackoutOverlay(QWidget):
         self._anim.start()
 
     # ── layout / paint ────────────────────────────────────────────────────────
+    def _resize_container(self):
+        sw = self.width() or 1920
+        extra_h = (OV_VIZ_H if self._ov_viz else 0) + (62 if self._ov_lyrics else 0)
+        self._container.setFixedSize(min(520, sw - 60), 120 + extra_h)
+        if self.isVisible(): self._reposition()
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        # Size the container to fit content (fixed size is fine)
-        self._container.setFixedSize(min(520, self.width()-60), 140)
+        self._resize_container()
         self._reposition()
 
     def paintEvent(self, _):
@@ -2317,49 +2453,84 @@ class BlackoutOverlay(QWidget):
         w, h = r.width(), r.height()
         if w < 10: return
 
-        RED = QColor(ACC)
+        RED  = QColor(ACC)
+        GREY = QColor('#3a3a3a')
+        CENT = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Clock (top)
-        p.setPen(RED)
+        # Layout
+        LYR_H  = 20.0
+        VIZ_H  = float(OV_VIZ_H)
+        BAR_H  = 4.0
+        BAR_W  = w - 20.0
+        # Dynamic BAR_Y: artist bottom (84) + optional lyrics + 18px for time labels
+        lyr_h_total = (3 * LYR_H) if self._ov_lyrics else 0.0
+        BAR_Y = 84.0 + lyr_h_total + 18.0
+
+        # ── Clock ─────────────────────────────────────────────────────────────
         font = p.font(); font.setPixelSize(22); font.setBold(True); p.setFont(font)
-        now = QDateTime.currentDateTime().toString('HH:mm:ss')
-        p.drawText(QRectF(0, 0, w, 30), Qt.AlignmentFlag.AlignCenter, now)
+        p.setPen(RED)
+        p.drawText(QRectF(0, 0, w, 30), CENT,
+                   QDateTime.currentDateTime().toString('HH:mm:ss'))
 
-        # Title
+        # ── Title ─────────────────────────────────────────────────────────────
         font.setPixelSize(18); font.setBold(True); p.setFont(font)
-        title = self._title or '—'
-        fm = QFontMetrics(font)
-        title = fm.elidedText(title, Qt.TextElideMode.ElideRight, int(w))
-        p.drawText(QRectF(0, 34, w, 26), Qt.AlignmentFlag.AlignCenter, title)
+        title = QFontMetrics(font).elidedText(
+            self._title or '—', Qt.TextElideMode.ElideRight, int(w))
+        p.drawText(QRectF(0, 34, w, 26), CENT, title)
 
-        # Artist
+        # ── Artist ────────────────────────────────────────────────────────────
         font.setPixelSize(14); font.setBold(False); p.setFont(font)
-        artist = self._artist or ''
-        fm2 = QFontMetrics(font)
-        artist = fm2.elidedText(artist, Qt.TextElideMode.ElideRight, int(w))
-        p.drawText(QRectF(0, 62, w, 22), Qt.AlignmentFlag.AlignCenter, artist)
+        artist = QFontMetrics(font).elidedText(
+            self._artist or '', Qt.TextElideMode.ElideRight, int(w))
+        p.drawText(QRectF(0, 62, w, 22), CENT, artist)
 
-        # Progress bar
-        if self._dur_ms > 0:
-            frac = max(0.0, min(1.0, self._pos_ms / self._dur_ms))
-            bar_y = 94.0; bar_h = 4.0; bar_w = w - 20
-            # track
-            p.setPen(Qt.PenStyle.NoPen)
-            dark = QColor(ACC); dark.setAlpha(55)
-            p.setBrush(QBrush(dark))
-            p.drawRoundedRect(QRectF(10, bar_y, bar_w, bar_h), 2, 2)
-            # fill
+        # ── Overlay LYRICS (artist → lyrics → progress bar) ──────────────────
+        if self._ov_lyrics:
+            font.setPixelSize(13); p.setFont(font)
+            fm3 = QFontMetrics(font)
+            y = 86.0
+            for txt, color in [
+                (self._lyr_prev, GREY),
+                (self._lyr_cur,  RED),
+                (self._lyr_next, GREY),
+            ]:
+                etxt = fm3.elidedText(txt or '', Qt.TextElideMode.ElideRight, int(BAR_W))
+                p.setPen(color)
+                p.drawText(QRectF(10, y, BAR_W, LYR_H), CENT, etxt)
+                y += LYR_H
+
+        # ── Progress bar ──────────────────────────────────────────────────────
+        frac = (max(0.0, min(1.0, self._pos_ms / self._dur_ms))
+                if self._dur_ms > 0 else 0.0)
+        font.setPixelSize(12); p.setFont(font)
+        p.setPen(RED)
+        p.drawText(QRectF(10, BAR_Y - 15, 60, 14),
+                   Qt.AlignmentFlag.AlignLeft, _fmt_ms(self._pos_ms))
+        p.drawText(QRectF(w - 70, BAR_Y - 15, 62, 14),
+                   Qt.AlignmentFlag.AlignRight, _fmt_ms(self._dur_ms))
+        p.setPen(Qt.PenStyle.NoPen)
+        dark = QColor(ACC); dark.setAlpha(55)
+        p.setBrush(QBrush(dark))
+        p.drawRoundedRect(QRectF(10, BAR_Y, BAR_W, BAR_H), 2, 2)
+        if frac > 0:
             p.setBrush(QBrush(RED))
-            if frac > 0:
-                p.drawRoundedRect(QRectF(10, bar_y, bar_w*frac, bar_h), 2, 2)
-            # time labels
-            p.setPen(RED)
-            font.setPixelSize(12); p.setFont(font)
-            p.drawText(QRectF(8, 101, 60, 18), Qt.AlignmentFlag.AlignLeft,
-                       _fmt_ms(self._pos_ms))
-            p.drawText(QRectF(w-70, 101, 62, 18), Qt.AlignmentFlag.AlignRight,
-                       _fmt_ms(self._dur_ms))
+            p.drawRoundedRect(QRectF(10, BAR_Y, BAR_W * frac, BAR_H), 2, 2)
+
+        # ── Overlay VIZ (docked to bottom of progress bar, bars hang down) ──
+        if self._ov_viz and self._viz_data:
+            viz_y = BAR_Y + BAR_H
+            n_v = len(self._viz_data)
+            bw_v = BAR_W / max(1, n_v)
+            p.setPen(Qt.PenStyle.NoPen)
+            bar_col = QColor(ACC); bar_col.setAlpha(200)
+            p.setBrush(QBrush(bar_col))
+            p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+            for i, norm in enumerate(self._viz_data):
+                if norm < 0.01: continue
+                bh = norm * VIZ_H
+                p.drawRect(QRectF(10 + i * bw_v, viz_y, max(1.0, bw_v), bh))
+            p.setClipping(False)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -3108,6 +3279,218 @@ class TagFetchPopup(QDialog):
         self._progress.setValue(total)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Library Lyrics Fetch Worker + Popup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LibraryLyricsFetchWorker(QObject):
+    """Fetches and embeds lyrics for library tracks that have no embedded lyrics.
+    Runs sequentially in a worker thread; emits per-track results back to the UI."""
+    progress   = pyqtSignal(int, int, str)        # current, total, track_name
+    track_done = pyqtSignal(str, bool)             # filepath, found_flag
+    finished   = pyqtSignal(int, int)              # found_count, total_needs
+
+    def __init__(self, tracks: list):
+        super().__init__()
+        self._tracks    = list(tracks)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        # Only process tracks that have no embedded lyrics yet
+        needs = [t for t in self._tracks if not any(_extract_embedded_lyrics(t.filepath))]
+        total = len(needs)
+        found = 0
+        for i, t in enumerate(needs):
+            if self._cancelled:
+                break
+            name = t.title or Path(t.filepath).stem
+            self.progress.emit(i + 1, total, name)
+            artist = (t.artist or '').strip()
+            title  = (t.title  or '').strip()
+            album  = (t.album  or '').strip()
+            # Run the same multi-source fetch used by LyricsFetcher
+            synced, plain = None, None
+            for src_fn in [
+                lambda: _src_lrclib_exact(artist, title, album, t.duration),
+                lambda: _src_lrclib_search(artist, title),
+                lambda: _src_lyrics_ovh(artist, title),
+            ]:
+                try:
+                    s, p = src_fn()
+                    if s:
+                        synced = s; break
+                    if p and not plain:
+                        plain = p
+                except Exception:
+                    pass
+            if synced or plain:
+                ok = embed_lyrics(t.filepath, synced, plain)
+                self.track_done.emit(t.filepath, ok)
+                if ok:
+                    found += 1
+            else:
+                self.track_done.emit(t.filepath, False)
+        self.finished.emit(found, total)
+
+
+class LyricsFetchPopup(QDialog):
+    """Modal dialog that fetches and embeds lyrics for all library tracks
+    that do not yet have embedded lyrics. Identical UI style to CoverFetchPopup."""
+
+    def __init__(self, tracks: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Fetch Lyrics')
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self._tracks  = list(tracks)
+        self._thread  = None
+        self._worker  = None
+        self._found   = 0
+        self._running = False
+        self._needs   = [t for t in self._tracks
+                         if not any(_extract_embedded_lyrics(t.filepath))]
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(20, 18, 20, 18)
+
+        title_lbl = QLabel('Fetch Lyrics for Library')
+        title_lbl.setStyleSheet(f'font-size:14px;font-weight:bold;color:{FG};')
+        root.addWidget(title_lbl)
+
+        info_lbl = QLabel(
+            f'<b>{len(self._needs)}</b> tracks have no embedded lyrics '
+            f'(out of {len(self._tracks)} total — tracks with embedded lyrics are skipped).')
+        info_lbl.setWordWrap(True)
+        info_lbl.setStyleSheet(f'color:{FG2};font-size:12px;')
+        root.addWidget(info_lbl)
+
+        self._track_lbl = QLabel('')
+        self._track_lbl.setStyleSheet(f'color:{FG};font-size:12px;')
+        self._track_lbl.setWordWrap(True)
+        root.addWidget(self._track_lbl)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, max(1, len(self._needs)))
+        self._progress.setValue(0)
+        self._progress.setTextVisible(True)
+        self._progress.setFixedHeight(22)
+        self._progress.setStyleSheet(
+            f'QProgressBar{{background:{BG3};border:1px solid {B2};border-radius:4px;'
+            f'color:{FG};font-size:11px;text-align:center;}}'
+            f'QProgressBar::chunk{{background:{ACC};border-radius:3px;}}')
+        root.addWidget(self._progress)
+
+        self._log = QListWidget()
+        self._log.setFixedHeight(140)
+        self._log.setStyleSheet(
+            'QListWidget{background:#000000;border:1px solid ' + B2 + ';border-radius:4px;'
+            'color:' + FG2 + ';font-size:10px;outline:none;}'
+            'QListWidget::item{padding:1px 6px;border:none;}'
+            'QListWidget::item:selected{background:transparent;color:' + FG2 + ';}')
+        self._log.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        QScroller.grabGesture(self._log.viewport(),
+                              QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        _sp = QScrollerProperties()
+        _sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,     0.35)
+        _sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,        0.8)
+        _sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
+                            QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        _sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
+                            QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        QScroller.scroller(self._log.viewport()).setScrollerProperties(_sp)
+        root.addWidget(self._log)
+
+        self._result_lbl = QLabel('')
+        self._result_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
+        root.addWidget(self._result_lbl)
+
+        btn_row = QHBoxLayout()
+        self._btn_start  = QPushButton('Start')
+        self._btn_cancel = QPushButton('Cancel')
+        self._btn_cancel.setEnabled(False)
+        self._btn_close  = QPushButton('Close')
+        btn_row.addWidget(self._btn_start)
+        btn_row.addWidget(self._btn_cancel)
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_close)
+        root.addLayout(btn_row)
+
+        self._btn_start.clicked.connect(self._start)
+        self._btn_cancel.clicked.connect(self._cancel)
+        self._btn_close.clicked.connect(self._on_close)
+
+    def _log_add(self, text: str, ok: bool):
+        item = QListWidgetItem(text)
+        item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
+        self._log.addItem(item)
+        self._log.scrollToBottom()
+
+    def _start(self):
+        if self._running: return
+        self._running = True
+        self._found   = 0
+        self._log.clear()
+        self._progress.setValue(0)
+        self._result_lbl.setText('')
+        self._btn_start.setEnabled(False)
+        self._btn_cancel.setEnabled(True)
+
+        worker = LibraryLyricsFetchWorker(self._tracks)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_progress)
+        worker.track_done.connect(self._on_track_done)
+        worker.finished.connect(self._on_finished)
+        worker.finished.connect(thread.quit)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _cancel(self):
+        if self._worker: self._worker.cancel()
+        self._btn_cancel.setEnabled(False)
+        self._track_lbl.setText('Cancelling…')
+
+    def _on_close(self):
+        self._cancel()
+        if self._thread and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(3000)
+        self._thread = None
+        self.accept()
+
+    def closeEvent(self, e):
+        self._cancel()
+        if self._thread and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(3000)
+        self._thread = None
+        super().closeEvent(e)
+
+    def _on_progress(self, current: int, total: int, name: str):
+        self._progress.setValue(current)
+        self._track_lbl.setText(f'[{current}/{total}]  {name}')
+
+    def _on_track_done(self, fp: str, found: bool):
+        name = Path(fp).stem
+        self._log_add(f'{"OK  " if found else "FAIL"} {name}', found)
+        if found:
+            self._found += 1
+
+    def _on_finished(self, found: int, total: int):
+        self._running = False
+        self._btn_start.setEnabled(True)
+        self._btn_cancel.setEnabled(False)
+        self._track_lbl.setText('Done.')
+        self._result_lbl.setText(f'Embedded lyrics for {found} out of {total} tracks.')
+        self._progress.setValue(total)
+
+
 def scan_folder(folder: str) -> List[Track]:
     out = []
     for root, dirs, files in os.walk(folder):
@@ -3188,11 +3571,14 @@ def peaking_coefficients(fs, f0, gain_db, Q):
 
 
 class Player(QObject):
-    sig_pos      = pyqtSignal(int)
-    sig_dur      = pyqtSignal(int)
-    sig_end      = pyqtSignal()
-    sig_err      = pyqtSignal(str)
-    sig_spectrum = pyqtSignal(list)
+    sig_pos       = pyqtSignal(int)
+    sig_dur       = pyqtSignal(int)
+    sig_end       = pyqtSignal()
+    sig_err       = pyqtSignal(str)
+    sig_spectrum  = pyqtSignal(list)
+    sig_seek_flush = pyqtSignal()
+    sig_playing   = pyqtSignal(bool)
+    sig_seek     = pyqtSignal()   # emitted after seek to flush viz queue
 
     _SPEC_INTERVAL_NS = 16_666_667   # 60 fps
 
@@ -3213,7 +3599,7 @@ class Player(QObject):
         self._volume:  float = 0.8
         self._viz_on:  bool  = True
         self._spec_lock   = threading.Lock()
-        self._spec_latest: Optional[list] = None
+        self._spec_queue: list = []
 
         # EQ related
         self._eq_enabled = True
@@ -3231,7 +3617,7 @@ class Player(QObject):
         threading.Thread(target=self._glib_loop.run, daemon=True, name='glib').start()
 
         self._pos_timer  = QTimer(self)
-        self._pos_timer.setInterval(250)
+        self._pos_timer.setInterval(100)
         self._pos_timer.timeout.connect(self._tick_pos)
 
         self._spec_timer = QTimer(self)
@@ -3253,7 +3639,7 @@ class Player(QObject):
 
     def load(self, filepath: str):
         self._destroy()
-        with self._spec_lock: self._spec_latest = None
+        with self._spec_lock: self._spec_queue.clear()
         self._pipe = Gst.ElementFactory.make('playbin', None)
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
@@ -3280,15 +3666,31 @@ class Player(QObject):
         bus.add_signal_watch(); bus.connect('message', self._on_msg)
         self._pipe.set_state(Gst.State.PLAYING)
         self._playing = True; self._pos_timer.start()
+        self.sig_playing.emit(True)
 
     def play_pause(self):
         if not self._pipe: return
         if self._playing:
             self._pipe.set_state(Gst.State.PAUSED)
             self._playing = False; self._pos_timer.stop()
+            self.sig_playing.emit(False)
         else:
+            _, st, _ = self._pipe.get_state(timeout=50 * Gst.MSECOND)
+            if st in (Gst.State.NULL, Gst.State.READY, Gst.State.VOID_PENDING):
+                # Pipeline degraded — reload at saved position
+                uri = self._pipe.get_property('uri') or ''
+                if uri:
+                    import urllib.parse as _up
+                    fp = _up.unquote(uri.replace('file://', ''))
+                    ok2, pos = self._pipe.query_position(Gst.Format.TIME)
+                    pos_ms = pos // Gst.MSECOND if ok2 and pos > 0 else 0
+                    self.load(fp)
+                    if pos_ms > 500:
+                        QTimer.singleShot(300, lambda p=pos_ms: self.seek(p))
+                    return
             self._pipe.set_state(Gst.State.PLAYING)
             self._playing = True; self._pos_timer.start()
+            self.sig_playing.emit(True)
 
     def stop(self): self._destroy()
 
@@ -3308,22 +3710,34 @@ class Player(QObject):
                 max(0, ms) * Gst.MSECOND)
             if self._playing:
                 self._pipe.set_state(Gst.State.PLAYING)
+            self.sig_seek_flush.emit()
         except Exception as ex:
             print(f'[Player] seek error: {ex}')
+        # Signal ControlBar to flush stale viz frames after seek
+        self.sig_seek.emit()
 
     def set_volume(self, v: float):
         self._volume = max(0.0, min(1.0, v))
         if self._pipe: self._pipe.set_property('volume', self._volume)
 
+    def set_overlay_viz_needed(self, on: bool):
+        """Called when overlay viz is toggled — keeps spectrum running independently."""
+        self._overlay_needs_spec = on
+        self.set_viz_active(self._viz_on)  # re-evaluate need
+
     def set_viz_active(self, on: bool):
         self._viz_on = on
-        if self._spec_el: self._spec_el.set_property('post-messages', on)
-        if on: self._spec_timer.start()
-        else:
-            self._spec_timer.stop()
-            with self._spec_lock: self._spec_latest = None
+        self._update_spec_active()
 
-    # --- EQ methods ---
+    def set_overlay_needs_spectrum(self, on: bool):
+        self._overlay_needs_spec = on
+        self._update_spec_active()
+
+    def _update_spec_active(self):
+        # Always post messages when pipeline is running.
+        # _apply_frame decides whether to render display vs overlay.
+        if self._spec_el: self._spec_el.set_property('post-messages', True)
+        self._spec_timer.start()
     def set_eq_enabled(self, enabled: bool):
         if self._eq_enabled == enabled:
             return
@@ -3408,7 +3822,7 @@ class Player(QObject):
 
         # Then spectrum if available
         if self._has_spec:
-            spec_desc = (f'spectrum name=bp_spec bands={VIZ_BANDS} '
+            spec_desc = (f'spectrum name=bp_spec bands={GST_BANDS} '
                          f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
                          f'post-messages=false message-magnitude=true message-phase=false')
             try:
@@ -3522,16 +3936,27 @@ class Player(QObject):
 
     def _tick_spec(self):
         with self._spec_lock:
-            data = self._spec_latest; self._spec_latest = None
-        if data is not None: self.sig_spectrum.emit(data)
+            pending = self._spec_queue
+            self._spec_queue = []
+        if not pending: return
+        if len(pending) == 1:
+            self.sig_spectrum.emit(pending[0])
+        else:
+            n = len(pending[0])
+            merged = [max(pending[k][i] for k in range(len(pending)))
+                      for i in range(n)]
+            self.sig_spectrum.emit(merged)
 
     def _on_msg(self, _bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            self._playing = False; self._pos_timer.stop(); self.sig_end.emit()
+            self._playing = False; self._pos_timer.stop()
+            # Flush to NULL so play_pause state check is clean
+            GLib.idle_add(lambda: self._pipe.set_state(Gst.State.NULL) if self._pipe else None)
+            self.sig_end.emit()
         elif msg.type == Gst.MessageType.ERROR:
             err, _ = msg.parse_error(); self._destroy(); self.sig_err.emit(str(err))
         elif msg.type == Gst.MessageType.ELEMENT:
-            if not self._viz_on: return
+            if not self._viz_on and not getattr(self, '_overlay_needs_spec', False): return
             s = msg.get_structure()
             if s and s.get_name() == 'spectrum': self._parse_spectrum(s)
 
@@ -3540,7 +3965,7 @@ class Player(QObject):
             m = self._SPEC_RE.search(s.to_string())
             if m:
                 data = [float(x.strip()) for x in m.group(1).split(',') if x.strip()]
-                with self._spec_lock: self._spec_latest = data[:VIZ_BANDS]
+                with self._spec_lock: self._spec_queue.append(data[:GST_BANDS])
                 return
         except Exception: pass
         try:
@@ -3549,8 +3974,8 @@ class Player(QObject):
                     val = s.get_value('magnitude')
                     if val is not None and hasattr(val, '__len__'):
                         with self._spec_lock:
-                            self._spec_latest = [float(val[j])
-                                                 for j in range(min(VIZ_BANDS, len(val)))]
+                            self._spec_queue.append([float(val[j])
+                                for j in range(min(GST_BANDS, len(val)))])
                     break
         except Exception: pass
 
@@ -4077,7 +4502,7 @@ class PlaylistPage(QWidget):
 #  Sidebar (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 class _PlaylistRowWidget(QWidget):
-    """A sidebar playlist row: [X btn] [label] — delete button on the far left."""
+    """A sidebar playlist row: [label] [X btn] — delete button on the far right."""
     delete_clicked = pyqtSignal()
     select_clicked = pyqtSignal()
 
@@ -4086,10 +4511,13 @@ class _PlaylistRowWidget(QWidget):
         self.setFixedHeight(44)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 10, 0)
+        lay.setContentsMargins(14, 0, 8, 0)
         lay.setSpacing(4)
 
-        # Accent-coloured X button on the far left
+        self._lbl = QLabel(label)
+        self._lbl.setStyleSheet(f'color:{FG}; font-size:12px; background:transparent;')
+
+        # Accent-coloured X button on the far right
         self._del_btn = QPushButton('✕')
         self._del_btn.setFixedSize(22, 22)
         self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4101,11 +4529,8 @@ class _PlaylistRowWidget(QWidget):
         self._del_btn.setToolTip('Remove playlist')
         self._del_btn.clicked.connect(self.delete_clicked)
 
-        self._lbl = QLabel(label)
-        self._lbl.setStyleSheet(f'color:{FG}; font-size:12px; background:transparent;')
-
-        lay.addWidget(self._del_btn)
         lay.addWidget(self._lbl, 1)
+        lay.addWidget(self._del_btn)
 
     def set_selected(self, on: bool):
         c = ACC if on else FG
@@ -4358,20 +4783,18 @@ class ControlBar(QFrame):
         self._dur_ms    = 0
         self._seeking   = False
         self._viz_on    = True
-        self._log_scale = True
-        self._spec      = [MIN_DB] * VIZ_BANDS
+        self._overlay_viz_enabled = False
+        self._log_scale = True  # True=dB linear height (standard), False=linear amplitude
+        self._spec      = [MIN_DB] * GST_BANDS
         self._bar_pos:  list = []
         self._bar_color = QColor(44, 36, 36)
         self._cur_track: Optional[Track] = None
         self._inertia   = 0.5
         self._viz_paused= False
 
-        self._frame_queue = deque(maxlen=240)
+        self._frame_flush_ts = 0
         self._delay_ms    = 0
-        self._delay_timer = QTimer(self)
-        self._delay_timer.setInterval(16)
-        self._delay_timer.timeout.connect(self._update_delayed_frame)
-        self._delay_timer.start()
+        self._pending_frame = None  # (data,) tuple when delay active
 
         # Settings and EQ popups (lazy-created)
         self._settings_popup: Optional[SettingsPopup] = None
@@ -4495,6 +4918,9 @@ class ControlBar(QFrame):
         player.sig_pos.connect(self._on_pos)
         player.sig_dur.connect(self._on_dur)
         player.sig_spectrum.connect(self._on_spectrum)
+        player.sig_playing.connect(self._on_playing_changed)
+        player.sig_seek_flush.connect(self._on_seek_flush)
+        player.sig_seek.connect(self._on_seek_flush)
         self._seek.sliderPressed.connect(self._on_press)
         self._seek.sliderReleased.connect(self._on_release)
         self._seek.sliderMoved.connect(self._on_moved)
@@ -4538,7 +4964,16 @@ class ControlBar(QFrame):
             pop.cover_toggled.connect(self._on_cover_toggle)
             pop.accent_changed.connect(self._on_accent_change)
             pop.lyrics_fetch_toggled.connect(self._on_lyrics_fetch_toggle)
+            pop.overlay_viz_toggled.connect(self.set_overlay_viz_enabled)
+            pop.overlay_viz_toggled.connect(
+                lambda on: getattr(self, '_blackout_ref', None) and
+                           self._blackout_ref.set_overlay_viz(on))
+            pop.overlay_viz_toggled.connect(self._player.set_overlay_viz_needed)
+            pop.overlay_lyrics_toggled.connect(
+                lambda on: getattr(self, '_blackout_ref', None) and
+                           self._blackout_ref.set_overlay_lyrics(on))
             pop.cover_fetch_toggled.connect(self._on_cover_fetch_btn)
+            pop.lyric_fetch_toggled.connect(self._on_lyric_fetch_btn)
             pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
@@ -4557,6 +4992,23 @@ class ControlBar(QFrame):
 
     def _on_lyrics_fetch_toggle(self, on: bool): pass  # LyricsPanel reads ctrlbar flag
 
+    def ensure_overlay_spec(self):
+        """Called when overlay opens — restart spectrum if needed."""
+        self._player.set_overlay_needs_spectrum(True)
+
+    def set_overlay_viz_enabled(self, on: bool):
+        self._overlay_viz_enabled = on
+        self._player.set_overlay_needs_spectrum(on)
+        if on:
+            self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch()
+
+    def set_blackout_ref(self, overlay):
+        self._blackout_ref = overlay
+        if overlay is not None:
+            overlay._ctrlbar_ref = self
+            self._player._ctrlbar_bref = overlay
+
+
     def _on_cover_fetch_btn(self):
         """Open the CoverFetchPopup — triggered by the Settings button."""
         win = self.window()
@@ -4571,8 +5023,18 @@ class ControlBar(QFrame):
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
         dlg.exec()
 
+    def _on_lyric_fetch_btn(self):
+        """Open the LyricsFetchPopup — triggered by the Settings button."""
+        win = self.window()
+        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
+        if not all_tracks:
+            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
+            return
+        if self._settings_popup: self._settings_popup.hide()
+        dlg = LyricsFetchPopup(all_tracks, parent=win)
+        dlg.exec()
+
     def _on_tag_fetch_btn(self):
-        """Open the TagFetchPopup — triggered by the Settings button."""
         win = self.window()
         all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
         if not all_tracks:
@@ -4601,39 +5063,62 @@ class ControlBar(QFrame):
         if pop.isVisible(): pop.hide()
         else: pop.show_above(self.btn_settings)
 
+    @staticmethod
+    def _coerce_bands(bands) -> list:
+        """JSON round-trip'te string gelen freq/gain/Q değerlerini float'a çevirir."""
+        result = []
+        for b in bands:
+            try:
+                result.append([float(b[0]), float(b[1]), float(b[2])])
+            except (TypeError, ValueError, IndexError):
+                pass
+        return result
+
     def init_from_config(self, cfg: dict):
-        # Settings popup
+        # Settings popup — JSON'dan string gelebilen sayısal değerleri coerce et
         pop = self._ensure_settings_popup()
-        volume = int(float(cfg.get('volume', 80)))     
-        pop.set_delay(cfg.get('viz_delay_ms', 0))
-        pop.set_inertia(cfg.get('inertia', 50))
+        volume  = int(float(cfg.get('volume',       80)))
+        delay   = int(float(cfg.get('viz_delay_ms',  0)))
+        inertia = int(float(cfg.get('inertia',       50)))
+        bright  = int(float(cfg.get('brightness',    40)))
+        pop.set_volume(volume)
+        pop.set_delay(delay)
+        pop.set_inertia(inertia)
         viz = cfg.get('viz_on', True); log = cfg.get('log_on', True)
         pop.set_viz(viz); pop.set_log(log)
         self._on_viz_toggle(viz); self._on_log_toggle(log)
-        self._on_delay_change(cfg.get('viz_delay_ms', 0))
-        self._on_inertia_change(cfg.get('inertia', 50))
+        self._on_delay_change(delay)
+        self._on_inertia_change(inertia)
         acc_color = cfg.get('accent_color', ACC)
         pop.set_accent_color(acc_color)
         if acc_color != '#e03030': self._on_accent_change(acc_color)
-        bright = cfg.get('brightness', 40)
         pop.set_brightness(bright); self._on_brightness_change(bright)
         cover = cfg.get('cover_on', True)
         pop.set_cover(cover); self._on_cover_toggle(cover)
         pop.set_lyrics_fetch(cfg.get('lyrics_fetch_on', True))
+        _ov_viz = cfg.get('overlay_viz', False)
+        _ov_lyr = cfg.get('overlay_lyrics', False)
+        pop.set_overlay_viz(_ov_viz)
+        pop.set_overlay_lyrics(_ov_lyr)
+        self.set_overlay_viz_enabled(_ov_viz)
+        if hasattr(self, '_blackout_ref') and self._blackout_ref:
+            self._blackout_ref.set_overlay_viz(_ov_viz)
+            self._blackout_ref.set_overlay_lyrics(_ov_lyr)
         _cf = cfg.get('cover_fetch_on', True)
         pop.set_cover_fetch(_cf)
         global _cover_fetch_on; _cover_fetch_on = _cf
-        self._player.set_volume(cfg.get('volume', 80) / 100)
+        self._player.set_volume(volume / 100)
 
         # EQ popup profiles and default state
         eq_pop = self._ensure_eq_popup()
-        eq_profiles = cfg.get('eq_profiles', {})
+        raw_profiles = cfg.get('eq_profiles', {})
+        eq_profiles  = {k: self._coerce_bands(v) for k, v in raw_profiles.items()}
         eq_pop.set_profiles(eq_profiles)
 
         # Load default EQ (if any) and apply it
-        default_bands = cfg.get('default_eq_bands', [])
+        default_bands   = self._coerce_bands(cfg.get('default_eq_bands', []))
         default_enabled = cfg.get('default_eq_enabled', True)
-        default_name = cfg.get('default_eq_profile', '')
+        default_name    = cfg.get('default_eq_profile', '')
         eq_pop.set_default(default_bands, default_enabled, default_name)
         eq_pop.set_bands(default_bands, default_enabled, default_name)
         # Apply to player
@@ -4645,6 +5130,8 @@ class ControlBar(QFrame):
         pop = self._ensure_settings_popup()
         cfg.update({'volume': pop.volume(), 'viz_delay_ms': pop.delay(),
                     'viz_on': pop.viz_on(), 'log_on': pop.log_on(),
+                    'overlay_viz': pop.overlay_viz_on(),
+                    'overlay_lyrics': pop.overlay_lyrics_on(),
                     'inertia': pop.inertia(), 'brightness': pop.brightness(),
                     'cover_on': pop.cover_on(), 'accent_color': pop.accent_color(),
                     'lyrics_fetch_on': pop.lyrics_fetch_on(),
@@ -4661,22 +5148,90 @@ class ControlBar(QFrame):
     def resizeEvent(self, e): super().resizeEvent(e); self._precompute_bars()
 
     def _precompute_bars(self):
-        w   = float(self.width())
-        gap = 1.0 if w >= VIZ_BANDS * 3 else 0.0
-        total_gap = gap * (VIZ_BANDS - 1)
-        bw  = max(1.0, (w - total_gap) / VIZ_BANDS)
-        stride = bw + gap
-        self._bar_pos = [(i * stride, bw) for i in range(VIZ_BANDS)]
+        w = float(self.width())
+        if w < 2: return
+        # Always 256 bars, uniform width, 1px gap
+        gap       = 1.0 if w >= VIZ_BANDS * 3 else 0.0
+        bw        = max(1.0, (w - gap * (VIZ_BANDS - 1)) / VIZ_BANDS)
+        stride_px = bw + gap
+        self._bar_pos = [(int(round(d * stride_px)), bw) for d in range(VIZ_BANDS)]
+
+        if getattr(self, '_log_scale', True):
+            # Log frequency: fractional centre-freq interpolation.
+            # fracs[d] = continuous spec band index for bar d's centre freq.
+            # For bars whose frac has a unique integer part (high freq): t alone
+            # gives a unique value — no blending needed.
+            # For low-freq runs where multiple bars share the same integer b0,
+            # apply a spatial box-filter to hide the flat block.
+            F_MIN = 20.0; F_MAX = 20000.0; FS_HALF = 24000.0
+            FULL_HZ = 20.0; FADE_HZ = 60.0
+            log_min = math.log10(F_MIN); log_max = math.log10(F_MAX)
+
+            fracs = []; fc_hz = []
+            for d in range(VIZ_BANDS):
+                f_lo = 10.0 ** (log_min + d / VIZ_BANDS * (log_max - log_min))
+                f_hi = 10.0 ** (log_min + (d+1) / VIZ_BANDS * (log_max - log_min))
+                fc = (f_lo * f_hi) ** 0.5
+                fracs.append(fc * GST_BANDS / FS_HALF)
+                fc_hz.append(fc)
+
+            # Interp table: bar d → lerp(spec[b0], spec[b1], t)
+            interp = []
+            for frac in fracs:
+                b0 = max(0, min(GST_BANDS-1, int(frac)))
+                b1 = min(b0+1, GST_BANDS-1)
+                interp.append((b0, b1, frac - int(frac)))
+
+            # Box-filter weights (only for shared-b0 runs below FADE_HZ)
+            b0s = [int(f) for f in fracs]
+            run_len_at = {}
+            d = 0
+            while d < VIZ_BANDS:
+                b0 = b0s[d]; start = d
+                while d < VIZ_BANDS and b0s[d] == b0: d += 1
+                for k in range(start, d): run_len_at[k] = d - start
+            smooth_w = []
+            for d in range(VIZ_BANDS):
+                fc = fc_hz[d]; rl = run_len_at.get(d, 1)
+                if fc >= FADE_HZ or rl <= 1:
+                    smooth_w.append(None)   # None = read directly (no blending)
+                else:
+                    strength = (1.0 if fc < FULL_HZ
+                                else 1.0 - (fc - FULL_HZ) / (FADE_HZ - FULL_HZ))
+                    hw = max(1, int((rl // 2) * strength))
+                    lo = max(0, d - hw); hi = min(VIZ_BANDS-1, d + hw)
+                    n  = hi - lo + 1
+                    smooth_w.append(tuple((nb, 1.0/n) for nb in range(lo, hi+1)))
+            self._bar_interp  = interp
+            self._smooth_w    = smooth_w
+        else:
+            # Linear: bar d samples 0-20kHz uniformly using GST_BANDS resolution
+            _lin_scale = (20000.0 / 24000.0) * GST_BANDS / VIZ_BANDS  # ~6.67
+            _lin_interp = []
+            for d in range(VIZ_BANDS):
+                frac = d * _lin_scale
+                b0 = max(0, min(GST_BANDS-1, int(frac)))
+                b1 = min(b0+1, GST_BANDS-1)
+                _lin_interp.append((b0, b1, frac - int(frac)))
+            self._bar_interp    = _lin_interp
+            self._smooth_w      = None
 
     def _on_viz_toggle(self, on: bool):
-        self._viz_on = on; self._player.set_viz_active(on and not self._viz_paused)
+        self._viz_on = on
+        # Always call _update_spec_active so overlay keeps running if needed
+        self._player.set_viz_active(on and not self._viz_paused)
         if not on:
-            self._frame_queue.clear()
-            for i in range(VIZ_BANDS): self._spec[i] = MIN_DB
+            _bref = getattr(self, '_blackout_ref', None)
+            _ov_on = _bref is not None and getattr(_bref, '_ov_viz', False)
+            if not _ov_on:
+                for i in range(len(self._spec)): self._spec[i] = MIN_DB
+                self._bar_heights = []
         self.update()
 
     def _on_log_toggle(self, on: bool):
-        self._log_scale = on; self.update()
+        self._log_scale = on
+        self._precompute_bars()
+        self.update()
 
     def _on_delay_change(self, v: int):
         self._delay_ms = v
@@ -4692,6 +5247,7 @@ class ControlBar(QFrame):
         tint = QColor()
         tint.setHsvF(h, s * 0.50, lv * (v / 100.0) * 0.55)
         self._bar_color = tint
+        self._brush_cache = QBrush(tint)
         self.update()
 
     def _on_accent_change(self, color: str):
@@ -4715,70 +5271,118 @@ class ControlBar(QFrame):
         # Propagate to main window via signal
         self.cover_on_changed.emit(on)
 
+    def _on_seek_flush(self):
+        """Block stale frames for 200ms after seek, then re-open."""
+        self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch() + 200
+        for i in range(len(self._spec)): self._spec[i] = MIN_DB
+        self.update()
+
     def set_focus_paused(self, paused: bool):
         self._viz_paused = paused
         self._player.set_viz_active(self._viz_on and not paused)
+        if getattr(self, '_overlay_viz_enabled', False):
+            self._player.set_overlay_needs_spectrum(True)
         if paused:
-            self._frame_queue.clear()
-            for i in range(VIZ_BANDS): self._spec[i] = MIN_DB
-            self.update()
+            # Only flush if overlay viz is NOT active (overlay needs live frames)
+            _bref = getattr(self, '_blackout_ref', None)
+            _ov_on = _bref is not None and getattr(_bref, '_ov_viz', False)
+            if not _ov_on:
+                self._on_seek_flush()
+            else:
+                # Clear display bars but keep accepting frames for overlay
+                for i in range(len(self._spec)): self._spec[i] = MIN_DB
+                self._bar_heights = []
+                self.update()
 
     @pyqtSlot(list)
     def _on_spectrum(self, data: list):
-        self._frame_queue.append((QDateTime.currentMSecsSinceEpoch(), data))
+        if QDateTime.currentMSecsSinceEpoch() <= self._frame_flush_ts:
+            return  # stale frame from before flush
+        if self._delay_ms <= 0:
+            self._apply_frame(data)
+        else:
+            d = list(data)  # capture
+            QTimer.singleShot(self._delay_ms,
+                              lambda: self._apply_delayed(d))
 
-    def _update_delayed_frame(self):
-        if not self._viz_on or self._viz_paused or not self._frame_queue: return
-        target = QDateTime.currentMSecsSinceEpoch() - self._delay_ms
-        best = None; best_diff = float('inf')
-        for ts, frame in self._frame_queue:
-            diff = target - ts
-            if 0 <= diff < best_diff: best_diff = diff; best = frame
-        if best is not None:
-            alpha = self._inertia; n = min(VIZ_BANDS, len(best))
-            for i in range(n):
-                self._spec[i] = (1-alpha)*best[i] + alpha*self._spec[i]
+    def _apply_delayed(self, data: list):
+        """Called by singleShot after delay_ms when delay > 0."""
+        if QDateTime.currentMSecsSinceEpoch() > self._frame_flush_ts:
+            self._apply_frame(data)
+
+    def _apply_frame(self, data: list):
+        """Apply spectrum frame, precompute bar heights, trigger display."""
+        _bref = getattr(self, '_blackout_ref', None)
+        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False)
+        _disp = self._viz_on and not self._viz_paused
+        if not _disp and not _ov:
+            return
+        alpha = self._inertia; n = min(GST_BANDS, len(data))
+        _sp = self._spec
+        for i in range(n):
+            _sp[i] = (1-alpha)*data[i] + alpha*_sp[i]
+        # Precompute bar heights once — reused by paintEvent and overlay
+        _it = self._bar_interp; _sw = self._smooth_w
+        N_sp = n; _MDB = MIN_DB; _isp = 1.0/(-MIN_DB)
+        _bh = [0.0] * VIZ_BANDS
+        if _it:
+            for _d in range(VIZ_BANDS):
+                ba, bb, t = _it[_d]
+                da = _sp[ba] if ba < N_sp else _MDB
+                dv = da + t*(_sp[bb]-da) if t and bb < N_sp else da
+                if dv > _MDB: _bh[_d] = ((dv-_MDB)*_isp)**0.5
+        if _sw:
+            for _d in range(VIZ_BANDS):
+                sw = _sw[_d]
+                if sw is not None:
+                    _bh[_d] = sum(_bh[nb]*wk for nb,wk in sw)
+        self._bar_heights = _bh
+        if _disp:
             self.update()
-
+        if _ov:
+            _bref.push_viz_frame(_bh)
     def paintEvent(self, _):
         p = QPainter(self); p.fillRect(self.rect(), QColor('#000000'))
         if self._viz_on and not self._viz_paused and self._bar_pos:
             h = float(self.height()); w = float(self.width()); span = -MIN_DB
             _bw = self._bar_pos[0][1] if self._bar_pos else 2.0
-            # Radius ≤ half bar width so semicircle fits cleanly
-            rad = min(3.0, _bw * 0.5)
-            use_aa = _bw >= 1.5
+            rad = _bw * 0.50  # 50% of bw = perfect semicircle tops
+            use_aa = _bw >= 2.0
             p.setPen(Qt.PenStyle.NoPen)
             if use_aa:
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
             # Clip to widget so that bars drawn *below* h are cut off;
             # this makes the bottom corners invisible → only tops are rounded.
             p.setClipRect(QRectF(0, 0, w, h))
-            brush = QBrush(self._bar_color)
+            brush = getattr(self, '_brush_cache', None)
+            if brush is None: brush = QBrush(self._bar_color)
+            _bh = getattr(self, '_bar_heights', None) or []
+            p.setBrush(brush)
             for i, (x, bw) in enumerate(self._bar_pos):
-                if i >= VIZ_BANDS: break
-                db = self._spec[i]
-                if db <= MIN_DB: continue
-                norm = (math.log10(1.0 + ((db-MIN_DB)/span)*9.0)
-                        if self._log_scale else (db-MIN_DB)/span)
-                if norm < 0.01: continue
+                norm = _bh[i] if i < len(_bh) else 0.0
+                if norm < 0.005: continue
                 bar_h = norm * h
                 if use_aa and bar_h > rad:
-                    # Extend by rad below h — bottom rounding is clipped away
-                    p.setBrush(brush)
                     p.drawRoundedRect(QRectF(x, h - bar_h, bw, bar_h + rad), rad, rad)
                 else:
-                    p.setBrush(brush)
                     p.drawRect(QRectF(x, h - bar_h, bw, bar_h))
             p.setClipping(False)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         p.setPen(QPen(QColor(BORD), 1)); p.drawLine(0, 0, self.width(), 0)
         p.end()
 
+    def _on_playing_changed(self, playing: bool):
+        if not playing:
+            self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch()
+            for i in range(len(self._spec)): self._spec[i] = MIN_DB
+            self.update()
+
     def _on_press(self):   self._seeking = True
     def _on_release(self):
         if self._dur_ms > 0 and self._player.has_pipe:
+            self._on_seek_flush()  # timestamp + clear spec
             self._player.seek(int(self._seek.value() * self._dur_ms / 1000))
+            QTimer.singleShot(80, lambda: self._on_pos(self._player.position_ms()))
         self._seeking = False
 
     def _on_moved(self, val):
@@ -4795,8 +5399,7 @@ class ControlBar(QFrame):
         self._lbl_artist.setText(t.artist)
         self._seek.setValue(0); self._lbl_cur.setText('0:00')
         self._dur_ms = int(t.duration*1000); self._lbl_tot.setText(t.dur_str())
-        self._frame_queue.clear()
-        for i in range(VIZ_BANDS): self._spec[i] = MIN_DB
+        for i in range(len(self._spec)): self._spec[i] = MIN_DB
         # Update cover thumbnail — always show whatever is in cache (or default)
         if self._cover_lbl.isVisible():
             pm = get_cover_pixmap(t.filepath, 64, 8)
@@ -4918,10 +5521,12 @@ class MainWindow(QMainWindow):
         self._ctrlbar.cover_on_changed.connect(self._on_cover_toggle)
         self._ctrlbar.accent_changed.connect(self._on_accent_refresh)
         self._ctrlbar.btn_lyrics.clicked.connect(self._toggle_lyrics)
-        self._player.sig_pos.connect(self._lyrics_panel.on_position)
+        self._player.sig_pos.connect(self._on_pos_for_lyrics)
         self._lyrics_panel.status_msg.connect(
             lambda m: self._status.showMessage(m, 0) if m else self._status.clearMessage())
         self._lyrics_panel.seek_requested.connect(self._player.seek)
+        self._lyrics_panel.lyrics_context.connect(self._blackout.set_lyrics_context)
+        self._ctrlbar.set_blackout_ref(self._blackout)
 
     def _on_cover_toggle(self, on: bool):
         self._lib_page.set_covers_on(on)
@@ -4979,6 +5584,10 @@ class MainWindow(QMainWindow):
         for page in [self._lib_page] + self._playlists:
             if page and page.playing_idx >= 0:
                 page.table.set_playing_row(page.playing_idx)
+
+    def _on_pos_for_lyrics(self, ms: int):
+        delay = self._ctrlbar._delay_ms
+        self._lyrics_panel.on_position(max(0, ms - delay))
 
     def _open_lyrics_panel_from_config(self):
         """Restore lyrics panel open state from config."""
@@ -5299,7 +5908,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f'{t.title}  —  BlackPlayer')
         self._status.showMessage(f'▶  {t.artist}  —  {t.title}', 0)
         self._mpris.notify_track(t); self._mpris.notify_status()
-        self._blackout.set_track(t.title or Path(t.filepath).name, t.artist)
+        self._blackout.set_track(t.title or Path(t.filepath).name, t.artist, t.album)
 
     def _play_pause(self):
         if not self._player.has_pipe:
@@ -5307,8 +5916,11 @@ class MainWindow(QMainWindow):
                 if self._cur_idx < 0: self._cur_idx = 0
                 self._start_playback()
         else:
-            self._player.play_pause(); self._ctrlbar.set_play_icon(self._player.playing)
+            self._player.play_pause()
+            self._ctrlbar.set_play_icon(self._player.playing)
             self._mpris.notify_status()
+            if not self._player.playing:
+                self._ctrlbar._on_playing_changed(False)
 
     def _prev_track(self):
         self._sync_cur_idx()
@@ -5350,9 +5962,10 @@ class MainWindow(QMainWindow):
             # Don't pause viz just because EQ/Settings Tool window is focused
             eq_vis  = self._ctrlbar._eq_popup is not None and self._ctrlbar._eq_popup.isVisible()
             set_vis = self._ctrlbar._settings_popup is not None and self._ctrlbar._settings_popup.isVisible()
-            if not self.isActiveWindow() and not eq_vis and not set_vis:
+            blackout_vis = self._blackout.isVisible()
+            if not self.isActiveWindow() and not eq_vis and not set_vis and not blackout_vis:
                 self._ctrlbar.set_focus_paused(True)
-            elif self.isActiveWindow() or eq_vis or set_vis:
+            elif self.isActiveWindow() or eq_vis or set_vis or blackout_vis:
                 self._ctrlbar.set_focus_paused(False)
                 # Trigger deferred lyrics fetch if panel is visible
                 if self._lyrics_panel.isVisible():
