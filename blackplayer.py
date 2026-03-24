@@ -3599,7 +3599,8 @@ class Player(QObject):
         self._volume:  float = 0.8
         self._viz_on:  bool  = True
         self._spec_lock   = threading.Lock()
-        self._spec_queue: list = []
+        self._spec_queue: list = []          # list of (serial, data)
+        self._spec_serial = 0                # incremented on seek/load to discard stale GLib bus messages
 
         # EQ related
         self._eq_enabled = True
@@ -3639,7 +3640,9 @@ class Player(QObject):
 
     def load(self, filepath: str):
         self._destroy()
-        with self._spec_lock: self._spec_queue.clear()
+        self._spec_serial += 1              # discard any in-flight GLib bus messages
+        with self._spec_lock:
+            self._spec_queue.clear()
         self._pipe = Gst.ElementFactory.make('playbin', None)
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
@@ -3675,8 +3678,11 @@ class Player(QObject):
             self._playing = False; self._pos_timer.stop()
             self.sig_playing.emit(False)
         else:
-            _, st, _ = self._pipe.get_state(timeout=50 * Gst.MSECOND)
-            if st in (Gst.State.NULL, Gst.State.READY, Gst.State.VOID_PENDING):
+            _, st, pending = self._pipe.get_state(timeout=0)
+            # If transitioning, wait briefly but don't block main thread
+            if st == Gst.State.VOID_PENDING or pending != Gst.State.VOID_PENDING:
+                _, st, _ = self._pipe.get_state(timeout=Gst.MSECOND * 80)
+            if st in (Gst.State.NULL, Gst.State.READY):
                 # Pipeline degraded — reload at saved position
                 uri = self._pipe.get_property('uri') or ''
                 if uri:
@@ -3698,16 +3704,26 @@ class Player(QObject):
         if not self._pipe:
             return
         # Only seek when the pipeline is in PAUSED or PLAYING state to avoid hangs/crashes
-        ok, state, _pending = self._pipe.get_state(0)
+        ok, state, _pending = self._pipe.get_state(timeout=Gst.MSECOND * 30)
         if state not in (Gst.State.PAUSED, Gst.State.PLAYING):
-            # Defer seek until pipeline reaches a seekable state
-            QTimer.singleShot(120, lambda: self.seek(ms))
+            # Defer seek, but limit retries to prevent infinite loop
+            _retry = getattr(self, '_seek_retries', 0)
+            if _retry < 6:
+                self._seek_retries = _retry + 1
+                QTimer.singleShot(100, lambda: self.seek(ms))
             return
+        self._seek_retries = 0
         try:
+            target_ns = max(0, ms) * Gst.MSECOND
+            # Increment serial BEFORE seek_simple so that old GLib bus messages
+            # (from the decoder's look-ahead buffer) get discarded by _parse_spectrum.
+            self._spec_serial += 1
+            with self._spec_lock:
+                self._spec_queue.clear()
             self._pipe.seek_simple(
                 Gst.Format.TIME,
                 Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
-                max(0, ms) * Gst.MSECOND)
+                target_ns)
             if self._playing:
                 self._pipe.set_state(Gst.State.PLAYING)
             self.sig_seek_flush.emit()
@@ -3924,10 +3940,13 @@ class Player(QObject):
         return 0
 
     def _destroy(self):
+        was_playing = self._playing
         if self._pipe:
             self._pipe.set_state(Gst.State.NULL); self._pipe = None
         self._spec_el = None; self._playing = False; self._pos_timer.stop()
         self._eq_filters = []
+        if was_playing:
+            self.sig_playing.emit(False)
 
     def _tick_pos(self):
         self.sig_pos.emit(self.position_ms())
@@ -3938,34 +3957,58 @@ class Player(QObject):
         with self._spec_lock:
             pending = self._spec_queue
             self._spec_queue = []
-        if not pending: return
-        if len(pending) == 1:
-            self.sig_spectrum.emit(pending[0])
-        else:
-            n = len(pending[0])
-            merged = [max(pending[k][i] for k in range(len(pending)))
-                      for i in range(n)]
-            self.sig_spectrum.emit(merged)
+        if not pending:
+            return
+        # Root cause of the ~8 s post-seek freeze:
+        # playbin pre-buffers audio several seconds ahead.  The spectrum element
+        # processes that buffered audio and posts messages into the GLib bus.
+        # seek_simple(FLUSH) clears the pipeline data flow, but messages
+        # ALREADY in the GLib bus queue are NOT flushed — they keep arriving
+        # for as long as the decoder had buffered audio (~8 s).
+        #
+        # Fix: _spec_serial is incremented in seek() and load() BEFORE
+        # seek_simple() is called.  Every frame stored in _spec_queue carries
+        # the serial that was current when _parse_spectrum ran.  Frames with an
+        # old serial are from the pre-seek buffer and are simply discarded.
+        cur = self._spec_serial
+        valid = [d for serial, d in pending if serial == cur]
+        if not valid:
+            return
+        self.sig_spectrum.emit(valid[-1])
 
     def _on_msg(self, _bus, msg):
         if msg.type == Gst.MessageType.EOS:
             self._playing = False; self._pos_timer.stop()
-            # Flush to NULL so play_pause state check is clean
-            GLib.idle_add(lambda: self._pipe.set_state(Gst.State.NULL) if self._pipe else None)
+            # Notify UI that playback stopped (viz must freeze immediately).
+            # sig_playing and sig_end are both thread-safe pyqtSignals — they
+            # are delivered queued to the main thread.
+            # We intentionally do NOT touch the pipeline here; _advance() →
+            # load() → _destroy() may run immediately on receipt of sig_end,
+            # and any concurrent GLib idle touching the old pipeline causes
+            # crashes (Repeat ONE, Shuffle, pipeline-NULL recovery, etc.).
+            self.sig_playing.emit(False)
             self.sig_end.emit()
         elif msg.type == Gst.MessageType.ERROR:
-            err, _ = msg.parse_error(); self._destroy(); self.sig_err.emit(str(err))
+            err, _ = msg.parse_error()
+            self._playing = False
+            self.sig_playing.emit(False)
+            self._destroy(); self.sig_err.emit(str(err))
         elif msg.type == Gst.MessageType.ELEMENT:
             if not self._viz_on and not getattr(self, '_overlay_needs_spec', False): return
             s = msg.get_structure()
             if s and s.get_name() == 'spectrum': self._parse_spectrum(s)
 
     def _parse_spectrum(self, s):
+        # Capture serial under the assumption that Python int reads are atomic
+        # (GIL-protected).  If serial has changed since this message was posted
+        # (i.e. a seek happened), the frame is stale and must be discarded.
+        serial = self._spec_serial
         try:
             m = self._SPEC_RE.search(s.to_string())
             if m:
                 data = [float(x.strip()) for x in m.group(1).split(',') if x.strip()]
-                with self._spec_lock: self._spec_queue.append(data[:GST_BANDS])
+                with self._spec_lock:
+                    self._spec_queue.append((serial, data[:GST_BANDS]))
                 return
         except Exception: pass
         try:
@@ -3974,8 +4017,9 @@ class Player(QObject):
                     val = s.get_value('magnitude')
                     if val is not None and hasattr(val, '__len__'):
                         with self._spec_lock:
-                            self._spec_queue.append([float(val[j])
-                                for j in range(min(GST_BANDS, len(val)))])
+                            self._spec_queue.append((serial,
+                                [float(val[j])
+                                 for j in range(min(GST_BANDS, len(val)))]))
                     break
         except Exception: pass
 
@@ -4790,9 +4834,12 @@ class ControlBar(QFrame):
         self._bar_color = QColor(44, 36, 36)
         self._cur_track: Optional[Track] = None
         self._inertia   = 0.5
-        self._viz_paused= False
+        self._viz_paused  = False
+        self._focus_paused = False
 
-        self._frame_flush_ts = 0
+        self._seek_pending = False   # set on seek, cleared on first arriving frame
+        self._seek_gen    = 0        # incremented on seek/stop; cancels stale delayed frames
+
         self._delay_ms    = 0
         self._pending_frame = None  # (data,) tuple when delay active
 
@@ -4920,7 +4967,6 @@ class ControlBar(QFrame):
         player.sig_spectrum.connect(self._on_spectrum)
         player.sig_playing.connect(self._on_playing_changed)
         player.sig_seek_flush.connect(self._on_seek_flush)
-        player.sig_seek.connect(self._on_seek_flush)
         self._seek.sliderPressed.connect(self._on_press)
         self._seek.sliderReleased.connect(self._on_release)
         self._seek.sliderMoved.connect(self._on_moved)
@@ -4999,8 +5045,6 @@ class ControlBar(QFrame):
     def set_overlay_viz_enabled(self, on: bool):
         self._overlay_viz_enabled = on
         self._player.set_overlay_needs_spectrum(on)
-        if on:
-            self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch()
 
     def set_blackout_ref(self, overlay):
         self._blackout_ref = overlay
@@ -5272,13 +5316,19 @@ class ControlBar(QFrame):
         self.cover_on_changed.emit(on)
 
     def _on_seek_flush(self):
-        """Block stale frames for 200ms after seek, then re-open."""
-        self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch() + 200
+        """Mark viz as awaiting first post-seek frame — no time window, no delay."""
+        self._seek_gen += 1          # invalidate any in-flight delayed frames
+        self._seek_pending = True
         for i in range(len(self._spec)): self._spec[i] = MIN_DB
+        self._bar_heights = []
         self.update()
 
     def set_focus_paused(self, paused: bool):
-        self._viz_paused = paused
+        self._focus_paused = paused
+        # _viz_paused is driven by _on_playing_changed (play/pause) AND focus changes.
+        # When focus is lost we want to stop rendering display bars but keep overlay
+        # frames flowing if the overlay viz is active.
+        self._viz_paused = paused or not self._player.playing
         self._player.set_viz_active(self._viz_on and not paused)
         if getattr(self, '_overlay_viz_enabled', False):
             self._player.set_overlay_needs_spectrum(True)
@@ -5287,7 +5337,9 @@ class ControlBar(QFrame):
             _bref = getattr(self, '_blackout_ref', None)
             _ov_on = _bref is not None and getattr(_bref, '_ov_viz', False)
             if not _ov_on:
-                self._on_seek_flush()
+                for i in range(len(self._spec)): self._spec[i] = MIN_DB
+                self._bar_heights = []
+                self.update()
             else:
                 # Clear display bars but keep accepting frames for overlay
                 for i in range(len(self._spec)): self._spec[i] = MIN_DB
@@ -5296,24 +5348,33 @@ class ControlBar(QFrame):
 
     @pyqtSlot(list)
     def _on_spectrum(self, data: list):
-        if QDateTime.currentMSecsSinceEpoch() <= self._frame_flush_ts:
-            return  # stale frame from before flush
+        # If a seek just fired, the first frame that arrives clears the pending
+        # flag and is rendered immediately — no time window needed.
+        if self._seek_pending:
+            self._seek_pending = False
+        # Check overlay need before early-exit on viz_paused
+        _bref = getattr(self, '_blackout_ref', None)
+        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False)
+        if self._viz_paused and not _ov:
+            return  # playback paused and overlay doesn't need frames either
         if self._delay_ms <= 0:
             self._apply_frame(data)
         else:
             d = list(data)  # capture
+            gen = self._seek_gen
             QTimer.singleShot(self._delay_ms,
-                              lambda: self._apply_delayed(d))
+                              lambda: self._apply_delayed(d, gen))
 
-    def _apply_delayed(self, data: list):
+    def _apply_delayed(self, data: list, gen: int = -1):
         """Called by singleShot after delay_ms when delay > 0."""
-        if QDateTime.currentMSecsSinceEpoch() > self._frame_flush_ts:
-            self._apply_frame(data)
+        if gen >= 0 and gen != self._seek_gen:
+            return  # seek or stop happened while frame was in-flight — discard
+        self._apply_frame(data)
 
     def _apply_frame(self, data: list):
         """Apply spectrum frame, precompute bar heights, trigger display."""
         _bref = getattr(self, '_blackout_ref', None)
-        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False)
+        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False) and self._player.playing
         _disp = self._viz_on and not self._viz_paused
         if not _disp and not _ov:
             return
@@ -5372,10 +5433,23 @@ class ControlBar(QFrame):
         p.end()
 
     def _on_playing_changed(self, playing: bool):
-        if not playing:
-            self._frame_flush_ts = QDateTime.currentMSecsSinceEpoch()
+        if playing:
+            # Resume viz only if window focus isn't suppressing it
+            _focus_paused = getattr(self, '_focus_paused', False)
+            self._viz_paused = _focus_paused
+            self._seek_pending = False
+        else:
+            # Stop viz rendering immediately
+            self._viz_paused = True
+            self._seek_pending = False
+            self._seek_gen += 1      # cancel any in-flight delayed frames
             for i in range(len(self._spec)): self._spec[i] = MIN_DB
+            self._bar_heights = []
             self.update()
+            # Clear overlay viz bars too
+            _bref = getattr(self, '_blackout_ref', None)
+            if _bref is not None and getattr(_bref, '_ov_viz', False):
+                _bref.push_viz_frame([0.0] * VIZ_BANDS)
 
     def _on_press(self):   self._seeking = True
     def _on_release(self):
@@ -5919,8 +5993,6 @@ class MainWindow(QMainWindow):
             self._player.play_pause()
             self._ctrlbar.set_play_icon(self._player.playing)
             self._mpris.notify_status()
-            if not self._player.playing:
-                self._ctrlbar._on_playing_changed(False)
 
     def _prev_track(self):
         self._sync_cur_idx()
@@ -5943,7 +6015,12 @@ class MainWindow(QMainWindow):
         if n == 0: return
         repeat = self._ctrlbar.btn_rep.current_mode()
         if not forced and repeat == RepeatMode.ONE: self._start_playback(); return
-        if self._shuffle: self._cur_idx = random.randint(0, n-1)
+        if self._shuffle:
+            if n > 1:
+                choices = [i for i in range(n) if i != self._cur_idx]
+                self._cur_idx = random.choice(choices)
+            # n==1: only one track; replay it (choices would be empty)
+            # repeat=NONE in shuffle mode: still play (no hard stop)
         else:
             self._cur_idx += 1
             if self._cur_idx >= n:
