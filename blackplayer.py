@@ -4080,7 +4080,14 @@ class MprisServer(QObject):
         self._reg_ids: list = []
         self._cur_track: Optional[Track] = None
         self._track_serial = 0
+        self._cover_on: bool = True          # mirrors the Settings cover toggle
+        self._art_tmp_path: Optional[str] = None   # last written temp cover file
         GLib.idle_add(self._setup)
+
+    # Called by MainWindow whenever the cover switch is toggled
+    def set_cover_on(self, enabled: bool):
+        self._cover_on = enabled
+        GLib.idle_add(self._emit, ['Metadata'])
 
     def _setup(self):
         try:
@@ -4153,14 +4160,54 @@ class MprisServer(QObject):
         tid = f'/org/blackplayer/track/{self._track_serial}'; t = self._cur_track
         if t is None:
             return GLib.Variant('a{sv}', {'mpris:trackid': GLib.Variant('o', tid)})
-        return GLib.Variant('a{sv}', {
+        d = {
             'mpris:trackid': GLib.Variant('o', tid),
             'xesam:title':   GLib.Variant('s', t.title or ''),
             'xesam:artist':  GLib.Variant('as', [t.artist] if t.artist else []),
             'xesam:album':   GLib.Variant('s', t.album or ''),
             'mpris:length':  GLib.Variant('x', int(t.duration*1_000_000)),
             'xesam:url':     GLib.Variant('s', Path(t.filepath).as_uri()),
-        })
+        }
+        art_uri = self._art_url_for(t)
+        if art_uri:
+            d['mpris:artUrl'] = GLib.Variant('s', art_uri)
+        return GLib.Variant('a{sv}', d)
+
+    def _art_url_for(self, t: 'Track') -> Optional[str]:
+        """
+        Return a file:// URI pointing to a temp JPEG of the track's cover art,
+        but only when the cover switch is enabled and the track actually has art.
+        The previous temp file is deleted on each call to avoid accumulation.
+        """
+        if not self._cover_on:
+            self._delete_art_tmp()
+            return None
+        raw = extract_cover_bytes(t.filepath)
+        if not raw:
+            self._delete_art_tmp()
+            return None
+        import hashlib, tempfile
+        digest = hashlib.md5(raw).hexdigest()[:12]
+        tmp_path = os.path.join(tempfile.gettempdir(),
+                                f'blackplayer_cover_{digest}.jpg')
+        if not os.path.exists(tmp_path):
+            self._delete_art_tmp()
+            try:
+                with open(tmp_path, 'wb') as fh:
+                    fh.write(raw)
+            except OSError as e:
+                print(f'[MPRIS] cover temp write failed: {e}')
+                return None
+        self._art_tmp_path = tmp_path
+        return Path(tmp_path).as_uri()
+
+    def _delete_art_tmp(self):
+        if self._art_tmp_path and os.path.exists(self._art_tmp_path):
+            try:
+                os.unlink(self._art_tmp_path)
+            except OSError:
+                pass
+        self._art_tmp_path = None
 
     def _handle_set(self, conn, sender, obj, iface, prop, value):
         if iface != 'org.mpris.MediaPlayer2.Player': return
@@ -5036,6 +5083,11 @@ class ControlBar(QFrame):
         pop = self._settings_popup
         return pop.cover_fetch_on() if pop else True
 
+    def cover_on(self) -> bool:
+        """Return current state of the Cover switch (default True if popup not yet created)."""
+        pop = self._settings_popup
+        return pop.cover_on() if pop else True
+
     def _on_lyrics_fetch_toggle(self, on: bool): pass  # LyricsPanel reads ctrlbar flag
 
     def ensure_overlay_spec(self):
@@ -5494,9 +5546,131 @@ class ControlBar(QFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 #  Main window (with tag editing)
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  Custom Title Bar  (frameless, OLED-black bg, dark-grey text & icons)
+# ══════════════════════════════════════════════════════════════════════════════
+_TB_BG      = '#000000'   # pure black background
+_TB_FG      = '#444444'   # dark-grey title text
+_TB_ICO     = '#444444'   # dark-grey window-control icons
+_TB_ICO_HOV = '#666666'   # slightly lighter on hover
+_TB_CLOSE_H = '#8b2020'   # close-button hover (subtle red)
+_TB_H       = 32          # titlebar height in px
+
+
+class TitleBarButton(QPushButton):
+    """Minimal frameless window-control button."""
+    def __init__(self, symbol: str, hover_color: str = _TB_ICO_HOV, parent=None):
+        super().__init__(symbol, parent)
+        self._hover_col = hover_color
+        self.setFixedSize(46, _TB_H)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._refresh_style(_TB_ICO)
+
+    def _refresh_style(self, fg: str):
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                color: {fg};
+                font-size: 14px;
+                border-radius: 0;
+                padding: 0;
+            }}
+            QPushButton:hover  {{ background: #111111; color: {self._hover_col}; }}
+            QPushButton:pressed {{ background: #1a1a1a; }}
+        """)
+
+
+class TitleBarCloseButton(TitleBarButton):
+    def __init__(self, parent=None):
+        super().__init__('✕', _TB_CLOSE_H, parent)
+
+
+class BlackTitleBar(QWidget):
+    """
+    Frameless custom title bar.
+
+    • Background : pure black (#000000)
+    • Title text  : dark grey (#444444)
+    • Icons       : dark grey (#444444), hover → #666666
+    • Supports startSystemMove() for both X11 and Wayland.
+    • Double-click → toggle maximise.
+    """
+
+    def __init__(self, window: QWidget, parent=None):
+        super().__init__(parent)
+        self._win = window
+        self.setFixedHeight(_TB_H)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f'background: {_TB_BG}; border: none;')
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # App icon (music note)
+        self._ico_lbl = QLabel('♫')
+        self._ico_lbl.setStyleSheet(
+            f'color: {_TB_ICO}; font-size: 13px; background: transparent; padding-right: 6px;')
+        lay.addWidget(self._ico_lbl)
+
+        # Window title
+        self._title_lbl = QLabel('BlackPlayer')
+        self._title_lbl.setStyleSheet(
+            f'color: {_TB_FG}; font-size: 12px; font-weight: normal; background: transparent;')
+        lay.addWidget(self._title_lbl)
+
+        lay.addStretch(1)
+
+        # Window-control buttons
+        self._btn_min   = TitleBarButton('―')
+        self._btn_max   = TitleBarButton('□')
+        self._btn_close = TitleBarCloseButton()
+
+        for btn in (self._btn_min, self._btn_max, self._btn_close):
+            lay.addWidget(btn)
+
+        self._btn_min.clicked.connect(self._win.showMinimized)
+        self._btn_max.clicked.connect(self._toggle_max)
+        self._btn_close.clicked.connect(self._win.close)
+
+    def set_title(self, text: str):
+        self._title_lbl.setText(text)
+
+    def _toggle_max(self):
+        if self._win.isMaximized():
+            self._win.showNormal()
+            self._btn_max.setText('□')
+        else:
+            self._win.showMaximized()
+            self._btn_max.setText('⚐')
+
+    def mousePressEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            handle = self._win.windowHandle()
+            if handle:
+                handle.startSystemMove()
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._toggle_max()
+        super().mouseDoubleClickEvent(e)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MainWindow
+# ══════════════════════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # Remove native decoration; draw our own black titlebar
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Window
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setWindowTitle('BlackPlayer'); self.resize(1280, 760)
 
         self._player        = Player()
@@ -5515,11 +5689,16 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_config()
         self._mpris = MprisServer(self._player, self)
+        self._mpris.set_cover_on(self._ctrlbar.cover_on())
 
 
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+
+        # Custom frameless titlebar
+        self._titlebar = BlackTitleBar(self)
+        root.addWidget(self._titlebar)
 
         body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(1)
         self._sidebar = Sidebar(); body.addWidget(self._sidebar)
@@ -5562,6 +5741,12 @@ class MainWindow(QMainWindow):
         self._status = self.statusBar()
         # Tab bar hidden; update count when tab changes programmatically
         self._tabs.currentChanged.connect(self._on_tab_change)
+
+    # Keep custom titlebar in sync with window title changes
+    def setWindowTitle(self, title: str):
+        super().setWindowTitle(title)
+        if hasattr(self, '_titlebar'):
+            self._titlebar.set_title(title)
 
     def _install_close_btn(self, idx: int):
         if idx == 0: return
@@ -5606,6 +5791,9 @@ class MainWindow(QMainWindow):
         self._lib_page.set_covers_on(on)
         for pl in self._playlists:
             pl.set_covers_on(on)
+        # Keep MPRIS artUrl in sync with the cover switch
+        if hasattr(self, '_mpris'):
+            self._mpris.set_cover_on(on)
 
     def _on_tags_fetched(self, fp: str, tags: dict):
         """Called by TagFetchPopup when tags for a track have been written to disk.
@@ -6035,6 +6223,10 @@ class MainWindow(QMainWindow):
     # --- Focus handling ---
     def changeEvent(self, e):
         super().changeEvent(e)
+        if e.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, '_titlebar'):
+                self._titlebar._btn_max.setText(
+                    '⚐' if self.isMaximized() else '□')
         if e.type() == QEvent.Type.ActivationChange:
             # Don't pause viz just because EQ/Settings Tool window is focused
             eq_vis  = self._ctrlbar._eq_popup is not None and self._ctrlbar._eq_popup.isVisible()
@@ -6143,7 +6335,7 @@ class MainWindow(QMainWindow):
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     os.environ.setdefault('QT_QPA_PLATFORM', 'wayland;xcb')
-    os.environ.setdefault('QT_WAYLAND_DISABLE_WINDOWDECORATION', '0')
+    os.environ.setdefault('QT_WAYLAND_DISABLE_WINDOWDECORATION', '1')
 
     app = QApplication(sys.argv)
     app.setApplicationName('BlackPlayer')
