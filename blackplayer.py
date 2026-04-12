@@ -3723,17 +3723,28 @@ class Player(QObject):
 
             # Pipeline dead — reload
             if st in (Gst.State.NULL, Gst.State.READY):
-                self._resume_with_reload(); return
+                # Use anchor position (safe even when GStreamer pipeline is dead)
+                self._resume_with_reload(fallback_ms=int(self._pos_anchor_ms)); return
 
-            # Paused too long — PipeWire likely dropped the sink
-            # _pause_ts == 0.0 means "never explicitly paused" → safe to resume directly
+            # Paused too long OR another app grabbed PipeWire sink →
+            # probe with a short set_state+query instead of relying on wall-clock alone.
+            # _pause_ts == 0.0 means "never explicitly paused" → safe to resume directly.
             pause_dur = (_monotonic() - self._pause_ts) if self._pause_ts > 0.0 else 0.0
-            if pause_dur > 4.0:
-                print(f'[Player] paused {pause_dur:.1f}s — reloading sink')
-                self._resume_with_reload(); return
+            if pause_dur > 2.0:
+                # Try to transition and immediately check if audio clock advances.
+                # If the sink was stolen by another app, set_state(PLAYING) will stall
+                # (pipeline stays PAUSED or goes to READY/NULL).  We detect this by
+                # re-querying state after a short timeout instead of trusting the call.
+                self._pipe.set_state(Gst.State.PLAYING)
+                ret2, st2, _ = self._pipe.get_state(timeout=Gst.MSECOND * 200)
+                if st2 != Gst.State.PLAYING:
+                    print(f'[Player] paused {pause_dur:.1f}s, sink not recovered '
+                          f'(state={st2.value_nick}) — reloading')
+                    self._resume_with_reload(fallback_ms=int(self._pos_anchor_ms)); return
+                print(f'[Player] paused {pause_dur:.1f}s — resumed OK')
+            else:
+                self._pipe.set_state(Gst.State.PLAYING)
 
-            # Normal short resume
-            self._pipe.set_state(Gst.State.PLAYING)
             self._playing = True; self._pos_timer.start()
             # Re-anchor from GStreamer so we pick up exactly where it resumes.
             # If query fails we fall back to frozen anchor (pause set it correctly).
@@ -3746,20 +3757,34 @@ class Player(QObject):
             self._stall_check_n = 0
             QTimer.singleShot(800, self._check_sink_health)
 
-    def _resume_with_reload(self):
-        """Reload pipeline at current position, reacquiring the PipeWire sink."""
+    def _resume_with_reload(self, fallback_ms: int = 0):
+        """Reload pipeline at current position, reacquiring the PipeWire sink.
+
+        Args:
+            fallback_ms: Position to seek to if GStreamer query returns 0 (e.g. when
+                         pipeline is already NULL/READY and query_position is unreliable).
+                         Pass int(self._pos_anchor_ms) from the call site so we always
+                         restore the exact position the user was at.
+        """
         uri = ''
         try: uri = self._pipe.get_property('uri') or ''
         except Exception: pass
         if not uri: return
+
+        # query_position is unreliable when the pipeline is not PAUSED/PLAYING.
+        # Prefer the caller-supplied anchor; fall back to GStreamer only when > 0.
         ok, pos = self._pipe.query_position(Gst.Format.TIME)
-        pos_ms = pos // Gst.MSECOND if ok and pos > 0 else 0
+        gst_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
+        pos_ms  = gst_ms if gst_ms > 200 else fallback_ms
+
         import urllib.parse as _up
         fp = _up.unquote(uri.replace('file://', ''))
         self.load(fp)
         self._pause_ts = 0.0   # 0 = "never paused since last load" — safe to resume directly
         if pos_ms > 200:
-            QTimer.singleShot(0, lambda p=pos_ms: self.seek(p))
+            # Wait for pipeline to preroll before seeking; QTimer(0) fires before
+            # GStreamer finishes async state change and the seek gets silently dropped.
+            QTimer.singleShot(400, lambda p=pos_ms: self.seek(p))
 
     def stop(self): self._destroy()
 
@@ -3770,17 +3795,25 @@ class Player(QObject):
         ok, p1 = self._pipe.query_position(Gst.Format.TIME)
         p0 = getattr(self, '_stall_pos_ns', -1)
         if ok and p0 >= 0:
-            if p1 - p0 < 50_000_000:   # < 50 ms advancement in 800ms → stalled
+            # Expect at least 20 ms of progress in ~800 ms wall-clock.
+            # 50 ms was too tight: a momentary GStreamer query hiccup triggered
+            # false-positive reloads on healthy pipelines.
+            if p1 - p0 < 20_000_000:   # < 20 ms advancement in 800 ms → stalled
                 print('[Player] stall detected — reloading pipeline')
-                self._reload_at_pos(); return
+                self._reload_at_pos(fallback_ms=int(self._pos_anchor_ms)); return
         self._stall_pos_ns = p1 if ok else -1
         self._stall_check_n = getattr(self, '_stall_check_n', 0) + 1
         if self._stall_check_n < 5:
             QTimer.singleShot(800, self._check_sink_health)
 
-    def _reload_at_pos(self):
+    def _reload_at_pos(self, fallback_ms: int = 0):
         """Reload the current file at the current position, preserving playback.
-        Safe to call from main thread only; may be called multiple times (idempotent)."""
+        Safe to call from main thread only; may be called multiple times (idempotent).
+
+        Args:
+            fallback_ms: Seek target if GStreamer query_position returns 0 (pipeline
+                         may already be degraded).  Pass int(self._pos_anchor_ms).
+        """
         if not self._pipe:
             return
         # Prevent re-entrant reload (WARNING + STATE_CHANGED can both fire)
@@ -3789,7 +3822,8 @@ class Player(QObject):
         self._reloading = True
         try:
             ok, pos = self._pipe.query_position(Gst.Format.TIME)
-            pos_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
+            gst_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
+            pos_ms  = gst_ms if gst_ms > 200 else fallback_ms
             uri = ''
             try: uri = self._pipe.get_property('uri') or ''
             except Exception: pass
@@ -3800,7 +3834,8 @@ class Player(QObject):
             self.load(fp)
             self._pause_ts = 0.0
             if pos_ms > 200:
-                QTimer.singleShot(0, lambda p=pos_ms: self.seek(p))
+                # Same as _resume_with_reload: wait for preroll before seeking.
+                QTimer.singleShot(400, lambda p=pos_ms: self.seek(p))
         finally:
             QTimer.singleShot(500, lambda: setattr(self, '_reloading', False))
 
@@ -4205,7 +4240,8 @@ class Player(QObject):
                 if any(k in txt for k in ('resource', 'write', 'open', 'pipewire',
                                            'pulse', 'alsa', 'sink', 'output')):
                     print(f'[Player] audio sink warning — reloading: {warn}')
-                    QTimer.singleShot(0, self._reload_at_pos)
+                    _fb = int(self._pos_anchor_ms)
+                    QTimer.singleShot(0, lambda: self._reload_at_pos(fallback_ms=_fb))
             except Exception:
                 pass
         elif msg.type == Gst.MessageType.ELEMENT:
