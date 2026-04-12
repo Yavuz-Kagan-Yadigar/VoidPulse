@@ -6,6 +6,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 """
 
 import sys, os, json, threading, enum, random, math
+from time import monotonic as _monotonic
 import numpy as _np
 from pathlib import Path
 from dataclasses import dataclass
@@ -1586,10 +1587,8 @@ class LyricsPanel(QWidget):
         root.addWidget(self._scroll, 1)
 
         self._lbls: list = []
-
-        self._sync_timer = QTimer(self)
-        self._sync_timer.setInterval(80)
-        self._sync_timer.timeout.connect(self._tick)
+        # Lyrics position is driven by on_position() called from sig_pos (100 ms).
+        # No separate timer needed — avoids a redundant query_position() call per 80 ms.
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -1598,7 +1597,6 @@ class LyricsPanel(QWidget):
         self._fetch_id += 1
         self._track = track
         self._synced = []; self._plain = ''; self._cur_idx = -1
-        self._sync_timer.stop()
         self._abort()
         if track:
             self._hdr_lbl.setText(track.title or '')
@@ -1672,8 +1670,12 @@ class LyricsPanel(QWidget):
             self._synced = synced
             self._src_lbl.setText('synced')
             self._build_synced()
-            self._sync_timer.start()
-            self._tick()
+            # Jump to current playback position immediately
+            try:
+                ok, p = self._player._pipe.query_position(Gst.Format.TIME)
+                if ok: self._highlight(p // Gst.MSECOND)
+            except Exception:
+                pass
         elif plain:
             self._plain = plain
             self._src_lbl.setText('')
@@ -1698,7 +1700,7 @@ class LyricsPanel(QWidget):
         self._lbls = []
 
     def _show_status(self, msg):
-        self._sync_timer.stop(); self._clear()
+        self._clear()
         if not msg: return
         lbl = QLabel(msg)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1753,25 +1755,23 @@ class LyricsPanel(QWidget):
         cur_t  = self._synced[idx][1]
         nxt_t  = self._synced[idx+1][1] if idx < len(self._synced)-1 else ''
         self.lyrics_context.emit(prev_t, cur_t, nxt_t)
-        # Inertia scroll via QPropertyAnimation
+        # Stop any previous scroll animation before starting a new one
+        if hasattr(self, '_scroll_anim') and self._scroll_anim is not None:
+            self._scroll_anim.stop()
+            self._scroll_anim = None
         step   = self._LINE_H + self._LINE_SP
         target = idx * step - self._scroll.height() // 2 + self._LINE_H // 2
         target = max(0, target)
         bar = self._scroll.verticalScrollBar()
         anim = QPropertyAnimation(bar, b'value', self)
-        anim.setDuration(420)
+        anim.setDuration(300)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim.setStartValue(bar.value())
         anim.setEndValue(target)
+        self._scroll_anim = anim
+        anim.finished.connect(lambda: setattr(self, '_scroll_anim', None))
         anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    def _tick(self):
-        if not self._synced: return
-        try:
-            ok, p = self._player._pipe.query_position(Gst.Format.TIME)
-            if ok: self._highlight(p // Gst.MSECOND)
-        except Exception:
-            pass
 
 
 class TouchComboBox(QComboBox):
@@ -3576,10 +3576,9 @@ class Player(QObject):
     sig_dur       = pyqtSignal(int)
     sig_end       = pyqtSignal()
     sig_err       = pyqtSignal(str)
-    sig_spectrum  = pyqtSignal(list)
     sig_seek_flush = pyqtSignal()
     sig_playing   = pyqtSignal(bool)
-    sig_seek     = pyqtSignal()   # emitted after seek to flush viz queue
+    sig_seek     = pyqtSignal()
 
     _SPEC_INTERVAL_NS = 16_666_667   # 60 fps
 
@@ -3601,10 +3600,38 @@ class Player(QObject):
         self._playing: bool  = False
         self._volume:  float = 0.8
         self._viz_on:  bool  = True
+        self._dur_ms_cached: int = 0
+        self._pause_ts: float = 0.0   # set on pause; 0 = never paused (safe)
         self._spec_lock   = threading.Lock()
-        self._spec_queue: list = []          # list of (serial, stream_ns, data)
-        self._spec_serial = 0                # incremented on seek/load to discard stale GLib bus messages
-        self._seek_target_ns = 0             # ns of last seek target; rejects stale pre-seek spectrum frames
+        self._spec_serial = 0
+        self._seek_target_ns = 0
+        self._seek_wall_t: float = 0.0
+
+        # ── Interpolated position tracking ────────────────────────────────────
+        # Instead of asking GStreamer on every tick (which lags after seek/pause),
+        # we maintain a wall-clock anchor: pos = _pos_anchor_ms + elapsed_since_anchor.
+        # The anchor is updated immediately on load/seek/play/pause so position()
+        # responds at zero latency.  A periodic drift-correction step queries
+        # GStreamer and nudges the anchor to stay accurate over long play sessions.
+        self._pos_anchor_ms: float = 0.0   # reference position in ms
+        self._pos_anchor_wt: float = 0.0   # wall-clock time of that reference
+        self._pos_playing:   bool  = False  # local copy of playing state for anchor math
+        self._drift_accum:   float = 0.0    # accumulated drift for logging
+
+        # Viz computation state — written by GLib thread, read by main thread render_timer
+        # All numpy arrays; CPython object reference assignment is atomic under GIL.
+        self._viz_bar_buf: object = None     # float32 (VIZ_BANDS,) latest bar heights
+        self._viz_col_buf: object = None     # float32 (iw,) per-column bar heights
+        self._viz_spec = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # inertia state
+        # Viz mapping tables — set by ControlBar.set_viz_tables(), read by GLib thread
+        self._viz_ba: object = None          # int32 (VIZ_BANDS,)
+        self._viz_bb: object = None
+        self._viz_bt: object = None
+        self._viz_col_idx: object = None     # int32 (iw,)
+        self._viz_smooth: list = []          # sparse smooth entries
+        self._viz_inertia: float = 0.5
+        self._viz_overlay_cb: object = None  # callable(list) for overlay frames
+        self._viz_discard_until: float = 0.0  # wall-clock: discard frames before this
 
         # EQ related
         self._eq_enabled = True
@@ -3625,12 +3652,6 @@ class Player(QObject):
         self._pos_timer.setInterval(100)
         self._pos_timer.timeout.connect(self._tick_pos)
 
-        self._spec_timer = QTimer(self)
-        self._spec_timer.setInterval(16)
-        self._spec_timer.timeout.connect(self._tick_spec)
-        if self._viz_on and self._has_spec:
-            self._spec_timer.start()
-
     @staticmethod
     def _detect_chain():
         for chain, out in zip(Player._CHAINS, Player._OUTS):
@@ -3644,9 +3665,7 @@ class Player(QObject):
 
     def load(self, filepath: str):
         self._destroy()
-        self._spec_serial += 1              # discard any in-flight GLib bus messages
-        with self._spec_lock:
-            self._spec_queue.clear()
+        self._spec_serial += 1
         self._pipe = Gst.ElementFactory.make('playbin', None)
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
@@ -3665,7 +3684,8 @@ class Player(QObject):
             if self._has_spec:
                 self._spec_el = sink_bin.get_by_name('bp_spec')
                 if self._spec_el:
-                    self._spec_el.set_property('post-messages', self._viz_on)
+                    _need = self._viz_on or getattr(self, '_overlay_needs_spec', False)
+                    self._spec_el.set_property('post-messages', bool(_need))
             # Apply current EQ settings
             self._apply_eq_to_filters()
 
@@ -3673,74 +3693,116 @@ class Player(QObject):
         bus.add_signal_watch(); bus.connect('message', self._on_msg)
         self._pipe.set_state(Gst.State.PLAYING)
         self._playing = True; self._pos_timer.start()
+        self._pos_playing = True
+        self._anchor_now(0.0)   # start at 0; confirmed below once prerolled
+        self._tick_n = 0
+        # Once the pipeline has prerolled (~300–600 ms), re-anchor from GStreamer
+        # so any startup latency is absorbed and the display stays accurate.
+        def _post_load_confirm():
+            if not self._pipe or not self._playing:
+                return
+            self._anchor_from_gst()
+        QTimer.singleShot(600, _post_load_confirm)
         self.sig_playing.emit(True)
 
     def play_pause(self):
         if not self._pipe: return
         if self._playing:
             self._pipe.set_state(Gst.State.PAUSED)
+            # Freeze anchor at current interpolated position before stopping clock
+            frozen = self.position_ms()
             self._playing = False; self._pos_timer.stop()
+            self._pos_playing = False
+            self._anchor_now(frozen)   # anchor is now the paused position
+            self._pause_ts = _monotonic()   # record pause time
             self.sig_playing.emit(False)
         else:
             _, st, pending = self._pipe.get_state(timeout=0)
-            # If transitioning, wait briefly but don't block main thread
             if st == Gst.State.VOID_PENDING or pending != Gst.State.VOID_PENDING:
                 _, st, _ = self._pipe.get_state(timeout=Gst.MSECOND * 80)
+
+            # Pipeline dead — reload
             if st in (Gst.State.NULL, Gst.State.READY):
-                # Pipeline degraded — reload at saved position
-                uri = self._pipe.get_property('uri') or ''
-                if uri:
-                    import urllib.parse as _up
-                    fp = _up.unquote(uri.replace('file://', ''))
-                    ok2, pos = self._pipe.query_position(Gst.Format.TIME)
-                    pos_ms = pos // Gst.MSECOND if ok2 and pos > 0 else 0
-                    self.load(fp)
-                    if pos_ms > 500:
-                        QTimer.singleShot(300, lambda p=pos_ms: self.seek(p))
-                    return
+                self._resume_with_reload(); return
+
+            # Paused too long — PipeWire likely dropped the sink
+            # _pause_ts == 0.0 means "never explicitly paused" → safe to resume directly
+            pause_dur = (_monotonic() - self._pause_ts) if self._pause_ts > 0.0 else 0.0
+            if pause_dur > 4.0:
+                print(f'[Player] paused {pause_dur:.1f}s — reloading sink')
+                self._resume_with_reload(); return
+
+            # Normal short resume
             self._pipe.set_state(Gst.State.PLAYING)
             self._playing = True; self._pos_timer.start()
+            # Re-anchor from GStreamer so we pick up exactly where it resumes.
+            # If query fails we fall back to frozen anchor (pause set it correctly).
+            self._anchor_from_gst() or None   # updates anchor in place; ignore bool
+            self._pos_playing = True
+            self._tick_n = 0
             self.sig_playing.emit(True)
-            # Schedule a sink health-check: if the pipeline resumed into a broken
-            # sink (e.g. PipeWire handed audio to another app), the position will
-            # not advance.  We detect this 800 ms later and reload if needed.
             ok0, p0 = self._pipe.query_position(Gst.Format.TIME)
-            self._resume_pos_ns = p0 if ok0 else -1
+            self._stall_pos_ns = p0 if ok0 else -1
+            self._stall_check_n = 0
             QTimer.singleShot(800, self._check_sink_health)
+
+    def _resume_with_reload(self):
+        """Reload pipeline at current position, reacquiring the PipeWire sink."""
+        uri = ''
+        try: uri = self._pipe.get_property('uri') or ''
+        except Exception: pass
+        if not uri: return
+        ok, pos = self._pipe.query_position(Gst.Format.TIME)
+        pos_ms = pos // Gst.MSECOND if ok and pos > 0 else 0
+        import urllib.parse as _up
+        fp = _up.unquote(uri.replace('file://', ''))
+        self.load(fp)
+        self._pause_ts = 0.0   # 0 = "never paused since last load" — safe to resume directly
+        if pos_ms > 200:
+            QTimer.singleShot(0, lambda p=pos_ms: self.seek(p))
 
     def stop(self): self._destroy()
 
     def _check_sink_health(self):
-        """Called 800 ms after resuming playback.
-        If the pipeline is PLAYING but position hasn't moved, the audio sink
-        is broken (PipeWire disconnected).  Reload the pipeline in-place."""
+        """Stall watcher — runs after resume to confirm position advances."""
         if not self._pipe or not self._playing:
             return
         ok, p1 = self._pipe.query_position(Gst.Format.TIME)
-        p0 = getattr(self, '_resume_pos_ns', -1)
-        if not ok or p0 < 0:
-            return
-        # Allow 200 ms of slack (some decoders start slowly)
-        if p1 - p0 < 200_000_000:
-            print('[Player] sink health check: position stalled — reloading pipeline')
-            self._reload_at_pos()
+        p0 = getattr(self, '_stall_pos_ns', -1)
+        if ok and p0 >= 0:
+            if p1 - p0 < 50_000_000:   # < 50 ms advancement in 800ms → stalled
+                print('[Player] stall detected — reloading pipeline')
+                self._reload_at_pos(); return
+        self._stall_pos_ns = p1 if ok else -1
+        self._stall_check_n = getattr(self, '_stall_check_n', 0) + 1
+        if self._stall_check_n < 5:
+            QTimer.singleShot(800, self._check_sink_health)
 
     def _reload_at_pos(self):
-        """Reload the current file at the current position, preserving playback."""
+        """Reload the current file at the current position, preserving playback.
+        Safe to call from main thread only; may be called multiple times (idempotent)."""
         if not self._pipe:
             return
-        ok, pos = self._pipe.query_position(Gst.Format.TIME)
-        pos_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
-        uri     = ''
-        try: uri = self._pipe.get_property('uri') or ''
-        except Exception: pass
-        if not uri:
+        # Prevent re-entrant reload (WARNING + STATE_CHANGED can both fire)
+        if getattr(self, '_reloading', False):
             return
-        import urllib.parse as _up
-        fp = _up.unquote(uri.replace('file://', ''))
-        self.load(fp)
-        if pos_ms > 200:
-            QTimer.singleShot(300, lambda p=pos_ms: self.seek(p))
+        self._reloading = True
+        try:
+            ok, pos = self._pipe.query_position(Gst.Format.TIME)
+            pos_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
+            uri = ''
+            try: uri = self._pipe.get_property('uri') or ''
+            except Exception: pass
+            if not uri:
+                return
+            import urllib.parse as _up
+            fp = _up.unquote(uri.replace('file://', ''))
+            self.load(fp)
+            self._pause_ts = 0.0
+            if pos_ms > 200:
+                QTimer.singleShot(0, lambda p=pos_ms: self.seek(p))
+        finally:
+            QTimer.singleShot(500, lambda: setattr(self, '_reloading', False))
 
     def seek(self, ms: int):
         if not self._pipe:
@@ -3757,32 +3819,60 @@ class Player(QObject):
         self._seek_retries = 0
         try:
             target_ns = max(0, ms) * Gst.MSECOND
-            self._seek_target_ns = target_ns  # used in _parse_spectrum to reject stale frames
-            # Increment serial BEFORE seek_simple so that old GLib bus messages
-            # (from the decoder's look-ahead buffer) get discarded by _parse_spectrum.
+            self._seek_target_ns = target_ns
+            self._seek_wall_t    = _monotonic()   # wall-clock anchor for timeout fallback
+            # Set position anchor immediately to seek target — UI updates at zero latency
+            # even before GStreamer has finished the seek.
+            self._anchor_now(float(max(0, ms)))
+            # Increment serial BEFORE seek so old GLib bus messages arriving after
+            # the serial bump are tagged with the new serial and can be filtered.
             self._spec_serial += 1
             with self._spec_lock:
-                self._spec_queue.clear()
+                self._spec_frame = None
+            self._viz_spec[:] = MIN_DB
+            self._viz_col_buf = None
+            self._viz_bar_buf = None
+            self._viz_discard_until = _monotonic() + 0.15   # skip buffered pre-seek frames
             self._pipe.seek_simple(
                 Gst.Format.TIME,
-                Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
                 target_ns)
             if self._playing:
                 self._pipe.set_state(Gst.State.PLAYING)
+            # Schedule a single anchor re-confirmation once GStreamer has settled.
+            # ACCURATE seeks may land a few ms off target; this corrects the anchor
+            # without any visible jump (drift correction threshold is 80 ms).
+            _seek_ms = float(max(0, ms))
+            def _confirm_anchor():
+                if not self._pipe or not self._playing:
+                    return
+                ok2, p2 = self._pipe.query_position(Gst.Format.TIME)
+                if ok2 and p2 >= 0:
+                    confirmed_ms = p2 / Gst.MSECOND
+                    # Only update if GStreamer is reasonably close to target
+                    if abs(confirmed_ms - _seek_ms) < 2000:
+                        self._anchor_now(confirmed_ms)
+            QTimer.singleShot(250, _confirm_anchor)
             self.sig_seek_flush.emit()
         except Exception as ex:
             print(f'[Player] seek error: {ex}')
-        # Signal ControlBar to flush stale viz frames after seek
         self.sig_seek.emit()
 
     def set_volume(self, v: float):
         self._volume = max(0.0, min(1.0, v))
         if self._pipe: self._pipe.set_property('volume', self._volume)
 
-    def set_overlay_viz_needed(self, on: bool):
-        """Called when overlay viz is toggled — keeps spectrum running independently."""
-        self._overlay_needs_spec = on
-        self.set_viz_active(self._viz_on)  # re-evaluate need
+    def set_viz_tables(self, ba, bb, bt, col_idx, smooth_entries, inertia,
+                       overlay_cb=None):
+        """Called from ControlBar (main thread) to update viz mapping tables."""
+        self._viz_ba      = ba
+        self._viz_bb      = bb
+        self._viz_bt      = bt
+        self._viz_col_idx = col_idx
+        self._viz_smooth  = smooth_entries
+        self._viz_inertia = inertia
+        self._viz_overlay_cb = overlay_cb
+        self._viz_spec[:] = MIN_DB   # reset inertia on table change
 
     def set_viz_active(self, on: bool):
         self._viz_on = on
@@ -3793,10 +3883,11 @@ class Player(QObject):
         self._update_spec_active()
 
     def _update_spec_active(self):
-        # Always post messages when pipeline is running.
-        # _apply_frame decides whether to render display vs overlay.
-        if self._spec_el: self._spec_el.set_property('post-messages', True)
-        self._spec_timer.start()
+        # Enable/disable GStreamer FFT — when off, no CPU spent on spectrum at all.
+        # Delivery is signal-driven (sig_spec_ready), so no timer to start/stop.
+        need = self._viz_on or getattr(self, '_overlay_needs_spec', False)
+        if self._spec_el:
+            self._spec_el.set_property('post-messages', bool(need))
     def set_eq_enabled(self, enabled: bool):
         if self._eq_enabled == enabled:
             return
@@ -3970,16 +4061,52 @@ class Player(QObject):
     @property
     def glib_loop(self)         : return self._glib_loop
 
+    # ── Position anchor helpers ───────────────────────────────────────────────
+
+    def _anchor_now(self, pos_ms: float):
+        """Set anchor to pos_ms at the current wall-clock instant."""
+        self._pos_anchor_ms = float(pos_ms)
+        self._pos_anchor_wt = _monotonic()
+
+    def _anchor_from_gst(self) -> bool:
+        """Query GStreamer and update anchor. Returns True on success."""
+        if not self._pipe:
+            return False
+        ok, p = self._pipe.query_position(Gst.Format.TIME)
+        if ok and p >= 0:
+            self._anchor_now(p / Gst.MSECOND)
+            return True
+        return False
+
     def position_ms(self) -> int:
-        if self._pipe:
-            ok, p = self._pipe.query_position(Gst.Format.TIME)
-            return p // Gst.MSECOND if ok else 0
-        return 0
+        """Return current playback position in ms.
+
+        When playing, interpolates from the last anchor using the wall clock —
+        this gives zero-latency, jitter-free updates immediately after seek,
+        play, and pause events.  GStreamer is only queried periodically for
+        drift correction (see _tick_pos).
+        """
+        if not self._pipe:
+            return 0
+        if self._pos_playing:
+            elapsed = _monotonic() - self._pos_anchor_wt
+            pos = self._pos_anchor_ms + elapsed * 1000.0
+            # Clamp to [0, duration] when duration is known
+            if self._dur_ms_cached > 0:
+                pos = max(0.0, min(pos, float(self._dur_ms_cached)))
+            return int(pos)
+        else:
+            # Paused: anchor holds the frozen position; no elapsed needed
+            return int(self._pos_anchor_ms)
 
     def duration_ms(self) -> int:
+        if self._dur_ms_cached:
+            return self._dur_ms_cached
         if self._pipe:
             ok, d = self._pipe.query_duration(Gst.Format.TIME)
-            return d // Gst.MSECOND if ok else 0
+            if ok and d > 0:
+                self._dur_ms_cached = d // Gst.MSECOND
+                return self._dur_ms_cached
         return 0
 
     def _destroy(self):
@@ -3987,60 +4114,69 @@ class Player(QObject):
         if self._pipe:
             self._pipe.set_state(Gst.State.NULL); self._pipe = None
         self._spec_el = None; self._playing = False; self._pos_timer.stop()
+        self._pos_playing   = False
+        self._pos_anchor_ms = 0.0
+        self._pos_anchor_wt = 0.0
+        self._tick_n        = 0
         self._eq_filters = []
+        self._dur_ms_cached = 0
+        self._seek_target_ns = 0
+        self._seek_wall_t    = 0.0
+        self._pause_ts       = 0.0   # reset — prevent reload loop after ERROR/EOS
+        self._viz_bar_buf = None
+        self._viz_col_buf = None
+        self._viz_spec[:] = MIN_DB
+        self._viz_discard_until = 0.0
+        with self._spec_lock:
+            self._spec_frame = None
         if was_playing:
             self.sig_playing.emit(False)
 
     def _tick_pos(self):
-        self.sig_pos.emit(self.position_ms())
-        d = self.duration_ms()
-        if d > 0: self.sig_dur.emit(d)
+        """100 ms tick: emit position and correct anchor drift against GStreamer.
 
-    def _tick_spec(self):
-        with self._spec_lock:
-            pending = self._spec_queue
-            self._spec_queue = []
-        if not pending:
-            return
-        cur = self._spec_serial
-        valid = [(st, d) for serial, st, d in pending if serial == cur]
-        if not valid:
-            return
+        We DO NOT call query_position() for the emitted value — that's already
+        provided instantly by position_ms() via interpolation.  We DO query
+        GStreamer every ~500 ms to catch any drift (clock skew, pipeline stall
+        compensation, etc.) and silently nudge the anchor.
+        """
+        # Always emit the interpolated value — zero latency
+        pos = self.position_ms()
+        self.sig_pos.emit(pos)
 
-        # After a seek we need one query_position() to anchor sync.
-        # During normal playback we trust stream-time ordering and simply
-        # take the newest valid frame — no syscall needed.
-        seek_target = self._seek_target_ns
-        if seek_target > 0:
-            # Seek recently happened — do the expensive position query ONCE
-            # to validate that arriving frames are past the seek point.
-            pos_ns = -1
-            if self._pipe:
-                try:
-                    ok, pos_ns = self._pipe.query_position(Gst.Format.TIME)
-                    if not ok: pos_ns = -1
-                except Exception:
-                    pos_ns = -1
-            if pos_ns >= 0:
-                timed = [(st, d) for st, d in valid if st > 0]
-                if timed:
-                    best_st, best_data = min(timed, key=lambda x: abs(x[0] - pos_ns))
-                    if abs(best_st - pos_ns) > 1_000_000_000:
-                        return  # still draining pre-seek buffer — drop
-                    # Frame is close enough; clear seek anchor so normal path
-                    # resumes next tick (no more query_position overhead).
-                    self._seek_target_ns = 0
-                    self.sig_spectrum.emit(best_data)
-                    return
-                # No timestamps — just drop until fresh frames arrive
-                return
-            # query_position failed; fall through to newest-frame path
-        # Normal path: take the newest frame, no query_position() call.
-        self.sig_spectrum.emit(valid[-1][1])
+        # Duration: query once, cache forever
+        if self._dur_ms_cached == 0 and self._pipe:
+            ok, d = self._pipe.query_duration(Gst.Format.TIME)
+            if ok and d > 0:
+                self._dur_ms_cached = d // Gst.MSECOND
+                self.sig_dur.emit(self._dur_ms_cached)
+
+        # Drift correction — query GStreamer every ~500 ms (every 5th tick)
+        # We re-anchor atomically using _anchor_now() so elapsed resets from the
+        # confirmed GStreamer position, preventing repeated corrections.
+        tick_n = getattr(self, '_tick_n', 0) + 1
+        self._tick_n = tick_n
+        if tick_n % 5 == 0 and self._playing and self._pipe:
+            ok, p = self._pipe.query_position(Gst.Format.TIME)
+            if ok and p >= 0:
+                gst_ms    = p / Gst.MSECOND
+                interp_ms = float(self._pos_anchor_ms + (_monotonic() - self._pos_anchor_wt) * 1000.0)
+                drift     = gst_ms - interp_ms
+                # Correct only when drift is significant (>150 ms) to avoid
+                # over-correcting small jitter from query latency itself.
+                if abs(drift) > 150:
+                    self._anchor_now(gst_ms)   # atomic: both ms and wt reset together
+                    self._drift_accum += drift
+                    print(f'[Player] drift correction: {drift:+.0f} ms '
+                          f'(total: {self._drift_accum:+.0f} ms)')
 
     def _on_msg(self, _bus, msg):
         if msg.type == Gst.MessageType.EOS:
             self._playing = False; self._pos_timer.stop()
+            self._pos_playing = False
+            # Freeze anchor at end of track
+            if self._dur_ms_cached > 0:
+                self._anchor_now(float(self._dur_ms_cached))
             # Notify UI that playback stopped (viz must freeze immediately).
             # sig_playing and sig_end are both thread-safe pyqtSignals — they
             # are delivered queued to the main thread.
@@ -4053,12 +4189,16 @@ class Player(QObject):
         elif msg.type == Gst.MessageType.ERROR:
             err, _ = msg.parse_error()
             self._playing = False
+            self._pos_playing = False
             self.sig_playing.emit(False)
-            self._destroy(); self.sig_err.emit(str(err))
+            # _destroy() calls pipeline.set_state(NULL) — must run on main thread.
+            # Use QTimer to marshal back; store error message for after destroy.
+            _err_str = str(err)
+            def _do_destroy():
+                self._destroy()
+                self.sig_err.emit(_err_str)
+            QTimer.singleShot(0, _do_destroy)
         elif msg.type == Gst.MessageType.WARNING:
-            # PipeWire/PulseAudio can disconnect the sink when another app
-            # takes audio.  This arrives as a WARNING, not an ERROR, so the
-            # pipeline stays in PLAYING state but produces no sound.
             try:
                 warn, dbg = msg.parse_warning()
                 txt = (str(warn) + ' ' + (dbg or '')).lower()
@@ -4069,65 +4209,76 @@ class Player(QObject):
             except Exception:
                 pass
         elif msg.type == Gst.MessageType.ELEMENT:
-            if not self._viz_on and not getattr(self, '_overlay_needs_spec', False): return
+            need = self._viz_on or getattr(self, '_overlay_needs_spec', False)
+            if not need: return
             s = msg.get_structure()
             if s and s.get_name() == 'spectrum': self._parse_spectrum(s)
 
     def _parse_spectrum(self, s):
-        # Capture serial at call time (GIL makes Python int reads atomic).
         serial = self._spec_serial
 
-        # ── Extract stream-time via native GLib API (no string conversion) ──
-        stream_ns = 0
-        try:
-            ok_st, st = s.get_uint64('stream-time')
-            if ok_st:
-                stream_ns = int(st)
-            else:
-                ok_rt, rt = s.get_uint64('running-time')
-                if ok_rt: stream_ns = int(rt)
-        except Exception:
-            pass
+        # Serial change → new track/seek. Reset inertia and start a 150ms discard
+        # window so pre-seek buffered frames (still in decoder) are skipped.
+        if serial != getattr(self, '_last_parsed_serial', None):
+            self._last_parsed_serial = serial
+            self._viz_spec[:] = MIN_DB
+            self._viz_discard_until = _monotonic() + 0.15   # 150ms skip window
 
-        # ── Early rejection of pre-seek stale frames ────────────────────────
-        seek_target = self._seek_target_ns
-        if seek_target > 0 and stream_ns > 0 and stream_ns < seek_target - 200_000_000:
-            return  # behind seek target — pre-seek buffered frame
+        # Discard frames during the skip window
+        if _monotonic() < self._viz_discard_until:
+            return
 
-        # ── Extract magnitude via native GLib API first (fast path) ─────────
-        # Avoids the very expensive s.to_string() + regex for 2048 floats.
+        # ── Get raw magnitude values ──────────────────────────────────────────
+        raw = None
         try:
             val = s.get_value('magnitude')
             if val is not None and hasattr(val, '__len__'):
-                arr = _np.array(val[:GST_BANDS], dtype=_np.float32)
-                with self._spec_lock:
-                    self._spec_queue.append((serial, stream_ns, arr))
-                return
+                raw = val
         except Exception:
             pass
 
-        # ── Fallback: parse from to_string() (some GStreamer versions) ───────
-        try:
-            raw = s.to_string()
-        except Exception:
-            return
-        # Extract stream-time from string if native API gave nothing
-        if stream_ns == 0:
-            sm = self._STIME_RE.search(raw)
-            if sm:
-                stream_ns = int(sm.group(1))
-            else:
-                rm = self._RTIME_RE.search(raw)
-                if rm: stream_ns = int(rm.group(1))
-            if seek_target > 0 and stream_ns > 0 and stream_ns < seek_target - 200_000_000:
+        if raw is None:
+            try:
+                txt = s.to_string()
+                m = self._SPEC_RE.search(txt)
+                if m:
+                    raw = [float(x) for x in m.group(1).split(',') if x.strip()]
+            except Exception:
                 return
+
+        if raw is None:
+            return
+
+        # ── Full viz computation in GLib thread ───────────────────────────────
+        ba = self._viz_ba; bb = self._viz_bb; bt = self._viz_bt
+        col_idx = self._viz_col_idx
+        if ba is None or col_idx is None:
+            return
+
         try:
-            m = self._SPEC_RE.search(raw)
-            if m:
-                data = _np.array([float(x) for x in m.group(1).split(',') if x.strip()],
-                                  dtype=_np.float32)
-                with self._spec_lock:
-                    self._spec_queue.append((serial, stream_ns, data[:GST_BANDS]))
+            data = _np.asarray(raw[:GST_BANDS], dtype=_np.float32)
+            n = min(GST_BANDS, len(data))
+            sp = self._viz_spec
+            alpha = self._viz_inertia
+            sp[:n] *= alpha
+            sp[:n] += (1.0 - alpha) * data[:n]
+            da = sp[ba]
+            bh = (da + bt * (sp[bb] - da))
+            _MDB = MIN_DB
+            dv_cl = _np.clip(bh, _MDB, 0.0)
+            norm  = (dv_cl - _MDB) / (-_MDB)
+            bh = _np.where(dv_cl > _MDB, norm ** 0.38, 0.0).astype(_np.float32)
+            for d, sw in self._viz_smooth:
+                bh[d] = _np.dot(bh[sw[0]], sw[1])
+            safe_idx = _np.maximum(col_idx, 0)
+            col_bh   = bh[safe_idx]
+            col_bh[col_idx < 0] = 0.0
+            # Atomic stores — CPython object assignment is atomic under GIL
+            self._viz_bar_buf = bh
+            self._viz_col_buf = col_bh
+            cb = self._viz_overlay_cb
+            if cb is not None:
+                cb(bh.tolist())
         except Exception:
             pass
 
@@ -4191,11 +4342,14 @@ class MprisServer(QObject):
         self._track_serial = 0
         self._cover_on: bool = True          # mirrors the Settings cover toggle
         self._art_tmp_path: Optional[str] = None   # last written temp cover file
+        self._cached_art_uri: Optional[str] = None  # built in Qt thread
         GLib.idle_add(self._setup)
 
     # Called by MainWindow whenever the cover switch is toggled
     def set_cover_on(self, enabled: bool):
         self._cover_on = enabled
+        # Rebuild art URI with new setting (in Qt thread — safe for disk I/O)
+        self._cached_art_uri = self._build_art_uri(self._cur_track)
         GLib.idle_add(self._emit, ['Metadata'])
 
     def _setup(self):
@@ -4282,13 +4436,18 @@ class MprisServer(QObject):
             d['mpris:artUrl'] = GLib.Variant('s', art_uri)
         return GLib.Variant('a{sv}', d)
 
-    def _art_url_for(self, t: 'Track') -> Optional[str]:
+    def _art_ext(self, raw: bytes) -> str:
+        """Detect image format from magic bytes."""
+        if raw[:4] == b'\x89PNG':
+            return 'png'
+        return 'jpg'
+
+    def _build_art_uri(self, t: Optional['Track']) -> Optional[str]:
         """
-        Return a file:// URI pointing to a temp JPEG of the track's cover art,
-        but only when the cover switch is enabled and the track actually has art.
-        The previous temp file is deleted on each call to avoid accumulation.
+        Build a file:// URI for cover art. Called from Qt main thread so
+        blocking disk I/O (mutagen) is safe and doesn't block the GLib loop.
         """
-        if not self._cover_on:
+        if not self._cover_on or t is None:
             self._delete_art_tmp()
             return None
         raw = extract_cover_bytes(t.filepath)
@@ -4296,9 +4455,10 @@ class MprisServer(QObject):
             self._delete_art_tmp()
             return None
         import hashlib, tempfile
+        ext    = self._art_ext(raw)
         digest = hashlib.md5(raw).hexdigest()[:12]
         tmp_path = os.path.join(tempfile.gettempdir(),
-                                f'blackplayer_cover_{digest}.jpg')
+                                f'blackplayer_cover_{digest}.{ext}')
         if not os.path.exists(tmp_path):
             self._delete_art_tmp()
             try:
@@ -4309,6 +4469,10 @@ class MprisServer(QObject):
                 return None
         self._art_tmp_path = tmp_path
         return Path(tmp_path).as_uri()
+
+    def _art_url_for(self, t: 'Track') -> Optional[str]:
+        """Return cached art URI (built in Qt thread). Kept for backward compat."""
+        return getattr(self, '_cached_art_uri', None)
 
     def _delete_art_tmp(self):
         if self._art_tmp_path and os.path.exists(self._art_tmp_path):
@@ -4327,6 +4491,9 @@ class MprisServer(QObject):
 
     def notify_track(self, track: Optional[Track]):
         self._cur_track = track; self._track_serial += 1
+        # Build art URI in Qt main thread — extract_cover_bytes does disk I/O
+        # via mutagen; doing it here avoids blocking the GLib main loop.
+        self._cached_art_uri = self._build_art_uri(track)
         GLib.idle_add(self._emit, ['Metadata', 'PlaybackStatus'])
 
     def notify_status(self):
@@ -4984,20 +5151,22 @@ class ControlBar(QFrame):
         self._seeking   = False
         self._viz_on    = True
         self._overlay_viz_enabled = False
-        self._log_scale = True  # True=dB linear height (standard), False=linear amplitude
-        self._spec      = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)
+        self._log_scale = True
         self._bar_pos:  list = []
+        self._bar_x0    = _np.zeros(VIZ_BANDS, dtype=_np.int32)
+        self._bar_x1    = _np.zeros(VIZ_BANDS, dtype=_np.int32)
+        self._bar_bw    = 1
+        self._cap_rows  = []
+        self._cap_radius = 0
         self._bar_color = QColor(44, 36, 36)
         self._cur_track: Optional[Track] = None
         self._inertia   = 0.5
         self._viz_paused  = False
         self._focus_paused = False
 
-        self._seek_pending = False   # set on seek, cleared on first arriving frame
-        self._seek_gen    = 0        # incremented on seek/stop; cancels stale delayed frames
-
+        self._seek_pending = False
+        self._seek_gen    = 0
         self._delay_ms    = 0
-        self._pending_frame = None  # (data,) tuple when delay active
 
         # Settings and EQ popups (lazy-created)
         self._settings_popup: Optional[SettingsPopup] = None
@@ -5120,12 +5289,21 @@ class ControlBar(QFrame):
         # signals
         player.sig_pos.connect(self._on_pos)
         player.sig_dur.connect(self._on_dur)
-        player.sig_spectrum.connect(self._on_spectrum)
         player.sig_playing.connect(self._on_playing_changed)
         player.sig_seek_flush.connect(self._on_seek_flush)
         self._seek.sliderPressed.connect(self._on_press)
         self._seek.sliderReleased.connect(self._on_release)
         self._seek.sliderMoved.connect(self._on_moved)
+
+        # ── Render timer: drives repaints at ≤30 fps ─────────────────────────
+        # _apply_frame ONLY stores data; this timer fires update() independently.
+        # This keeps UI events (mouse/keyboard) responsive — they run between
+        # 33ms paint intervals instead of being starved by back-to-back repaints.
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(16)   # 60 fps target
+        self._render_timer.timeout.connect(self._render_tick)
+        # Pre-compute bar layout once widget has a valid size (after first layout pass)
+        QTimer.singleShot(0, self._precompute_bars)
 
     # --- EQ popup ---
     def _ensure_eq_popup(self):
@@ -5170,7 +5348,7 @@ class ControlBar(QFrame):
             pop.overlay_viz_toggled.connect(
                 lambda on: getattr(self, '_blackout_ref', None) and
                            self._blackout_ref.set_overlay_viz(on))
-            pop.overlay_viz_toggled.connect(self._player.set_overlay_viz_needed)
+            pop.overlay_viz_toggled.connect(self._player.set_overlay_needs_spectrum)
             pop.overlay_lyrics_toggled.connect(
                 lambda on: getattr(self, '_blackout_ref', None) and
                            self._blackout_ref.set_overlay_lyrics(on))
@@ -5206,6 +5384,8 @@ class ControlBar(QFrame):
     def set_overlay_viz_enabled(self, on: bool):
         self._overlay_viz_enabled = on
         self._player.set_overlay_needs_spectrum(on)
+        # Update overlay_cb in GLib thread's viz tables
+        self._player._viz_overlay_cb = self._overlay_cb if on else None
 
     def set_blackout_ref(self, overlay):
         self._blackout_ref = overlay
@@ -5353,27 +5533,57 @@ class ControlBar(QFrame):
     def resizeEvent(self, e): super().resizeEvent(e); self._precompute_bars()
 
     def _precompute_bars(self):
-        w = float(self.width())
-        if w < 2: return
-        # Bars fill the full width; width scales with window.
-        # Gap is always exactly 1px between bars.
-        gap       = 1.0
-        bw        = (w - gap * (VIZ_BANDS - 1)) / VIZ_BANDS
-        bw        = max(1.0, bw)
-        stride_px = bw + gap
-        self._bar_pos = [(d * stride_px, bw) for d in range(VIZ_BANDS)]
+        iw = self.width()
+        if iw < 2: return
 
+        # ── Integer bar geometry: all bars same width, exactly 1px gap ─────────
+        # bw * VIZ_BANDS + 1 * (VIZ_BANDS-1) = total_used
+        bw = max(1, (iw - (VIZ_BANDS - 1)) // VIZ_BANDS)
+        total_used = bw * VIZ_BANDS + (VIZ_BANDS - 1)
+        offset = max(0, (iw - total_used) // 2)   # center the bar group
+
+        bar_x0_list = [offset + i * (bw + 1) for i in range(VIZ_BANDS)]
+        self._bar_pos = [(float(x), float(bw)) for x in bar_x0_list]   # kept for compat
+        self._bar_x0 = _np.array(bar_x0_list, dtype=_np.int32)
+        self._bar_x1 = _np.array([x + bw for x in bar_x0_list], dtype=_np.int32)
+        self._bar_bw = bw
+
+        # ── Column→bar mapping ────────────────────────────────────────────────
+        col_bar = _np.full(iw, -1, dtype=_np.int32)
+        for i, x0 in enumerate(bar_x0_list):
+            col_bar[x0:x0+bw] = i
+        self._col_bar_idx = col_bar
+
+        # ── Rounded-top cap mask (no antialiasing, precomputed once per bw) ──
+        # radius = bw // 2; for each row in 0..radius-1: pixel range [xl, xr)
+        radius = max(0, bw // 2)
+        if radius > 0 and bw > 1:
+            cap_rows = []
+            cx = (bw - 1) / 2.0        # horizontal centre of bar
+            cy = radius - 0.5           # circle centre row (from top of cap)
+            r2 = float(radius * radius)
+            for row in range(radius):
+                dy = (row + 0.5) - cy
+                dx2 = r2 - dy * dy
+                if dx2 <= 0:
+                    cap_rows.append((bw // 2, bw // 2))   # empty row
+                else:
+                    import math as _math
+                    dx = _math.sqrt(dx2)
+                    xl = max(0, int(_math.floor(cx - dx + 0.5)))
+                    xr = min(bw, int(_math.ceil(cx + dx - 0.5)) + 1)
+                    cap_rows.append((xl, xr))
+            self._cap_rows  = cap_rows
+            self._cap_radius = radius
+        else:
+            self._cap_rows   = []
+            self._cap_radius = 0
+
+        # ── Freq mapping and smooth tables ────────────────────────────────────
         if getattr(self, '_log_scale', True):
-            # Log frequency: fractional centre-freq interpolation.
-            # fracs[d] = continuous spec band index for bar d's centre freq.
-            # For bars whose frac has a unique integer part (high freq): t alone
-            # gives a unique value — no blending needed.
-            # For low-freq runs where multiple bars share the same integer b0,
-            # apply a spatial box-filter to hide the flat block.
             F_MIN = 20.0; F_MAX = 20000.0; FS_HALF = 24000.0
             FULL_HZ = 20.0; FADE_HZ = 60.0
             log_min = math.log10(F_MIN); log_max = math.log10(F_MAX)
-
             fracs = []; fc_hz = []
             for d in range(VIZ_BANDS):
                 f_lo = 10.0 ** (log_min + d / VIZ_BANDS * (log_max - log_min))
@@ -5381,15 +5591,11 @@ class ControlBar(QFrame):
                 fc = (f_lo * f_hi) ** 0.5
                 fracs.append(fc * GST_BANDS / FS_HALF)
                 fc_hz.append(fc)
-
-            # Interp table: bar d → lerp(spec[b0], spec[b1], t)
             interp = []
             for frac in fracs:
                 b0 = max(0, min(GST_BANDS-1, int(frac)))
                 b1 = min(b0+1, GST_BANDS-1)
                 interp.append((b0, b1, frac - int(frac)))
-
-            # Box-filter weights (only for shared-b0 runs below FADE_HZ)
             b0s = [int(f) for f in fracs]
             run_len_at = {}
             d = 0
@@ -5401,7 +5607,7 @@ class ControlBar(QFrame):
             for d in range(VIZ_BANDS):
                 fc = fc_hz[d]; rl = run_len_at.get(d, 1)
                 if fc >= FADE_HZ or rl <= 1:
-                    smooth_w.append(None)   # None = read directly (no blending)
+                    smooth_w.append(None)
                 else:
                     strength = (1.0 if fc < FULL_HZ
                                 else 1.0 - (fc - FULL_HZ) / (FADE_HZ - FULL_HZ))
@@ -5409,39 +5615,45 @@ class ControlBar(QFrame):
                     lo = max(0, d - hw); hi = min(VIZ_BANDS-1, d + hw)
                     n  = hi - lo + 1
                     smooth_w.append(tuple((nb, 1.0/n) for nb in range(lo, hi+1)))
-            # Convert to numpy arrays for vectorized _apply_frame
-            ba_arr = _np.array([x[0] for x in interp], dtype=_np.int32)
-            bb_arr = _np.array([x[1] for x in interp], dtype=_np.int32)
-            bt_arr = _np.array([x[2] for x in interp], dtype=_np.float32)
-            self._bar_ba = ba_arr; self._bar_bb = bb_arr; self._bar_bt = bt_arr
-            self._bar_interp  = interp   # kept for reference
-            self._smooth_w    = smooth_w
         else:
-            # Linear: bar d samples 0-20kHz uniformly using GST_BANDS resolution
-            _lin_scale = (20000.0 / 24000.0) * GST_BANDS / VIZ_BANDS  # ~6.67
-            _lin_interp = []
+            _lin_scale = (20000.0 / 24000.0) * GST_BANDS / VIZ_BANDS
+            interp = []
             for d in range(VIZ_BANDS):
                 frac = d * _lin_scale
                 b0 = max(0, min(GST_BANDS-1, int(frac)))
                 b1 = min(b0+1, GST_BANDS-1)
-                _lin_interp.append((b0, b1, frac - int(frac)))
-            ba_arr = _np.array([x[0] for x in _lin_interp], dtype=_np.int32)
-            bb_arr = _np.array([x[1] for x in _lin_interp], dtype=_np.int32)
-            bt_arr = _np.array([x[2] for x in _lin_interp], dtype=_np.float32)
-            self._bar_ba = ba_arr; self._bar_bb = bb_arr; self._bar_bt = bt_arr
-            self._bar_interp    = _lin_interp
-            self._smooth_w      = None
+                interp.append((b0, b1, frac - int(frac)))
+            smooth_w = []
+
+        ba_arr = _np.array([x[0] for x in interp], dtype=_np.int32)
+        bb_arr = _np.array([x[1] for x in interp], dtype=_np.int32)
+        bt_arr = _np.array([x[2] for x in interp], dtype=_np.float32)
+
+        entries = []
+        for d, sw in enumerate(smooth_w):
+            if sw is not None:
+                nb_arr = _np.array([nb for nb, _ in sw], dtype=_np.int32)
+                wk_arr = _np.array([wk for _, wk in sw], dtype=_np.float32)
+                entries.append((d, (nb_arr, wk_arr)))
+
+        self._player.set_viz_tables(
+            ba_arr, bb_arr, bt_arr, col_bar, entries,
+            self._inertia,
+            overlay_cb=self._overlay_cb if getattr(self, '_overlay_viz_enabled', False) else None
+        )
 
     def _on_viz_toggle(self, on: bool):
         self._viz_on = on
-        # Always call _update_spec_active so overlay keeps running if needed
         self._player.set_viz_active(on and not self._viz_paused)
-        if not on:
+        if on:
+            self._render_timer.start()
+        else:
             _bref = getattr(self, '_blackout_ref', None)
             _ov_on = _bref is not None and getattr(_bref, '_ov_viz', False)
             if not _ov_on:
-                self._spec[:] = MIN_DB
-                self._bar_heights = []
+                self._render_timer.stop()
+            self._player._viz_spec[:] = MIN_DB
+            self._player._viz_col_buf = None
         self.update()
 
     def _on_log_toggle(self, on: bool):
@@ -5452,8 +5664,15 @@ class ControlBar(QFrame):
     def _on_delay_change(self, v: int):
         self._delay_ms = v
 
+    def _overlay_cb(self, bh_list):
+        """Called from GLib thread when overlay viz is active."""
+        _bref = getattr(self, '_blackout_ref', None)
+        if _bref is not None:
+            _bref.push_viz_frame(bh_list)
+
     def _on_inertia_change(self, v: int):
         self._inertia = v / 100.0
+        self._player._viz_inertia = self._inertia
 
     def _on_brightness_change(self, v: int):
         self._brightness_v = v
@@ -5488,149 +5707,111 @@ class ControlBar(QFrame):
         self.cover_on_changed.emit(on)
 
     def _on_seek_flush(self):
-        """Mark viz as awaiting first post-seek frame — no time window, no delay."""
-        self._seek_gen += 1          # invalidate any in-flight delayed frames
+        """Mark viz as awaiting first post-seek frame."""
+        self._seek_gen += 1
         self._seek_pending = True
-        self._spec[:] = MIN_DB
-        self._bar_heights = []
+        self._player._viz_spec[:] = MIN_DB
+        self._player._viz_col_buf = None
+        self._player._viz_bar_buf = None
+        # Force 150ms discard window in GLib thread too
+        self._player._viz_discard_until = _monotonic() + 0.15
         self.update()
 
     def set_focus_paused(self, paused: bool):
         self._focus_paused = paused
-        # _viz_paused is driven by _on_playing_changed (play/pause) AND focus changes.
-        # When focus is lost we want to stop rendering display bars but keep overlay
-        # frames flowing if the overlay viz is active.
         self._viz_paused = paused or not self._player.playing
         self._player.set_viz_active(self._viz_on and not paused)
         if getattr(self, '_overlay_viz_enabled', False):
             self._player.set_overlay_needs_spectrum(True)
-        if paused:
-            # Only flush if overlay viz is NOT active (overlay needs live frames)
-            _bref = getattr(self, '_blackout_ref', None)
-            _ov_on = _bref is not None and getattr(_bref, '_ov_viz', False)
-            if not _ov_on:
-                self._spec[:] = MIN_DB
-                self._bar_heights = []
-                self.update()
-            else:
-                # Clear display bars but keep accepting frames for overlay
-                self._spec[:] = MIN_DB
-                self._bar_heights = []
-                self.update()
-
-    @pyqtSlot(list)
-    def _on_spectrum(self, data: list):
-        # If a seek just fired, the first frame that arrives clears the pending
-        # flag and is rendered immediately — no time window needed.
-        if self._seek_pending:
-            self._seek_pending = False
-        # Check overlay need before early-exit on viz_paused
-        _bref = getattr(self, '_blackout_ref', None)
-        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False)
-        if self._viz_paused and not _ov:
-            return  # playback paused and overlay doesn't need frames either
-        if self._delay_ms <= 0:
-            self._apply_frame(data)
-        else:
-            d = list(data)  # capture
-            gen = self._seek_gen
-            QTimer.singleShot(self._delay_ms,
-                              lambda: self._apply_delayed(d, gen))
-
-    def _apply_delayed(self, data: list, gen: int = -1):
-        """Called by singleShot after delay_ms when delay > 0."""
-        if gen >= 0 and gen != self._seek_gen:
-            return  # seek or stop happened while frame was in-flight — discard
-        self._apply_frame(data)
-
-    def _apply_frame(self, data):
-        """Apply spectrum frame with numpy, precompute bar heights, trigger display."""
-        _bref = getattr(self, '_blackout_ref', None)
-        _ov   = _bref is not None and getattr(_bref, '_ov_viz', False) and self._player.playing
-        _disp = self._viz_on and not self._viz_paused
-        if not _disp and not _ov:
-            return
-
-        # ── Inertia smoothing (vectorized) ───────────────────────────────────
-        alpha = self._inertia
-        sp = self._spec  # float32 numpy array, shape (GST_BANDS,)
-        if not isinstance(data, _np.ndarray):
-            data = _np.array(data, dtype=_np.float32)
-        n = min(GST_BANDS, len(data))
-        sp[:n] *= alpha
-        sp[:n] += (1.0 - alpha) * data[:n]
-
-        # ── Frequency → bar mapping (vectorized) ─────────────────────────────
-        ba = self._bar_ba; bb = self._bar_bb; bt = self._bar_bt
-        da = sp[ba]
-        dv = da + bt * (sp[bb] - da)   # lerp between adjacent bands
-
-        # ── Power scale ──────────────────────────────────────────────────────
-        # Clamp to [MIN_DB, 0], normalise 0..1, apply perceptual curve.
-        # power=0.38: quiet signals ~20% lower than 0.30 but still visible.
-        _MDB = MIN_DB
-        dv_cl = _np.clip(dv, _MDB, 0.0)
-        norm  = (dv_cl - _MDB) / (-_MDB)   # 0..1
-        bh_np = _np.where(dv_cl > _MDB, norm ** 0.38, 0.0).astype(_np.float32)
-
-        # ── Box-filter for low-freq duplicate bins (only a handful of bars) ──
-        _sw = self._smooth_w
-        if _sw:
-            bh_list = bh_np.tolist()
-            for _d, sw in enumerate(_sw):
-                if sw is not None:
-                    bh_list[_d] = sum(bh_list[nb] * wk for nb, wk in sw)
-            bh_np = _np.array(bh_list, dtype=_np.float32)
-
-        self._bar_heights = bh_np.tolist()
-        if _disp:
+        if self._viz_paused:
+            self._render_timer.stop()
+            self._player._viz_spec[:] = MIN_DB
+            self._player._viz_col_buf = None
             self.update()
-        if _ov:
-            _bref.push_viz_frame(self._bar_heights)
+        elif self._viz_on:
+            self._render_timer.start()
+
+    def _render_tick(self):
+        """Called at 60 fps by _render_timer. GLib thread already computed bar
+        heights — main thread just reads and repaints. Zero numpy, zero blocking."""
+        if self._viz_on and not self._viz_paused and self._player._viz_bar_buf is not None:
+            self.update()
+
     def paintEvent(self, _):
-        p = QPainter(self); p.fillRect(self.rect(), QColor('#000000'))
-        if self._viz_on and not self._viz_paused and self._bar_pos:
-            h = float(self.height()); w = float(self.width()); span = -MIN_DB
-            _bw = self._bar_pos[0][1] if self._bar_pos else 2.0
-            rad = min(_bw * 0.5, _bw)  # full semicircle top
-            use_aa = True
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            # Clip to widget so that bars drawn *below* h are cut off;
-            # this makes the bottom corners invisible → only tops are rounded.
-            p.setClipRect(QRectF(0, 0, w, h))
-            brush = getattr(self, '_brush_cache', None)
-            if brush is None: brush = QBrush(self._bar_color)
-            _bh = getattr(self, '_bar_heights', None) or []
-            p.setBrush(brush)
-            for i, (x, bw) in enumerate(self._bar_pos):
-                norm = _bh[i] if i < len(_bh) else 0.0
-                if norm < 0.005: continue
-                bar_h = norm * h
-                if use_aa and bar_h > rad:
-                    p.drawRoundedRect(QRectF(x, h - bar_h, bw, bar_h + rad), rad, rad)
-                else:
-                    p.drawRect(QRectF(x, h - bar_h, bw, bar_h))
-            p.setClipping(False)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.setPen(QPen(QColor(BORD), 1)); p.drawLine(0, 0, self.width(), 0)
+        iw = self.width(); ih = self.height()
+        if iw <= 0 or ih <= 0:
+            return
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.fillRect(self.rect(), QColor('#000000'))
+
+        if self._viz_on and not self._viz_paused:
+            bh  = self._player._viz_bar_buf   # (VIZ_BANDS,) float32 | None
+
+            if bh is not None and len(bh) == VIZ_BANDS:
+                bc = self._bar_color
+                cr = bc.red(); cg = bc.green(); cb_ = bc.blue()
+
+                buf_shape = (ih, iw, 4)
+                if getattr(self, '_viz_buf_shape', None) != buf_shape:
+                    self._viz_buf       = _np.zeros(buf_shape, dtype=_np.uint8)
+                    self._viz_buf_shape = buf_shape
+                buf = self._viz_buf
+                buf[:] = 0
+
+                bar_x0   = self._bar_x0    # (VIZ_BANDS,) int32
+                bw       = self._bar_bw    # int
+                cap_rows = self._cap_rows  # list of (xl, xr) per cap row
+                radius   = self._cap_radius
+
+                for i in range(VIZ_BANDS):
+                    bar_px = int(bh[i] * ih)
+                    if bar_px <= 0:
+                        continue
+                    x0 = int(bar_x0[i])
+                    x1 = x0 + bw
+                    y0 = ih - bar_px
+
+                    if radius > 0 and bar_px > radius and cap_rows:
+                        # Rectangle body (below cap)
+                        s = buf[y0 + radius:, x0:x1]
+                        s[..., 0] = cr; s[..., 1] = cg; s[..., 2] = cb_; s[..., 3] = 255
+                        # Rounded cap rows
+                        for row, (xl, xr) in enumerate(cap_rows):
+                            r_y = y0 + row
+                            if r_y < ih and xl < xr:
+                                s = buf[r_y, x0+xl:x0+xr]
+                                s[..., 0] = cr; s[..., 1] = cg; s[..., 2] = cb_; s[..., 3] = 255
+                    else:
+                        # Short bar or bw==1 — plain rectangle
+                        s = buf[y0:, x0:x1]
+                        s[..., 0] = cr; s[..., 1] = cg; s[..., 2] = cb_; s[..., 3] = 255
+
+                p.drawImage(0, 0, QImage(buf.data, iw, ih, iw * 4,
+                                         QImage.Format.Format_RGBA8888))
+
+        p.setPen(QPen(QColor(BORD), 1))
+        p.drawLine(0, 0, self.width(), 0)
         p.end()
 
     def _on_playing_changed(self, playing: bool):
         if playing:
-            # Resume viz only if window focus isn't suppressing it
             _focus_paused = getattr(self, '_focus_paused', False)
             self._viz_paused = _focus_paused
             self._seek_pending = False
+            self._player.set_viz_active(self._viz_on and not _focus_paused)
+            if self._viz_on and not _focus_paused:
+                self._render_timer.start()
         else:
-            # Stop viz rendering immediately
             self._viz_paused = True
             self._seek_pending = False
-            self._seek_gen += 1      # cancel any in-flight delayed frames
-            self._spec[:] = MIN_DB
-            self._bar_heights = []
+            self._seek_gen += 1
+            self._render_timer.stop()
+            self._player._viz_spec[:] = MIN_DB
+            self._player._viz_col_buf = None
+            self._player._viz_bar_buf = None
             self.update()
-            # Clear overlay viz bars too
             _bref = getattr(self, '_blackout_ref', None)
             if _bref is not None and getattr(_bref, '_ov_viz', False):
                 _bref.push_viz_frame([0.0] * VIZ_BANDS)
@@ -5639,8 +5820,10 @@ class ControlBar(QFrame):
     def _on_release(self):
         if self._dur_ms > 0 and self._player.has_pipe:
             self._on_seek_flush()  # timestamp + clear spec
-            self._player.seek(int(self._seek.value() * self._dur_ms / 1000))
-            QTimer.singleShot(80, lambda: self._on_pos(self._player.position_ms()))
+            seek_ms = int(self._seek.value() * self._dur_ms / 1000)
+            self._player.seek(seek_ms)
+            # Anchor is updated inside seek() immediately — emit UI update now
+            self._on_pos(self._player.position_ms())
         self._seeking = False
 
     def _on_moved(self, val):
@@ -5657,7 +5840,7 @@ class ControlBar(QFrame):
         self._lbl_artist.setText(t.artist)
         self._seek.setValue(0); self._lbl_cur.setText('0:00')
         self._dur_ms = int(t.duration*1000); self._lbl_tot.setText(t.dur_str())
-        self._spec[:] = MIN_DB
+        self._player._viz_spec[:] = MIN_DB
         # Update cover thumbnail — always show whatever is in cache (or default)
         if self._cover_lbl.isVisible():
             pm = get_cover_pixmap(t.filepath, 64, 8)
@@ -5909,7 +6092,7 @@ class MainWindow(QMainWindow):
         self._ctrlbar.btn_blackout.clicked.connect(self._blackout.show_blackout)
         # Feed track info + position updates to the overlay
         self._player.sig_pos.connect(
-            lambda ms: self._blackout.set_pos(ms, self._player.duration_ms()))
+            lambda ms: self._blackout.set_pos(ms, self._ctrlbar._dur_ms))
         self._ctrlbar.cover_on_changed.connect(self._on_cover_toggle)
         self._ctrlbar.accent_changed.connect(self._on_accent_refresh)
         self._ctrlbar.btn_lyrics.clicked.connect(self._toggle_lyrics)
@@ -6296,6 +6479,8 @@ class MainWindow(QMainWindow):
         self._player.load(t.filepath)
         self._ctrlbar.set_track(t); self._ctrlbar.set_play_icon(True)
         self._cur_track_mw = t
+        # Clear overlay lyrics immediately — new track starts fresh
+        self._blackout.set_lyrics_context('', '', '')
         if self._lyrics_panel.isVisible():
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
             self._lyrics_panel.set_track(t, deferred=deferred)
