@@ -1,4 +1,5 @@
 # VoidPulse
+<img width="1395" height="610" alt="org voidpulse VoidPulse" src="https://github.com/user-attachments/assets/17badd45-a0e1-42e8-9ef9-2b92baa11b80" />
 
 Best Music Player for OLED and Touchscreens on Linux
 - Parametric EQ
