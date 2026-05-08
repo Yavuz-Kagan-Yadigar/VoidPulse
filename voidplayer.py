@@ -8,138 +8,142 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
  MODULE STRUCTURE  (actual line numbers — auto-verified)
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
-   apply_theme()               L201   Switch dark/light palette globals + rebuild SS
-   _apply_app_palette()        L215   Sync QPalette with current globals
-   make_acch()                 L235   Derive highlight colour from accent
-   make_stylesheet()           L264   Build global QSS string
+   apply_theme()               L206   Switch dark/light palette globals + rebuild SS
+   _apply_app_palette()        L220   Sync QPalette with current globals
+   make_acch()                 L240   Derive highlight colour from accent
+   make_stylesheet()           L269   Build global QSS string
 
  CONSTANTS & GLOBALS
    SUPPORTED_EXT, CONFIG_PATH, VIZ_BANDS, GST_BANDS, EQ_*, RAD …
 
  WIDGETS
-   ToggleSwitch                L412   Animated two-state toggle (single/two-label)
-   JumpSlider                  L555   QSlider that jumps to click/touch position
-   SliderRow                   L593   Label + JumpSlider + value label row
-   SettingsPopup               L625   Settings panel popup (child widget, Wayland-safe)
-   TagEditDialog               L1009  Modal tag editor with cover management
-   EQSliderCell                L1222  Table cell widget for a single EQ parameter
-   TouchComboBox               L2153  QComboBox immune to touch double-fire close
-   EqPopup                     L2172  Parametric EQ popup + preset management
-   EQGraph                     L2534  Frequency response curve widget
-   BlackoutOverlay             L2643  Full-screen OLED burn-in protection overlay
-   SeekSlider                  L5707  Touch-aware seek slider
-   LongPressFilter             L5819  Event filter: long-press → context menu
-   RepeatButton                L7008  Tri-state repeat cycle button
-   _FullscreenBtn              L7052  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L7100  Play/pause button with spinning reload indicator
-   TitleBarButton              L8267  Frameless window-control button
-   TitleBarCloseButton         L8292  Close variant (red hover)
-   BlackTitleBar               L8296  Custom frameless titlebar
-   _SpinningOverlay            L9588  Semi-transparent blocking overlay with spinner
+   ToggleSwitch                L417   Animated two-state toggle (single/two-label)
+   JumpSlider                  L560   QSlider that jumps to click/touch position
+   SliderRow                   L598   Label + JumpSlider + value label row
+   SettingsPopup               L630   Settings panel popup (child widget, Wayland-safe)
+   TagEditDialog               L1014  Modal tag editor with cover management
+   EQSliderCell                L1227  Table cell widget for a single EQ parameter
+   TouchComboBox               L2168  QComboBox immune to touch double-fire close
+   EqPopup                     L2187  Parametric EQ popup + preset management
+   EQGraph                     L2542  Frequency response curve widget
+   BlackoutOverlay             L2651  Full-screen OLED burn-in protection overlay
+   SeekSlider                  L5738  Touch-aware seek slider
+   LongPressFilter             L5850  Event filter: long-press → context menu
+   RepeatButton                L7044  Tri-state repeat cycle button
+   _FullscreenBtn              L7088  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L7136  Play/pause button with spinning reload indicator
+   TitleBarButton              L8291  Frameless window-control button
+   TitleBarCloseButton         L8316  Close variant (red hover)
+   BlackTitleBar               L8320  Custom frameless titlebar
+   _SpinningOverlay            L9638  Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L1587  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L1598  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L1629  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L1653  LrcLib API sources
-   ClickableLyricLine          L1803  QLabel that emits clicked(ms)
-   LyricsFetcher               L1816  Worker: embedded tags → 9 online sources
-   LyricsPanel                 L1890  Scrollable lyric display with sync highlight
+   _lrc_parse()                L1592  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L1603  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L1644  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L1668  LrcLib API sources
+   _src_lyrics_ovh()           L1696  Lyrics.ovh fallback source
+   ClickableLyricLine          L1818  QLabel that emits clicked(ms)
+   LyricsFetcher               L1831  Worker: embedded tags → 9 online sources
+   LyricsPanel                 L1905  Scrollable lyric display with sync highlight
 
  COVER ART
-   _trim_cover_cache()         L3070  Evict oldest entries when cache exceeds limit
-   _rounded_pixmap()           L3108  Scale + crop + round-corner mask
-   draw_default_cover()        L3132  Render clef placeholder pixmap
-   _cover_disk_key()           L3178  SHA1 hash for disk cache filename
-   get_cover_pixmap()          L3186  Non-blocking async cover lookup (paint path)
-   get_cover_pixmap_sync()     L3204  Blocking cover lookup (worker threads)
-   _CoverTask                  L3239  QRunnable for one cover load
-   AsyncCoverLoader            L3280  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L3372 Module singleton factory
-   _clear_cover_disk_cache()   L3378  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3387  Shared base class for fetch popups
-     closeEvent()              L3522  Cancel worker + join thread before closing
-   LibraryCoverFetchWorker     L3549  Sequential per-track cover fetcher
-   CoverFetchPopup             L3586  Modal "fetch covers for library" dialog
+   _trim_cover_cache()         L3078  Evict oldest entries when cache exceeds limit
+   _rounded_pixmap()           L3116  Scale + crop + round-corner mask
+   draw_default_cover()        L3140  Render clef placeholder pixmap
+   _cover_disk_key()           L3186  SHA1 hash for disk cache filename
+   get_cover_pixmap()          L3194  Non-blocking async cover lookup (paint path)
+   get_cover_pixmap_sync()     L3212  Blocking cover lookup (worker threads)
+   _CoverTask                  L3247  QRunnable for one cover load
+   AsyncCoverLoader            L3288  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L3380 Module singleton factory
+   _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
+   _BaseFetchPopup             L3395  Shared base class for fetch popups (force checkbox)
+     closeEvent()              L3534  Cancel worker + join thread before closing
+   LibraryCoverFetchWorker     L3561  Sequential per-track cover fetcher
+   CoverFetchPopup             L3602  Modal "fetch covers for library" dialog
 
  TAGS / METADATA
-   fetch_cover_online()        L1366  Try iTunes/Deezer/MusicBrainz/LastFM
-   lookup_tags_online()        L1441  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L1469  Write title/artist/album via mutagen
-   embed_cover_bytes()         L1498  Write cover into audio tags
-   embed_lyrics()              L1539  Write lyrics into audio tags
-   _open_audio()               L3008  Open audio file with mutagen (fallback chain)
-   _tag() / _vtag()            L2990  Tag value helpers (case-insensitive Vorbis)
-   extract_cover_bytes()       L3083  Read raw cover bytes from audio tags
-   read_metadata()             L3034  Build Track from mutagen
-   LibraryTagFetchWorker       L3655  Sequential per-track tag fetcher
-   TagFetchPopup               L3695  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L3737  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L3789  Modal "fetch lyrics for library" dialog
+   fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
+   lookup_tags_online()        L1446  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L1474  Write title/artist/album via mutagen
+   embed_cover_bytes()         L1503  Write cover into audio tags
+   embed_lyrics()              L1544  Write lyrics into audio tags
+   _open_audio()               L3016  Open audio file with mutagen (fallback chain)
+   _tag() / _vtag()            L2998  Tag value helpers (case-insensitive Vorbis)
+   extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
+   read_metadata()             L3042  Build Track from mutagen
+   LibraryTagFetchWorker       L3671  Sequential per-track tag fetcher
+   TagFetchPopup               L3716  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L3758  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L3814  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L3846  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L3857  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L3894  Sequential per-track file renamer
+   RenamePopup                 L3943  Modal "batch rename library" dialog
 
  PLAYER
-   RepeatMode                  L4196  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L4199  Biquad peaking filter coefficients
-   Player                      L4222  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L4350  Load URI, build sink bin, start playback
-     play_pause()              L4396  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L4481  Load + seek after dead-pipe recovery
-     _resume_with_reload()     L4514  Reload pipeline at current position
-     _check_sink_health()      L4573  Post-resume stall detection
-     _reload_at_pos()          L4614  WARNING-path pipeline reload (separate guard)
-     seek()                    L4649  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L4837 Update biquad coefficients (GLib idle)
-     _make_sink_bin()          L4865  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L4932  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L5066  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L5141  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L5170  Qt thread: anchor correction from GLib query result
-     _store_spectrum()         L5257  GLib-thread spectrum → shared buffer
-     _compute_viz_frame()      L5360  Main-thread smoothed bar computation (zero-alloc)
+   RepeatMode                  L4238  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L4241  Biquad peaking filter coefficients
+   Player                      L4264  GStreamer playbin wrapper + EQ + spectrum viz
+     load()                    L4394  Load URI, build sink bin, start playback
+     play_pause()              L4442  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L4529  Load + seek after dead-pipe recovery
+     _resume_with_reload()     L4581  Reload pipeline at current position
+     _reload_at_pos()          L4621  WARNING-path pipeline reload (separate guard)
+     seek()                    L4665  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L4853 Update biquad coefficients (GLib idle)
+     _make_sink_bin()          L4881  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L4948  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L5086  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L5148  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L5178  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L5288  GLib-thread spectrum → shared buffer
+     _compute_viz_frame()      L5391  Main-thread smoothed bar computation (zero-alloc)
 
  MPRIS
-   MprisServer                 L5440  MPRIS2 D-Bus interface (GLib thread)
+   MprisServer                 L5471  MPRIS2 D-Bus interface (GLib thread)
 
  LIBRARY
-   Track                       L2965  @dataclass: filepath + metadata
-   scan_folder()               L4109  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4124  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4146  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4164  Non-blocking playlist loader for config restore
+   Track                       L2973  @dataclass: filepath + metadata
+   scan_folder()               L4151  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4166  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L4188  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L4206  Non-blocking playlist loader for config restore
 
  VIEWS
-   TrackTable                  L5871  QTableWidget with covers + sort + touch scroll
-   GalleryView                 L6128  Virtual-scroll card gallery (Z/S layout modes)
-   PlaylistPage                L6677  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L6758  Sidebar playlist row (label + delete button)
-   Sidebar                     L6822  Left panel: search + library nav + playlist list
+   TrackTable                  L5902  QTableWidget with covers + sort + touch scroll
+   GalleryView                 L6163  Virtual-scroll card gallery (Z/S layout modes)
+   PlaylistPage                L6712  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L6794  Sidebar playlist row (label + delete button)
+   Sidebar                     L6858  Left panel: search + library nav + playlist list
 
  CONTROL BAR
-   ControlBar                  L7166  Seek bar + transport + viz + settings/EQ toggles
-     _ensure_eq_popup()        L7382  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L7407  Lazy-create SettingsPopup singleton
-     _reset_idle_timer()       L7486  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L7496  Fire overlay when idle threshold reached
-     init_from_config()        L7659  Apply saved config dict to all sub-widgets
-     config_state()            L7751  Collect current state → config dict
-     _precompute_bars()        L7780  Freq→bin map + bar geometry + cap offset arrays
-     paintEvent()              L8077  Fully vectorised numpy pixel-buffer rendering; skips stale-width frames
+   ControlBar                  L7209  Seek bar + transport + viz + settings/EQ toggles
+     _ensure_eq_popup()        L7416  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L7441  Lazy-create SettingsPopup singleton
+     _reset_idle_timer()       L7520  Reset OLED overlay idle countdown
+     _on_idle_timeout()        L7530  Fire overlay when idle threshold reached
+     init_from_config()        L7714  Apply saved config dict to all sub-widgets
+     config_state()            L7806  Collect current state → config dict
+     _precompute_bars()        L7835  Freq→bin map + bar geometry + cap offset arrays
+     paintEvent()              L8125  Fully vectorised numpy pixel-buffer rendering
 
  MAIN WINDOW
-   MainWindow                  L8378  QMainWindow: layout, signals, config I/O
-     _build_ui()               L2207  Construct widget tree
-     _connect_signals()        L8482  Wire all cross-widget signals
-     _refresh_all_theme_widgets() L8587 Async theme switch + overlay
-     _edit_tags()              L8774  Tag-edit dialog + mutagen write-back
-     _start_playback()         L9111  Load track + update all UI state
-     _advance()                L9193  Next track (shuffle/repeat logic)
-     _save_config()            L9349  JSON config persistence (skips __open_with__)
-     _load_config()            L9465  JSON config restore
-     _handle_open_with()       L9394  Load file-manager / CLI "Open With" track
-     closeEvent()              L9572  Purge __open_with__ playlist, then save + stop
+   MainWindow                  L8433  QMainWindow: layout, signals, config I/O
+     _build_ui()               L8473  Construct widget tree
+     _connect_signals()        L8537  Wire all cross-widget signals
+     _refresh_all_theme_widgets() L8642 Async theme switch + overlay
+     _edit_tags()              L8829  Tag-edit dialog + mutagen write-back
+     _start_playback()         L9161  Load track + update all UI state
+     _advance()                L9243  Next track (shuffle/repeat logic)
+     _save_config()            L9399  JSON config persistence (skips __open_with__)
+     _load_config()            L9515  JSON config restore
+     _handle_open_with()       L9444  Load file-manager / CLI "Open With" track
+     closeEvent()              L9619  Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L9694
+   main()                      L9744
 ═══════════════════════════════════════════════════════════════════
 """
 import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64
@@ -1615,6 +1619,16 @@ def _extract_embedded_lyrics(fp: str):
                     return (p, None) if p else (None, tag.text.strip())
         else:
             tg = af.tags
+            # Check synced-lyrics tags first (stored by LRC-aware taggers)
+            for key in ('syncedlyrics', 'SYNCEDLYRICS'):
+                v = tg.get(key)
+                if v:
+                    text = str(v[0]) if isinstance(v, list) else str(v)
+                    if text.strip():
+                        p = _lrc_parse(text)
+                        if p:
+                            return p, None
+            # Fall back to plain/unsynced tags; try LRC parse in case they contain timestamps
             for key in ('lyrics', 'LYRICS', 'unsyncedlyrics', 'UNSYNCEDLYRICS'):
                 v = tg.get(key)
                 if v:
@@ -2378,13 +2392,6 @@ class EqPopup(QFrame):
         # Schedule apply after a short delay
         self._apply_timer.start()
 
-    def _remove_band_at(self, idx):
-        if idx < len(self._bands):
-            del self._bands[idx]
-            self._refresh_table()
-            self._update_graph()
-            self._apply_timer.start()
-
     def _update_graph(self):
         self._graph.set_bands(self._bands)
 
@@ -2748,6 +2755,9 @@ class BlackoutOverlay(QWidget):
         self._cycle_timer.stop(); self._clock_timer.stop()
         self._anim.stop()
         self.hide()
+        # Resume ControlBar viz rendering now that overlay is gone
+        if self._ctrlbar_ref is not None:
+            self._ctrlbar_ref.set_overlay_open(False)
         # Restart idle countdown after overlay is dismissed
         if self._ctrlbar_ref is not None:
             self._ctrlbar_ref._reset_idle_timer()
@@ -2772,6 +2782,10 @@ class BlackoutOverlay(QWidget):
         # Stop idle timer while overlay is visible
         if self._ctrlbar_ref is not None:
             self._ctrlbar_ref._idle_timer.stop()
+        # Suppress ControlBar viz rendering while overlay is open (if overlay viz is off,
+        # the ControlBar is completely covered and computing frames would be wasted).
+        if self._ctrlbar_ref is not None:
+            self._ctrlbar_ref.set_overlay_open(True)
         # Notify ControlBar so spectrum runs for overlay viz if needed
         if self._ov_viz and self._ctrlbar_ref is not None:
             self._ctrlbar_ref.ensure_overlay_spec()
@@ -3457,8 +3471,12 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
         self._btn_close  = QPushButton('Close')
+        self._force_cb   = QCheckBox('Force (re-fetch all)')
+        self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
+        btn_row.addSpacing(8)
+        btn_row.addWidget(self._force_cb)
         btn_row.addStretch()
         btn_row.addWidget(self._btn_close)
         root.addLayout(btn_row)
@@ -3466,8 +3484,7 @@ class _BaseFetchPopup(QDialog):
         self._btn_start.clicked.connect(self._start)
         self._btn_cancel.clicked.connect(self._cancel)
         self._btn_close.clicked.connect(self._on_close)
-
-    # ── subclass interface ───────────────────────────────────────────────────
+        self._force = False   # set just before _make_worker() is called
 
     def _make_worker(self):
         raise NotImplementedError
@@ -3488,6 +3505,7 @@ class _BaseFetchPopup(QDialog):
             return
         self._running = True
         self._found   = 0
+        self._force   = self._force_cb.isChecked()   # subclasses read self._force in _make_worker
         self._log.clear()
         self._progress.setValue(0)
         self._result_lbl.setText('')
@@ -3554,19 +3572,23 @@ class LibraryCoverFetchWorker(QObject):
     track_done  = pyqtSignal(str, bytes, bool) # filepath, raw_bytes, found_flag
     finished    = pyqtSignal(int, int)        # found_count, total_count
 
-    def __init__(self, tracks: list):
+    def __init__(self, tracks: list, force: bool = False):
         super().__init__()
-        self._tracks   = list(tracks)
+        self._tracks    = list(tracks)
+        self._force     = force
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        # Only count tracks that actually need a fetch for the progress bar
-        needs_fetch = [t for t in self._tracks
-                       if extract_cover_bytes(t.filepath) is None
-                       and t.filepath not in _cover_locked_set]
+        # In force mode, process all tracks; otherwise skip tracks that already have a cover.
+        if self._force:
+            needs_fetch = [t for t in self._tracks if t.filepath not in _cover_locked_set]
+        else:
+            needs_fetch = [t for t in self._tracks
+                           if extract_cover_bytes(t.filepath) is None
+                           and t.filepath not in _cover_locked_set]
         total = len(needs_fetch)
         found = 0
         done  = 0
@@ -3599,7 +3621,7 @@ class CoverFetchPopup(_BaseFetchPopup):
         self._needs = needs
 
     def _make_worker(self):
-        return LibraryCoverFetchWorker(self._tracks)
+        return LibraryCoverFetchWorker(self._tracks, force=self._force)
 
     def set_tracks(self, tracks: list):
         self._tracks = list(tracks)
@@ -3660,17 +3682,22 @@ class LibraryTagFetchWorker(QObject):
     track_done = pyqtSignal(str, dict, bool)       # filepath, tags_dict, found_flag
     finished   = pyqtSignal(int, int)              # updated_count, total_needs
 
-    def __init__(self, tracks: list):
+    def __init__(self, tracks: list, force: bool = False):
         super().__init__()
         self._tracks    = list(tracks)
+        self._force     = force
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        needs = [t for t in self._tracks
-                 if not (t.title.strip() and t.artist.strip() and t.album.strip())]
+        # In force mode, attempt a tag lookup for every track.
+        if self._force:
+            needs = list(self._tracks)
+        else:
+            needs = [t for t in self._tracks
+                     if not (t.title.strip() and t.artist.strip() and t.album.strip())]
         total   = len(needs)
         updated = 0
         for i, t in enumerate(needs):
@@ -3707,7 +3734,7 @@ class TagFetchPopup(_BaseFetchPopup):
         self._needs = needs
 
     def _make_worker(self):
-        return LibraryTagFetchWorker(self._tracks)
+        return LibraryTagFetchWorker(self._tracks, force=self._force)
 
     def set_tracks(self, tracks: list):
         self._tracks = list(tracks)
@@ -3742,17 +3769,21 @@ class LibraryLyricsFetchWorker(QObject):
     track_done = pyqtSignal(str, bool)             # filepath, found_flag
     finished   = pyqtSignal(int, int)              # found_count, total_needs
 
-    def __init__(self, tracks: list):
+    def __init__(self, tracks: list, force: bool = False):
         super().__init__()
         self._tracks    = list(tracks)
+        self._force     = force
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        # Only process tracks that have no embedded lyrics yet
-        needs = [t for t in self._tracks if not any(_extract_embedded_lyrics(t.filepath))]
+        # In force mode, process every track (overwrite existing embedded lyrics too).
+        if self._force:
+            needs = list(self._tracks)
+        else:
+            needs = [t for t in self._tracks if not any(_extract_embedded_lyrics(t.filepath))]
         total = len(needs)
         found = 0
         for i, t in enumerate(needs):
@@ -3798,7 +3829,12 @@ class LyricsFetchPopup(_BaseFetchPopup):
         self._needs = needs
 
     def _make_worker(self):
-        return LibraryLyricsFetchWorker(self._tracks)
+        return LibraryLyricsFetchWorker(self._tracks, force=self._force)
+
+    def set_tracks(self, tracks: list):
+        self._tracks = list(tracks)
+        self._needs  = [t for t in tracks if not any(_extract_embedded_lyrics(t.filepath))]
+        self._progress.setRange(0, max(1, len(self._needs)))
 
     def _finished_msg(self, found: int, total: int) -> str:
         return f'Embedded lyrics for {found} out of {total} tracks.'
@@ -3814,6 +3850,17 @@ class LyricsFetchPopup(_BaseFetchPopup):
 #  Library Rename Worker + Popup
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _sanitize_filename_part(text: str) -> str:
+    """Remove characters that are illegal in filenames on Linux/POSIX.
+
+    Only '/' and null bytes are truly illegal on Linux, but we also strip
+    leading/trailing dots and spaces to avoid edge cases with hidden files
+    and Windows-incompatible names.
+    """
+    text = text.replace('/', '_').replace('\x00', '')
+    return text.strip('. ')
+
+
 def _build_new_filename(pattern: str, track) -> str:
     """Build a new filename (without extension) from pattern + track metadata.
 
@@ -3823,14 +3870,15 @@ def _build_new_filename(pattern: str, track) -> str:
         %T  title
         %C  album (Collection)
     All other characters (including punctuation, spaces, emoji, etc.) are kept as-is.
+    Metadata values are sanitized so embedded '/' chars cannot break Path.with_name().
     Returns empty string when the pattern is empty.
     """
-    stem   = Path(track.filepath).stem
+    stem   = _sanitize_filename_part(Path(track.filepath).stem)
     result = pattern
     result = result.replace('%F', stem)
-    result = result.replace('%A', track.artist or '')
-    result = result.replace('%T', track.title  or '')
-    result = result.replace('%C', track.album  or '')
+    result = result.replace('%A', _sanitize_filename_part(track.artist or ''))
+    result = result.replace('%T', _sanitize_filename_part(track.title  or ''))
+    result = result.replace('%C', _sanitize_filename_part(track.album  or ''))
     return result
 
 
@@ -4229,7 +4277,6 @@ class Player(QObject):
     sig_playing   = pyqtSignal(bool)
     sig_seek     = pyqtSignal()
     sig_busy      = pyqtSignal(bool)   # True = pipeline reloading; False = done
-    sig_viz_frame = pyqtSignal()       # emitted from GLib thread after each spectrum frame
     sig_fs_changed = pyqtSignal(int)   # emitted when track sample rate changes (main thread)
     _sig_drift_gst_ms = pyqtSignal(float, float)  # GLib thread → main thread: (gst_pos_ms, query_wall_t)
     _sig_dur_gst_ms   = pyqtSignal(int)           # GLib thread → main thread: confirmed duration (ms)
@@ -4300,12 +4347,14 @@ class Player(QObject):
         self._reloading: bool = False
         self._reload_guard: bool = False
         self._silent_recovery: bool = False  # True during invisible stall recovery
-        self._stall_pos_ns: int = -1
-        self._stall_check_n: int = 0
         self._seek_retries: int = 0
         self._pos_timer_burst: int = 0
-        self._last_advance_wt: float = -1.0   # -1 = not yet set
-        self._last_advance_pos: float = -1.0  # -1 = not yet set
+        self._last_advance_wt: float = -1.0   # -1 = not yet set (legacy, kept for _play_pause reset)
+        self._last_advance_pos: float = -1.0  # -1 = not yet set (legacy)
+        # Real GStreamer position stall tracking — uses actual queried values, not interpolated.
+        # _apply_drift_correction updates these; detects pipeline freeze in ~700 ms.
+        self._gst_pos_adv_ms: float = -1.0   # last GST query that showed genuine forward movement
+        self._gst_pos_adv_wt: float = -1.0   # wall-clock time of that query
 
         # EQ related
         self._eq_enabled = True
@@ -4450,9 +4499,11 @@ class Player(QObject):
             self._pos_anchor_wt = _monotonic()
             self._pos_playing = True
             self._tick_n = 0
-            # Reset passive stall tracking so the 5 s window starts fresh now.
+            # Reset stall tracking so detection window starts fresh after resume.
             self._last_advance_wt  = _monotonic()
             self._last_advance_pos = self.position_ms()
+            self._gst_pos_adv_ms   = -1.0   # re-initialise on first post-resume drift query
+            self._gst_pos_adv_wt   = -1.0
             # Fast pos updates for 2 s after resume so seekbar snaps immediately
             self._start_pos_burst(8)
             # Discard stale spectrum frames that were buffered during the pause.
@@ -4476,10 +4527,10 @@ class Player(QObject):
             # settles); health check fires 1200 ms after that — enough for position
             # to advance by at least 100 ms if the pipeline is alive.
             # Short pauses (<2 s) don't need the watcher: the drift-correction loop
-            # and passive stall detector in _tick_pos already cover those cases.
+            # and the real-position stall detector in _apply_drift_correction cover those.
             # Active stall watcher disabled — causes false reloads on Bluetooth
             # (position query latency tricks it into thinking pipeline stalled).
-            # Passive stall detector in _tick_pos (5s threshold) covers real stalls.
+            # Real stall detector in _apply_drift_correction (~700 ms threshold) covers stalls.
             pass
 
     def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False):
@@ -4509,9 +4560,12 @@ class Player(QObject):
 
         self.load(filepath)
         self._pause_ts = 0.0
-        # Reset passive stall tracking to give the new pipeline time to start up.
-        self._last_advance_wt  = _monotonic() + 3.0   # 3 s grace period post-reload
+        # Reset stall tracking — grace period comes from _reloading=True (1000 ms) set
+        # by _resume_with_reload, which prevents _apply_drift_correction from firing.
+        self._last_advance_wt  = _monotonic() + 3.0   # legacy field; keep for play_pause reset
         self._last_advance_pos = float(max(0, pos_ms))
+        self._gst_pos_adv_ms   = -1.0   # re-initialise on first drift query after reload
+        self._gst_pos_adv_wt   = -1.0
 
         if pos_ms > 200:
             def _do_seek(p=pos_ms, _sil=silent):
@@ -4570,66 +4624,6 @@ class Player(QObject):
         QTimer.singleShot(1000, lambda: setattr(self, '_reloading', False))
 
     def stop(self): self._destroy()
-
-    def _init_stall_baseline_glib(self):
-        """GLib thread: capture initial position for stall watcher baseline.
-
-        Called once via GLib.idle_add immediately after play_pause() resumes
-        playback.  Stores the pipeline position into _stall_pos_ns so that
-        _check_sink_health (fired 800 ms later) has a reference point to compare
-        against.  Running on the GLib thread avoids blocking the Qt main thread.
-        Returns False so GLib does not repeat the callback.
-        """
-        try:
-            pipe = self._pipe
-            if pipe and self._playing:
-                ok, p = pipe.query_position(Gst.Format.TIME)
-                if ok:
-                    self._stall_pos_ns = p
-        except Exception:
-            pass
-        return False
-
-    def _check_sink_health(self):
-        """Stall watcher — schedules a GLib-thread position query after resume.
-
-        Only dispatches; the actual query_position runs on the GLib thread via
-        _check_sink_health_glib to avoid blocking the Qt main thread.
-        """
-        if not self._pipe or not self._playing:
-            return
-        GLib.idle_add(self._check_sink_health_glib)
-
-    def _check_sink_health_glib(self):
-        """GLib thread: check whether position has advanced since last baseline.
-
-        If the pipeline has stalled (< 20 ms progress in 800 ms wall-clock),
-        schedules a reload on the Qt main thread via QTimer.singleShot(0).
-        Otherwise updates the baseline and schedules the next check (up to 3×).
-        Returns False so GLib does not repeat the callback.
-        """
-        try:
-            pipe = self._pipe
-            if not pipe or not self._playing:
-                return False
-            ok, p1 = pipe.query_position(Gst.Format.TIME)
-            p0 = self._stall_pos_ns
-            if ok and p0 >= 0:
-                # Only trigger reload if position has not moved at all — zero advancement.
-                # Bluetooth position queries can be delayed by >800ms without stalling,
-                # so any positive delta (even 1ms) means the pipeline is alive.
-                if p1 <= p0:
-                    print('[Player] stall detected — reloading pipeline')
-                    _fb = int(self._pos_anchor_ms)
-                    QTimer.singleShot(0, lambda: self._reload_at_pos(fallback_ms=_fb))
-                    return False
-            self._stall_pos_ns = p1 if ok else -1
-            self._stall_check_n += 1
-            if self._stall_check_n < 3:
-                QTimer.singleShot(800, self._check_sink_health)
-        except Exception:
-            pass
-        return False
 
     def _reload_at_pos(self, fallback_ms: int = 0):
         """Reload the current file at the current position, preserving playback.
@@ -5085,6 +5079,8 @@ class Player(QObject):
         self._viz_mag_field_idx = -1   # reset field cache — new pipeline may differ
         self._last_advance_wt  = -1.0
         self._last_advance_pos = -1.0
+        self._gst_pos_adv_ms   = -1.0
+        self._gst_pos_adv_wt   = -1.0
         if was_playing and not self._silent_recovery:
             self.sig_playing.emit(False)
 
@@ -5095,10 +5091,11 @@ class Player(QObject):
         self._pos_timer.setInterval(100)
 
     def _tick_pos(self):
-        """Pos timer tick: emit position, correct drift, passive stall detection.
+        """Pos timer tick: emit interpolated position and schedule drift correction.
 
         Normally fires at 250 ms.  After seek/resume, _start_pos_burst() switches
         it to 100 ms for a short window so the seekbar snaps quickly.
+        Stall detection runs in _apply_drift_correction (real GStreamer positions).
         """
         _t0 = _monotonic()
 
@@ -5150,27 +5147,14 @@ class Player(QObject):
 
         # ── Passive stall detection ───────────────────────────────────────────
         # Catches cases where the pipeline silently dies (audio device change,
-        # another app grabs PipeWire without emitting ERROR, Bluetooth reconnect,
-        # etc.) without the user pressing Play.  We track wall-clock time since
-        # the position last meaningfully advanced; if playing but stuck for >5 s,
-        # trigger a pipeline reload without requiring user interaction.
-        if self._pos_playing and not self._reloading \
-                and not self._reload_guard:
-            now = _monotonic()
-            adv_wt  = self._last_advance_wt  if self._last_advance_wt  >= 0 else now
-            adv_pos = self._last_advance_pos if self._last_advance_pos >= 0 else pos
-            if abs(pos - adv_pos) > 300:   # >300 ms forward = genuine progress
-                self._last_advance_wt  = now
-                self._last_advance_pos = pos
-            elif (now - adv_wt) > 0.5:
-                # Position frozen for 5 s while _pos_playing=True → silent stall
-                print('[Player] passive stall detected — reloading pipeline')
-                self._last_advance_wt = now   # reset so we don't fire again immediately
-                _fb = int(self._pos_anchor_ms)
-                QTimer.singleShot(0, lambda: self._resume_with_reload(fallback_ms=_fb))
+        # Stall detection has moved to _apply_drift_correction which operates on
+        # real GStreamer-queried positions.  Checking position_ms() here was broken:
+        # that function returns an interpolated value that always advances while
+        # _pos_playing=True, so frozen pipelines were never detected.
 
     def _drift_query_glib(self):
         """GLib thread: query pipeline position (drift) and duration if not yet cached."""
+
         _t0 = _monotonic()
         try:
             pipe = self._pipe
@@ -5210,6 +5194,29 @@ class Player(QObject):
         since_resume_ms = (now - self._resume_wt) * 1000.0
         if abs(drift_ms) > 100 and since_resume_ms > 1500:
             self._anchor_now(gst_now_ms)
+
+        # ── Real-position stall detection ────────────────────────────────────
+        # position_ms() is interpolated and always advances while _pos_playing=True,
+        # so it cannot reveal a frozen pipeline.  GStreamer-queried values (gst_ms)
+        # reflect actual playback state and freeze when the pipeline stalls.
+        # Fires every ~250 ms in steady state (each _tick_pos non-burst cycle sends
+        # one GLib query); a 700 ms no-advance window means detection within ~1 s.
+        if not self._reloading and not self._reload_guard:
+            if self._gst_pos_adv_ms < 0:
+                # First query after load/resume — just initialise, don't compare yet.
+                self._gst_pos_adv_ms = gst_ms
+                self._gst_pos_adv_wt = query_wt
+            elif gst_ms - self._gst_pos_adv_ms > 150:   # >150 ms forward = genuine progress
+                self._gst_pos_adv_ms = gst_ms
+                self._gst_pos_adv_wt = query_wt
+            elif (query_wt - self._gst_pos_adv_wt) > 0.7:   # frozen for >700 ms
+                print(f'[Player] GST position stalled at {gst_ms:.0f} ms — reloading pipeline')
+                # Reset tracking before reload so the guard flip in _resume_with_reload
+                # doesn't race with the next drift query.
+                self._gst_pos_adv_ms = gst_ms
+                self._gst_pos_adv_wt = query_wt
+                _fb = int(self._pos_anchor_ms)
+                self._resume_with_reload(fallback_ms=_fb)
 
     def _on_dur_from_glib(self, dur_ms: int):
         """Qt main thread: store duration received from GLib thread.
@@ -5937,6 +5944,7 @@ class TrackTable(QTableWidget):
         hh.setStretchLastSection(False)
         # Ratios initialised to defaults; actual pixel widths applied in resizeEvent
         self._col_ratios = list(self._DEFAULT_COL_RATIOS)
+        self._row_h = 44   # tracks current desired row height; re-applied after setRowCount resets
         self.verticalHeader().setDefaultSectionSize(44)
         QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
         sp = QScrollerProperties()
@@ -6030,6 +6038,9 @@ class TrackTable(QTableWidget):
     def populate(self, tracks, playing_idx=-1):
         self.setSortingEnabled(False)
         self.setRowCount(0); self.setRowCount(len(tracks))
+        # Qt6 resets defaultSectionSize to the style default on setRowCount(0).
+        # Re-apply our desired height so newly created rows get the correct size.
+        self.verticalHeader().setDefaultSectionSize(self._row_h)
         self._tracks_ref = tracks  # keep ref so cover_ready can find the row
         # Build O(1) reverse index: filepath → row
         self._fp_to_row = {t.filepath: r for r, t in enumerate(tracks)}
@@ -6769,6 +6780,7 @@ class PlaylistPage(QWidget):
 
     def set_list_scale(self, row_h: int):
         """Set classic-view row height."""
+        self.table._row_h = row_h
         self.table.verticalHeader().setDefaultSectionSize(row_h)
         # Resize existing rows
         for r in range(self.table.rowCount()):
@@ -7209,6 +7221,7 @@ class ControlBar(QFrame):
         self._seeking   = False
         self._viz_on    = True
         self._overlay_viz_enabled = False
+        self._overlay_open        = False   # True while BlackoutOverlay is visible
         self._log_scale = True
         self._bar_x0    = _np.zeros(VIZ_BANDS, dtype=_np.int32)
         self._col_bar   = _np.full(1, -1, dtype=_np.int32)  # (iw,) rebuilt in _precompute_bars
@@ -7376,23 +7389,13 @@ class ControlBar(QFrame):
         self._idle_last_mouse: Optional[QPoint] = None
 
         # ── Viz repaint — fixed-rate Qt timer ───────────────────────────────
-        # GStreamer emits spectrum frames at ~60 fps but with variable latency
-        # (GLib thread → GLib loop → queued signal → Qt event loop → paintEvent).
-        # Using sig_viz_frame directly as the repaint trigger causes frametime
-        # jitter that accumulates into visible drift under load.
-        #
-        # Instead: GStreamer frames update _viz_bar_buf at whatever rate they
-        # arrive; a separate Qt timer drives paintEvent at a fixed 16 ms cadence
-        # (target 60 fps).  Each tick records its deadline and schedules the next
-        # tick relative to that deadline — not relative to when the tick actually
-        # ran — so scheduling jitter does not accumulate.
-        #
-        # sig_viz_frame is still connected to restart the timer when new audio
-        # arrives after silence (bars were all zero, timer was stopped).
-        # sig_viz_frame is emitted by GLib thread on each spectrum frame.
-        # The render timer (PreciseTimer) drives all painting at FPS_CAP —
-        # no direct connection needed; _viz_has_new flag is the handshake.
-        # Recompute freq→bin mapping when track sample rate changes
+        # GStreamer frames update _viz_bar_buf at whatever rate they arrive;
+        # a separate Qt timer drives paintEvent at a fixed 16 ms cadence (FPS_CAP).
+        # Each tick records its deadline and schedules the next tick relative to
+        # that deadline so scheduling jitter does not accumulate.
+        # _viz_has_new is the handshake between the GLib spectrum callback and the
+        # render timer — no direct signal connection needed.
+        # Recompute freq→bin mapping when track sample rate changes.
         player.sig_fs_changed.connect(lambda _fs: self._precompute_bars())
         self._render_timer = QTimer(self)
         self._render_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -7545,8 +7548,29 @@ class ControlBar(QFrame):
         self._player._viz_overlay_cb = self._overlay_cb if on else None
         if not on:
             self._player.set_overlay_needs_spectrum(False)
-            if not self._viz_on:
+            # If overlay is currently open, we just lost the only reason to render
+            if self._overlay_open or not self._viz_on:
                 self._render_timer.stop()
+        elif self._overlay_open and self._player.playing and not self._viz_paused:
+            # Overlay viz just turned on while overlay is visible — start rendering
+            self._start_render_timer()
+
+    def set_overlay_open(self, open: bool):
+        """Called by BlackoutOverlay on show/dismiss.
+
+        When the overlay is open and overlay viz is disabled, the ControlBar is
+        completely covered and there is nothing to render.  Stop the render timer
+        to avoid running _compute_viz_frame + self.update() at 60 fps for zero
+        visible effect.  Resume the timer when the overlay is dismissed so the
+        main viz picks up immediately.
+        """
+        self._overlay_open = open
+        if open and not self._overlay_viz_enabled:
+            # Overlay covers everything and overlay viz is off — rendering is wasted
+            self._render_timer.stop()
+        elif not open and self._viz_on and not self._viz_paused and self._player.playing:
+            # Overlay dismissed — restart main viz if it should be running
+            self._start_render_timer()
 
     def set_blackout_ref(self, overlay):
         self._blackout_ref = overlay
@@ -8068,16 +8092,10 @@ class ControlBar(QFrame):
         elif (self._viz_on or self._overlay_viz_enabled) and self._player.playing:
             self._start_render_timer()
 
-    def _on_viz_frame(self):
-        """Qt main thread: new spectrum frame signal — render timer drives actual paint."""
-        # Nothing to do — _viz_has_new is already set by _store_spectrum.
-        # The render timer (PreciseTimer, 16ms) picks it up on its next tick.
-        # We do NOT call update() here: letting the timer drive paint gives
-        # deterministic 60fps cadence regardless of GLib delivery timing.
-        pass
-
     def _render_tick(self):
-        needs_render = self._viz_on or self._overlay_viz_enabled
+        # Main viz is suppressed when the overlay is open but overlay viz is off:
+        # ControlBar is completely hidden behind the overlay so updating it is wasted.
+        needs_render = (self._viz_on and not self._overlay_open) or self._overlay_viz_enabled
         if not needs_render or self._viz_paused:
             self._render_timer.stop()
             _gc.enable()
@@ -9129,11 +9147,6 @@ class MainWindow(QMainWindow):
         self._sidebar.remove_playlist(idx)
         # Defer library rebuild so the UI unblocks immediately
         QTimer.singleShot(0, lambda: (self._rebuild_library(), self._save_config()))
-
-    def _close_tab(self, tab_idx):
-        if tab_idx == 0: return
-        page = self._tabs.widget(tab_idx)
-        if page in self._playlists: self._remove_playlist(self._playlists.index(page))
 
     def _select_source(self, idx):
         if idx == -1: self._tabs.setCurrentIndex(0)
