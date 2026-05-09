@@ -49,7 +49,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _src_lyrics_ovh()           L1696  Lyrics.ovh fallback source
    ClickableLyricLine          L1818  QLabel that emits clicked(ms)
    LyricsFetcher               L1926  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2000  Scrollable lyric display with sync highlight
+   LyricsPanel                 L2026  Scrollable lyric display with sync highlight (touch scroll enabled)
 
  COVER ART
    _trim_cover_cache()         L3078  Evict oldest entries when cache exceeds limit
@@ -62,10 +62,12 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    AsyncCoverLoader            L3288  QThreadPool-based async cover loader
    _ensure_async_cover_loader() L3380 Module singleton factory
    _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3395  Shared base class for fetch popups (force checkbox)
-     closeEvent()              L3534  Cancel worker + join thread before closing
-   LibraryCoverFetchWorker     L3561  Sequential per-track cover fetcher
-   CoverFetchPopup             L3602  Modal "fetch covers for library" dialog
+   _BaseFetchPopup             L3531  Shared base class for fetch popups (supports multiple concurrent workers)
+     closeEvent()              L4483  Hide dialog, keep worker running in background
+     mousePressEvent()         L4488  Click outside → hide (run in background)
+     _emit_status_update()     L3782  Show each fetch instance progress as permanent widget on status bar left
+   LibraryCoverFetchWorker     L3881  Sequential per-track cover fetcher
+   CoverFetchPopup             L3881  Modal "fetch covers for library" dialog (multiple concurrent supported)
 
  TAGS / METADATA
    fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
@@ -77,14 +79,15 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _tag() / _vtag()            L2998  Tag value helpers (case-insensitive Vorbis)
    extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
    read_metadata()             L3042  Build Track from mutagen
-   LibraryTagFetchWorker       L3671  Sequential per-track tag fetcher
-   TagFetchPopup               L3716  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L3758  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L3814  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L3846  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L3857  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L3894  Sequential per-track file renamer
-   RenamePopup                 L3943  Modal "batch rename library" dialog
+   LibraryTagFetchWorker       L3995  Sequential per-track tag fetcher
+   TagFetchPopup               L3995  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L4093  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L4093  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L4032  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L4043  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L4183  Sequential per-track file renamer
+   RenamePopup                 L4222  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L4483  Hide dialog, keep worker running in background
 
  PLAYER
    RepeatMode                  L4238  Enum: NONE / ALL / ONE
@@ -110,20 +113,20 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
  LIBRARY
    Track                       L2973  @dataclass: filepath + metadata
-   scan_folder()               L4151  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4166  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4188  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4206  Non-blocking playlist loader for config restore
+   scan_folder()               L4312  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4327  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L4349  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L4367  Non-blocking playlist loader for config restore
 
  VIEWS
    TrackTable                  L5902  QTableWidget with covers + sort + touch scroll
    GalleryView                 L6163  Virtual-scroll card gallery (Z/S layout modes)
    PlaylistPage                L6712  QStackedWidget: TrackTable + GalleryView
    _PlaylistRowWidget          L6794  Sidebar playlist row (label + delete button)
-   Sidebar                     L6858  Left panel: search + library nav + playlist list
+   Sidebar                     L6858  Left panel: search + library nav + playlist list (touch scroll enabled)
 
  CONTROL BAR
-   ControlBar                  L7209  Seek bar + transport + viz + settings/EQ toggles
+   ControlBar                  L7222  Seek bar + transport + viz + settings/EQ toggles
      _ensure_eq_popup()        L7416  Lazy-create EqPopup singleton
      _ensure_settings_popup()  L7441  Lazy-create SettingsPopup singleton
      _reset_idle_timer()       L7520  Reset OLED overlay idle countdown
@@ -2069,6 +2072,19 @@ class LyricsPanel(QWidget):
             f'QScrollBar:vertical{{background:{BG};width:3px;border-radius:1px;}}'
             f'QScrollBar::handle:vertical{{background:{B2};border-radius:1px;min-height:20px;}}'
             f'QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}')
+        
+        # Enable touch scrolling
+        QScroller.grabGesture(self._scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        sp = QScrollerProperties()
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,           0.35)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,              0.8)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.15)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance,            0.005)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
+                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
+                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        QScroller.scroller(self._scroll.viewport()).setScrollerProperties(sp)
 
         self._cont = QWidget()
         self._cont.setStyleSheet('background:transparent;')
@@ -2350,7 +2366,6 @@ class EqPopup(QFrame):
         prof_layout = QHBoxLayout()
         prof_label = QLabel('Profile:')
         prof_layout.addWidget(prof_label)
-        self._loaded_lbl = None   # removed from UI, kept for compat
 
         self._NEW = '＋ New'   # sentinel — always first item
         self._profile_combo = TouchComboBox()
@@ -2526,7 +2541,6 @@ class EqPopup(QFrame):
             self._bands = []
             self._current_profile = ''
             self._profile_combo.lineEdit().clear()
-            if self._loaded_lbl: self._loaded_lbl.setText('Loaded: —')
             self._refresh_table()
             self._update_graph()
             self._apply_timer.start()
@@ -2535,7 +2549,6 @@ class EqPopup(QFrame):
             self._refresh_table()
             self._update_graph()
             self._current_profile = name
-            if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
             self._apply_timer.start()
 
 
@@ -2550,7 +2563,6 @@ class EqPopup(QFrame):
             self._profile_combo.insertItem(1, name)   # insert at 1, after ＋New
         self._profile_combo.setCurrentText(name)
         self._current_profile = name
-        if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
 
     def _delete_profile(self):
         name = self._profile_combo.currentText().strip()
@@ -2563,7 +2575,6 @@ class EqPopup(QFrame):
             self._profile_combo.setCurrentIndex(0)
             self._profile_combo.lineEdit().clear()
             self._current_profile = ''
-            if self._loaded_lbl: self._loaded_lbl.setText('Loaded: —')
             self._bands = []
             self._refresh_table()
             self._update_graph()
@@ -2584,7 +2595,6 @@ class EqPopup(QFrame):
         self._update_graph()
         if name:
             self._current_profile = name
-            if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
             idx = self._profile_combo.findText(name)
             if idx >= 0:
                 self._profile_combo.blockSignals(True)
@@ -3528,6 +3538,9 @@ class _BaseFetchPopup(QDialog):
     And may override _on_finished(found, total) to customise the result label.
     """
 
+    # Class-level tracking of active workers per popup type (supports multiple concurrent workers)
+    _active_workers = {}  # key: popup_type_name, value: list of (instance, worker, thread)
+
     def __init__(self, tracks: list, title: str, info_text: str, needs_count: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -3538,6 +3551,15 @@ class _BaseFetchPopup(QDialog):
         self._worker   = None
         self._running  = False
         self._found    = 0
+        self._popup_type = self.__class__.__name__
+        # Store background state for restoration
+        self._bg_progress = 0
+        self._bg_total = needs_count
+        self._bg_track_name = ''
+        self._bg_log_items = []  # list of (text, ok_flag)
+        self._bg_result = ''
+        self._worker_id = None  # Will be set when worker is created or restored
+        self._status_widget_key = None  # Key for status bar widget
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -3589,7 +3611,7 @@ class _BaseFetchPopup(QDialog):
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Close')
+        self._btn_close  = QPushButton('Run in Background')
         self._force_cb   = QCheckBox('Force (re-fetch all)')
         self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
         btn_row.addWidget(self._btn_start)
@@ -3604,12 +3626,51 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel.clicked.connect(self._cancel)
         self._btn_close.clicked.connect(self._on_close)
         self._force = False   # set just before _make_worker() is called
+        
+        # Check if there's an existing worker running in background and auto-start
+        self._check_and_restore_background()
 
     def _make_worker(self):
         raise NotImplementedError
 
     def _on_track_done(self, *args):
         raise NotImplementedError
+
+    def _check_and_restore_background(self):
+        """Check if there's an existing worker running in background and auto-restore UI."""
+        workers_list = _BaseFetchPopup._active_workers.get(self._popup_type, [])
+        if workers_list:
+            # Find the most recent worker for this popup type
+            old_instance, old_worker, old_thread = workers_list[-1]
+            # Restore UI to show the existing running operation with full state
+            self._thread = old_thread
+            self._worker = old_worker
+            self._running = True
+            self._worker_id = old_instance._worker_id  # Reuse same worker ID
+            self._status_widget_key = old_instance._status_widget_key
+            self._btn_start.setEnabled(False)
+            self._btn_cancel.setEnabled(True)
+            # Restore progress, log, and track info from background state
+            self._progress.setValue(old_instance._bg_progress)
+            self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
+            # Restore log items
+            self._log.clear()
+            for text, ok_flag in old_instance._bg_log_items:
+                item = QListWidgetItem(text)
+                item.setForeground(QColor('#55bb55') if ok_flag else QColor('#bb3333'))
+                self._log.addItem(item)
+            self._log.scrollToBottom()
+            # Restore result label if present
+            if old_instance._bg_result:
+                self._result_lbl.setText(old_instance._bg_result)
+            # Emit progress to main window status bar (reuses existing widget)
+            self._emit_status_update()
+            # Auto-show the dialog (it may have been hidden) - but don't auto-start since it's already running
+            self.show()
+            # Connect signals to restore live updates
+            self._worker.progress.connect(self._on_progress)
+            self._worker.track_done.connect(self._on_track_done)
+            self._worker.finished.connect(self._on_finished)
 
     # ── common implementation ────────────────────────────────────────────────
 
@@ -3618,10 +3679,13 @@ class _BaseFetchPopup(QDialog):
         item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
         self._log.addItem(item)
         self._log.scrollToBottom()
+        # Store log item for background restoration
+        self._bg_log_items.append((text, ok))
 
     def _start(self):
         if self._running:
             return
+        
         self._running = True
         self._found   = 0
         self._force   = self._force_cb.isChecked()   # subclasses read self._force in _make_worker
@@ -3641,7 +3705,18 @@ class _BaseFetchPopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
+        # Generate unique ID for this worker instance if not already set
+        if self._worker_id is None:
+            self._worker_id = id(worker)
+        if self._status_widget_key is None:
+            self._status_widget_key = f"_fetch_widget_{self._worker_id}"
+        # Register this worker as active for this popup type (support multiple concurrent workers)
+        if self._popup_type not in _BaseFetchPopup._active_workers:
+            _BaseFetchPopup._active_workers[self._popup_type] = []
+        _BaseFetchPopup._active_workers[self._popup_type].append((self, worker, thread))
         thread.start()
+        # Emit initial status update
+        self._emit_status_update()
 
     def _cancel(self):
         if self._worker:
@@ -3650,32 +3725,110 @@ class _BaseFetchPopup(QDialog):
         self._track_lbl.setText('Cancelling…')
 
     def _on_close(self):
-        self._cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        self._thread = None
-        self.accept()
+        # Hide the dialog but keep the thread running in background
+        self.hide()
 
     def closeEvent(self, e):
-        self._cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        self._thread = None
-        super().closeEvent(e)
+        # Hide instead of closing - keeps thread alive
+        self.hide()
+        e.ignore()
+
+    def mousePressEvent(self, e):
+        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
+        if e.button() == Qt.MouseButton.LeftButton:
+            # Check if click is outside the dialog's geometry
+            if not self.rect().contains(e.pos()):
+                self.hide()
+                e.ignore()
+                return
+        super().mousePressEvent(e)
 
     def _on_progress(self, current: int, total: int, name: str):
         self._progress.setValue(current)
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
+        # Store state for background restoration
+        self._bg_progress = current
+        self._bg_total = total
+        self._bg_track_name = name
+        # Emit progress to main window status bar
+        self._emit_status_update()
 
     def _on_finished(self, found: int, total: int):
         self._running = False
+        # Remove this specific worker from active workers list
+        workers_list = _BaseFetchPopup._active_workers.get(self._popup_type, [])
+        # Find and remove this worker by identity
+        for i, (inst, wk, th) in enumerate(workers_list):
+            if inst is self or wk is self._worker:
+                workers_list.pop(i)
+                break
+        # Clean up empty lists
+        if not workers_list:
+            _BaseFetchPopup._active_workers.pop(self._popup_type, None)
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
         self._progress.setValue(total)
-        self._result_lbl.setText(self._finished_msg(found, total))
+        result_msg = self._finished_msg(found, total)
+        self._result_lbl.setText(result_msg)
+        # Store result for background restoration
+        self._bg_result = result_msg
+        # Clean up thread references but don't quit (already quit via signal)
+        self._thread = None
+        self._worker = None
+        # Clear status bar message
+        self._emit_status_clear()
+
+    def _emit_status_update(self):
+        """Emit progress status to main window status bar - shows all concurrent fetches."""
+        if not self._running or not self._worker_id:
+            return
+        if not (hasattr(self, '_bg_progress') and hasattr(self, '_bg_total')):
+            return
+        
+        # Determine fetch type label based on popup class
+        if isinstance(self, CoverFetchPopup):
+            type_label = "Covers"
+        elif isinstance(self, TagFetchPopup):
+            type_label = "Tags"
+        elif isinstance(self, LyricsFetchPopup):
+            type_label = "Lyrics"
+        else:
+            type_label = "Fetch"
+        
+        msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
+        # Find main window and update status bar
+        win = self.parent()
+        while win and not isinstance(win, MainWindow):
+            win = win.parent()
+        if win and hasattr(win, '_status'):
+            # Use unique widget key for this specific worker instance
+            widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
+            # Check if widget already exists
+            old_lbl = getattr(win, widget_key, None)
+            if old_lbl:
+                # Update existing widget text instead of creating new one
+                old_lbl.setText(msg)
+            else:
+                # Create new permanent widget
+                lbl = QLabel(msg)
+                lbl.setStyleSheet(f'color:{FG}; font-size:11px; padding: 0 8px;')
+                win._status.addPermanentWidget(lbl, 0)
+                setattr(win, widget_key, lbl)
+
+    def _emit_status_clear(self):
+        """Clear status bar message for this specific fetch instance when finished."""
+        # Use unique widget key for this instance
+        widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
+        
+        win = self.parent()
+        while win and not isinstance(win, MainWindow):
+            win = win.parent()
+        if win:
+            old_lbl = getattr(win, widget_key, None)
+            if old_lbl:
+                old_lbl.deleteLater()
+                setattr(win, widget_key, None)
 
     def _finished_msg(self, found: int, total: int) -> str:
         return f'Processed {found} out of {total}.' 
@@ -4077,6 +4230,9 @@ class RenamePopup(QDialog):
     The caller (ControlBar._on_rename_btn) uses this to rescan and update M3Us.
     """
 
+    # Class-level tracking of active rename worker
+    _active_worker = None  # (instance, worker, thread) or None
+
     def __init__(self, tracks: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Rename Library Files')
@@ -4090,6 +4246,12 @@ class RenamePopup(QDialog):
         self._renamed  = 0
         # Collected as worker emits; available after exec() returns
         self.rename_map: dict = {}   # {old_path: new_path}
+        # Store background state for restoration
+        self._bg_progress = 0
+        self._bg_total = len(tracks)
+        self._bg_track_name = ''
+        self._bg_log_items = []  # list of (text, ok_flag, old_name, new_name)
+        self._bg_result = ''
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -4156,7 +4318,7 @@ class RenamePopup(QDialog):
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Close')
+        self._btn_close  = QPushButton('Run in Background')
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addStretch()
@@ -4168,6 +4330,9 @@ class RenamePopup(QDialog):
         self._btn_close.clicked.connect(self._on_close)
 
         self._on_pattern_changed('')
+        
+        # Check if there's an existing rename worker running in background and auto-restore
+        self._check_and_restore_background_rename()
 
     # ── validation ────────────────────────────────────────────────────────────
 
@@ -4196,9 +4361,77 @@ class RenamePopup(QDialog):
 
     # ── worker ────────────────────────────────────────────────────────────────
 
+    def _check_and_restore_background_rename(self):
+        """Check if there's an existing rename worker running in background and auto-restore UI."""
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Restore UI to show the existing running operation with full state
+            self._thread = old_thread
+            self._worker = old_worker
+            self._running = True
+            self._btn_start.setEnabled(False)
+            self._btn_cancel.setEnabled(True)
+            # Restore progress and track info from background state
+            self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
+            # Restore log items
+            self._log.clear()
+            for item_data in old_instance._bg_log_items:
+                text, ok_flag, old_name, new_name = item_data
+                if ok_flag:
+                    item = QListWidgetItem(f'OK    {old_name}  →  {new_name}')
+                    item.setForeground(QColor('#55bb55'))
+                else:
+                    item = QListWidgetItem(f'FAIL  {old_name}  ({new_name})')
+                    item.setForeground(QColor('#bb3333'))
+                self._log.addItem(item)
+            self._log.scrollToBottom()
+            # Restore result label if present
+            if old_instance._bg_result:
+                self._result_lbl.setText(old_instance._bg_result)
+            # Emit progress to main window status bar
+            self._emit_status_update_rename()
+            # Auto-show the dialog (it may have been hidden)
+            self.show()
+            # Connect signals to restore live updates
+            self._worker.progress.connect(self._on_progress)
+            self._worker.track_done.connect(self._on_track_done)
+            self._worker.finished.connect(self._on_finished)
+
+    def _emit_status_update_rename(self):
+        """Emit rename progress status to main window status bar."""
+        if self._running and hasattr(self, '_bg_progress') and hasattr(self, '_bg_total'):
+            msg = f"Rename: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
+            # Find main window and update status bar
+            win = self.parent()
+            while win and not isinstance(win, MainWindow):
+                win = win.parent()
+            if win and hasattr(win, '_status'):
+                # Remove old widget if exists
+                old_lbl = getattr(win, '_fetch_rename_lbl', None)
+                if old_lbl:
+                    old_lbl.deleteLater()
+                # Create new permanent widget
+                lbl = QLabel(msg)
+                lbl.setStyleSheet(f'color:{FG}; font-size:11px; padding: 0 8px;')
+                win._status.addPermanentWidget(lbl, 0)
+                setattr(win, '_fetch_rename_lbl', lbl)
+
+    def _clear_status_update_rename(self):
+        """Clear rename status bar message when finished."""
+        win = self.parent()
+        while win and not isinstance(win, MainWindow):
+            win = win.parent()
+        if win:
+            old_lbl = getattr(win, '_fetch_rename_lbl', None)
+            if old_lbl:
+                old_lbl.deleteLater()
+                setattr(win, '_fetch_rename_lbl', None)
+
     def _start(self):
         if self._running:
             return
+        
         pattern = self._pat_edit.text()
         if _validate_rename_pattern(pattern):
             return
@@ -4221,7 +4454,11 @@ class RenamePopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
+        # Register this worker as active
+        RenamePopup._active_worker = (self, worker, thread)
         thread.start()
+        # Emit initial status update
+        self._emit_status_update_rename()
 
     def _cancel(self):
         if self._worker:
@@ -4240,15 +4477,30 @@ class RenamePopup(QDialog):
         self._worker = None
 
     def _on_close(self):
-        self._stop_thread()
-        self.accept()
+        # Hide the dialog but keep the thread running in background
+        self.hide()
 
     def closeEvent(self, e):
-        self._stop_thread()
-        super().closeEvent(e)
+        # Hide instead of closing - keeps thread alive
+        self.hide()
+        e.ignore()
+
+    def mousePressEvent(self, e):
+        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
+        if e.button() == Qt.MouseButton.LeftButton:
+            # Check if click is outside the dialog's geometry
+            if not self.rect().contains(e.pos()):
+                self.hide()
+                e.ignore()
+                return
+        super().mousePressEvent(e)
 
     def _on_progress(self, current: int, total: int, name: str):
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
+        # Store state for background restoration
+        self._bg_progress = current
+        self._bg_total = total
+        self._bg_track_name = name
 
     def _on_track_done(self, old_path: str, new_path: str, ok: bool):
         old_name = Path(old_path).name
@@ -4264,13 +4516,25 @@ class RenamePopup(QDialog):
             item.setForeground(QColor('#bb3333'))
         self._log.addItem(item)
         self._log.scrollToBottom()
+        # Store log item for background restoration
+        self._bg_log_items.append((item.text(), ok, old_name, new_path if ok else new_path))
 
     def _on_finished(self, renamed: int, total: int):
         self._running = False
+        # Clear active worker reference
+        RenamePopup._active_worker = None
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
-        self._result_lbl.setText(f'{renamed} / {total} files renamed.')
+        result_msg = f'{renamed} / {total} files renamed.'
+        self._result_lbl.setText(result_msg)
+        # Store result for background restoration
+        self._bg_result = result_msg
+        # Clean up thread references
+        self._thread = None
+        self._worker = None
+        # Clear status bar message
+        self._clear_status_update_rename()
 
 
 
@@ -5673,15 +5937,20 @@ class MprisServer(QObject):
             self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             node = Gio.DBusNodeInfo.new_for_xml(MprisServer._MPRIS_XML)
             for iface in node.interfaces:
-                try:
-                    # PyGObject ≥ 3.51: register_object is deprecated
+                # Try new API first (PyGObject >= 3.51), fallback to old API
+                if hasattr(self._conn, 'register_object_with_closures'):
                     rid = self._conn.register_object_with_closures(
                         '/org/mpris/MediaPlayer2', iface,
                         self._handle_method, self._handle_get, self._handle_set)
-                except AttributeError:
+                    self._reg_ids.append(rid)
+                elif hasattr(self._conn, 'register_object'):
+                    # Fallback to deprecated API for older PyGObject versions
                     rid = self._conn.register_object('/org/mpris/MediaPlayer2', iface,
                         self._handle_method, self._handle_get, self._handle_set)
-                self._reg_ids.append(rid)
+                    self._reg_ids.append(rid)
+                else:
+                    print('[MPRIS] No registration method available, skipping MPRIS')
+                    return False
             Gio.bus_own_name_on_connection(self._conn,
                 'org.mpris.MediaPlayer2.voidpulse',
                 Gio.BusNameOwnerFlags.NONE, None, None)
@@ -6514,11 +6783,14 @@ class GalleryView(QWidget):
         margin = self.MARGIN; gap = self.GAP
         x = pt.x() - margin; y = pt.y() - margin
         if x < 0 or y < 0: return -1
-        col = x // (self._card_w_act + gap)
-        row = y // (self._card_h_act + gap)
+        denom_w = self._card_w_act + gap
+        denom_h = self._card_h_act + gap
+        if denom_w <= 0 or denom_h <= 0: return -1
+        col = x // denom_w
+        row = y // denom_h
         if col >= self._n_cols: return -1
-        if x - col * (self._card_w_act + gap) >= self._card_w_act: return -1
-        if y - row * (self._card_h_act + gap) >= self._card_h_act: return -1
+        if x - col * denom_w >= self._card_w_act: return -1
+        if y - row * denom_h >= self._card_h_act: return -1
         # In U-mode odd rows are drawn right-to-left, so invert col to get logical pos
         logical_col = (self._n_cols - 1 - col
                        if self._layout_mode == 'gallery_s' and (row % 2 == 1)
@@ -7041,6 +7313,18 @@ class Sidebar(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet('background:transparent; border:none;')
+        # Enable touch scrolling for sidebar playlist area
+        QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        sp = QScrollerProperties()
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,           0.35)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,              0.8)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.15)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance,            0.005)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
+                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
+                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        QScroller.scroller(scroll.viewport()).setScrollerProperties(sp)
         self._pl_container = QWidget(); self._pl_container.setStyleSheet('background:transparent;')
         self._pl_layout = QVBoxLayout(self._pl_container)
         self._pl_layout.setContentsMargins(0,0,0,0); self._pl_layout.setSpacing(0)
@@ -7708,8 +7992,19 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a cover fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('CoverFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
-        dlg.exec()
+        dlg.show()
 
     def _on_lyric_fetch_btn(self):
         """Open the LyricsFetchPopup — triggered by the Settings button."""
@@ -7719,8 +8014,19 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a lyrics fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('LyricsFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = LyricsFetchPopup(all_tracks, parent=win)
-        dlg.exec()
+        dlg.show()
 
     def _on_tag_fetch_btn(self):
         win = self.window()
@@ -7729,10 +8035,21 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a tag fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('TagFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = TagFetchPopup(all_tracks, parent=win)
         # When tags are written, refresh the Track objects in all pages
         dlg.tags_updated.connect(lambda fp, tags: win._on_tags_fetched(fp, tags))
-        dlg.exec()
+        dlg.show()
 
     def _on_rename_btn(self):
         """Open the RenamePopup — triggered by the Settings 'Rename…' button.
@@ -7749,51 +8066,67 @@ class ControlBar(QFrame):
             return
         if self._settings_popup:
             self._settings_popup.hide()
+        
+        # Check if there's already a rename operation running in background
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Show the existing popup instead of creating a new one
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = RenamePopup(all_tracks, parent=win)
-        dlg.exec()   # blocks until user closes
+        dlg.show()   # non-blocking - allows background operation
+        
+        def _on_rename_finished(renamed, total):
+            """Handle rename completion after dialog finishes."""
+            rename_map = dlg.rename_map
+            if not rename_map:
+                return   # nothing was renamed — no need to rescan
 
-        rename_map = dlg.rename_map   # {old_path: new_path}
-        if not rename_map:
-            return   # nothing was renamed — no need to rescan
+            # 1. Rewrite any M3U8 files that reference renamed paths
+            for pl in getattr(win, '_playlists', []):
+                if not hasattr(pl, '_m3u_path'):
+                    continue
+                m3u_path = pl._m3u_path
+                try:
+                    with open(m3u_path, encoding='utf-8', errors='replace') as fh:
+                        lines = fh.readlines()
+                    new_lines = []
+                    changed = False
+                    for line in lines:
+                        stripped = line.rstrip('\n\r')
+                        if stripped in rename_map:
+                            new_lines.append(rename_map[stripped] + '\n')
+                            changed = True
+                        else:
+                            new_lines.append(line)
+                    if changed:
+                        with open(m3u_path, 'w', encoding='utf-8') as fh:
+                            fh.writelines(new_lines)
+                except Exception as exc:
+                    print(f'M3U8 update error ({m3u_path}): {exc}')
 
-        # 1. Rewrite any M3U8 files that reference renamed paths
-        for pl in getattr(win, '_playlists', []):
-            if not hasattr(pl, '_m3u_path'):
-                continue
-            m3u_path = pl._m3u_path
-            try:
-                with open(m3u_path, encoding='utf-8', errors='replace') as fh:
-                    lines = fh.readlines()
-                new_lines = []
-                changed = False
-                for line in lines:
-                    stripped = line.rstrip('\n\r')
-                    if stripped in rename_map:
-                        new_lines.append(rename_map[stripped] + '\n')
-                        changed = True
-                    else:
-                        new_lines.append(line)
-                if changed:
-                    with open(m3u_path, 'w', encoding='utf-8') as fh:
-                        fh.writelines(new_lines)
-            except Exception as exc:
-                print(f'M3U8 update error ({m3u_path}): {exc}')
+            # 2. Update known_paths for any direct-file entries that were renamed
+            for old, new in rename_map.items():
+                if old in win._known_paths:
+                    win._known_paths.discard(old)
+                    win._known_paths.add(new)
 
-        # 2. Update known_paths for any direct-file entries that were renamed
-        for old, new in rename_map.items():
-            if old in win._known_paths:
-                win._known_paths.discard(old)
-                win._known_paths.add(new)
+            # 3. Save config
+            if hasattr(win, '_save_config'):
+                win._save_config()
 
-        # 3. Save config immediately (persists updated known_paths + M3U contents)
-        win._save_config()
+            # 4. Rescan all known paths
+            win._status.showMessage('Rename complete — refreshing library…')
+            _cover_cache.clear()
+            if hasattr(win, '_lib_page') and win._lib_page:
+                win._lib_page.rescan_all()
 
-        # 4. Rescan all folders and M3U playlists so the UI reflects new names
-        win._status.showMessage('Rename complete — refreshing library…')
-        _cover_cache.clear()
-        for path in list(win._known_paths):
-            is_m3u = path.endswith(('.m3u', '.m3u8'))
-            win._scan_path(path, is_m3u, refresh=True)
+        if dlg._worker:
+            dlg._worker.finished.connect(_on_rename_finished)
 
     def _toggle_fullscreen(self):
         win = self.window()
