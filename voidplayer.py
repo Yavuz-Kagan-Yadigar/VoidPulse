@@ -63,9 +63,10 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _ensure_async_cover_loader() L3380 Module singleton factory
    _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
    _BaseFetchPopup             L3515  Shared base class for fetch popups (force checkbox, run-in-bg)
-     closeEvent()              L3669  Hide dialog, keep worker running in background
-   LibraryCoverFetchWorker     L3698  Sequential per-track cover fetcher
-   CoverFetchPopup             L3739  Modal "fetch covers for library" dialog
+     closeEvent()              L3689  Hide dialog, keep worker running in background
+     mousePressEvent()         L3694  Click outside → hide (run in background)
+   LibraryCoverFetchWorker     L3735  Sequential per-track cover fetcher
+   CoverFetchPopup             L3776  Modal "fetch covers for library" dialog
 
  TAGS / METADATA
    fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
@@ -78,13 +79,14 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
    read_metadata()             L3042  Build Track from mutagen
    LibraryTagFetchWorker       L3791  Sequential per-track tag fetcher
-   TagFetchPopup               L3836  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L3878  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L3934  Modal "fetch lyrics for library" dialog
+   TagFetchPopup               L3890  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L3988  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L3988  Modal "fetch lyrics for library" dialog
    _sanitize_filename_part()   L3966  Strip illegal filename chars (/,\0,edge dots)
    _build_new_filename()       L3977  Build new filename stem from pattern + metadata
    LibraryRenameWorker         L4014  Sequential per-track file renamer
-   RenamePopup                 L4080  Modal "batch rename library" dialog (run-in-bg)
+   RenamePopup                 L4117  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L4334  Hide dialog, keep worker running in background
 
  PLAYER
    RepeatMode                  L4238  Enum: NONE / ALL / ONE
@@ -3608,6 +3610,9 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel.clicked.connect(self._cancel)
         self._btn_close.clicked.connect(self._on_close)
         self._force = False   # set just before _make_worker() is called
+        
+        # Check if there's an existing worker running in background and auto-start
+        self._check_and_restore_background()
 
     def _make_worker(self):
         raise NotImplementedError
@@ -3615,20 +3620,8 @@ class _BaseFetchPopup(QDialog):
     def _on_track_done(self, *args):
         raise NotImplementedError
 
-    # ── common implementation ────────────────────────────────────────────────
-
-    def _log_add(self, text: str, ok: bool):
-        item = QListWidgetItem(text)
-        item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
-        self._log.addItem(item)
-        self._log.scrollToBottom()
-        # Store log item for background restoration
-        self._bg_log_items.append((text, ok))
-
-    def _start(self):
-        if self._running:
-            return
-        # Check if there's an existing worker for this popup type running in background
+    def _check_and_restore_background(self):
+        """Check if there's an existing worker running in background and auto-restore UI."""
         existing = _BaseFetchPopup._active_workers.get(self._popup_type)
         if existing:
             old_instance, old_worker, old_thread = existing
@@ -3651,6 +3644,21 @@ class _BaseFetchPopup(QDialog):
             # Restore result label if present
             if old_instance._bg_result:
                 self._result_lbl.setText(old_instance._bg_result)
+            # Emit progress to main window status bar
+            self._emit_status_update()
+
+    # ── common implementation ────────────────────────────────────────────────
+
+    def _log_add(self, text: str, ok: bool):
+        item = QListWidgetItem(text)
+        item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
+        self._log.addItem(item)
+        self._log.scrollToBottom()
+        # Store log item for background restoration
+        self._bg_log_items.append((text, ok))
+
+    def _start(self):
+        if self._running:
             return
         
         self._running = True
@@ -3675,6 +3683,8 @@ class _BaseFetchPopup(QDialog):
         # Register this worker as active for this popup type
         _BaseFetchPopup._active_workers[self._popup_type] = (self, worker, thread)
         thread.start()
+        # Emit initial status update
+        self._emit_status_update()
 
     def _cancel(self):
         if self._worker:
@@ -3693,7 +3703,7 @@ class _BaseFetchPopup(QDialog):
 
     def mousePressEvent(self, e):
         # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             # Check if click is outside the dialog's geometry
             if not self.rect().contains(e.pos()):
                 self.hide()
@@ -3708,6 +3718,8 @@ class _BaseFetchPopup(QDialog):
         self._bg_progress = current
         self._bg_total = total
         self._bg_track_name = name
+        # Emit progress to main window status bar
+        self._emit_status_update()
 
     def _on_finished(self, found: int, total: int):
         self._running = False
@@ -3724,6 +3736,27 @@ class _BaseFetchPopup(QDialog):
         # Clean up thread references but don't quit (already quit via signal)
         self._thread = None
         self._worker = None
+        # Clear status bar message
+        self._emit_status_clear()
+
+    def _emit_status_update(self):
+        """Emit progress status to main window status bar."""
+        if self._running and hasattr(self, '_bg_progress') and hasattr(self, '_bg_total'):
+            msg = f"Fetching: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
+            # Find main window and update status bar
+            win = self.parent()
+            while win and not isinstance(win, MainWindow):
+                win = win.parent()
+            if win and hasattr(win, '_status'):
+                win._status.showMessage(msg, 0)
+
+    def _emit_status_clear(self):
+        """Clear status bar message when finished."""
+        win = self.parent()
+        while win and not isinstance(win, MainWindow):
+            win = win.parent()
+        if win and hasattr(win, '_status'):
+            win._status.clearMessage()
 
     def _finished_msg(self, found: int, total: int) -> str:
         return f'Processed {found} out of {total}.' 
@@ -4225,6 +4258,9 @@ class RenamePopup(QDialog):
         self._btn_close.clicked.connect(self._on_close)
 
         self._on_pattern_changed('')
+        
+        # Check if there's an existing rename worker running in background and auto-restore
+        self._check_and_restore_background_rename()
 
     # ── validation ────────────────────────────────────────────────────────────
 
@@ -4253,10 +4289,8 @@ class RenamePopup(QDialog):
 
     # ── worker ────────────────────────────────────────────────────────────────
 
-    def _start(self):
-        if self._running:
-            return
-        # Check if there's an existing rename worker running in background
+    def _check_and_restore_background_rename(self):
+        """Check if there's an existing rename worker running in background and auto-restore UI."""
         existing = RenamePopup._active_worker
         if existing:
             old_instance, old_worker, old_thread = existing
@@ -4283,6 +4317,11 @@ class RenamePopup(QDialog):
             # Restore result label if present
             if old_instance._bg_result:
                 self._result_lbl.setText(old_instance._bg_result)
+            # Emit progress to main window status bar
+            self._emit_status_update_rename()
+
+    def _start(self):
+        if self._running:
             return
         
         pattern = self._pat_edit.text()
@@ -4310,6 +4349,8 @@ class RenamePopup(QDialog):
         # Register this worker as active
         RenamePopup._active_worker = (self, worker, thread)
         thread.start()
+        # Emit initial status update
+        self._emit_status_update_rename()
 
     def _cancel(self):
         if self._worker:
@@ -4338,7 +4379,7 @@ class RenamePopup(QDialog):
 
     def mousePressEvent(self, e):
         # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             # Check if click is outside the dialog's geometry
             if not self.rect().contains(e.pos()):
                 self.hide()
@@ -5786,14 +5827,10 @@ class MprisServer(QObject):
             self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             node = Gio.DBusNodeInfo.new_for_xml(MprisServer._MPRIS_XML)
             for iface in node.interfaces:
-                try:
-                    # PyGObject ≥ 3.51: register_object is deprecated
-                    rid = self._conn.register_object_with_closures(
-                        '/org/mpris/MediaPlayer2', iface,
-                        self._handle_method, self._handle_get, self._handle_set)
-                except AttributeError:
-                    rid = self._conn.register_object('/org/mpris/MediaPlayer2', iface,
-                        self._handle_method, self._handle_get, self._handle_set)
+                # PyGObject ≥ 3.51: register_object is deprecated, use register_object_with_closures
+                rid = self._conn.register_object_with_closures(
+                    '/org/mpris/MediaPlayer2', iface,
+                    self._handle_method, self._handle_get, self._handle_set)
                 self._reg_ids.append(rid)
             Gio.bus_own_name_on_connection(self._conn,
                 'org.mpris.MediaPlayer2.voidpulse',
