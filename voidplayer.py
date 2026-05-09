@@ -62,12 +62,12 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    AsyncCoverLoader            L3288  QThreadPool-based async cover loader
    _ensure_async_cover_loader() L3380 Module singleton factory
    _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3515  Shared base class for fetch popups (supports multiple concurrent workers)
-     closeEvent()              L3702  Hide dialog, keep worker running in background
-     mousePressEvent()         L3707  Click outside → hide (run in background)
-     _emit_status_update()     L3757  Show each fetch instance progress as permanent widget on status bar left
-   LibraryCoverFetchWorker     L3801  Sequential per-track cover fetcher
-   CoverFetchPopup             L3842  Modal "fetch covers for library" dialog (multiple concurrent supported)
+   _BaseFetchPopup             L3531  Shared base class for fetch popups (supports multiple concurrent workers)
+     closeEvent()              L4483  Hide dialog, keep worker running in background
+     mousePressEvent()         L4488  Click outside → hide (run in background)
+     _emit_status_update()     L3782  Show each fetch instance progress as permanent widget on status bar left
+   LibraryCoverFetchWorker     L3881  Sequential per-track cover fetcher
+   CoverFetchPopup             L3881  Modal "fetch covers for library" dialog (multiple concurrent supported)
 
  TAGS / METADATA
    fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
@@ -79,15 +79,15 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _tag() / _vtag()            L2998  Tag value helpers (case-insensitive Vorbis)
    extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
    read_metadata()             L3042  Build Track from mutagen
-   LibraryTagFetchWorker       L3857  Sequential per-track tag fetcher
-   TagFetchPopup               L3956  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L4054  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L4054  Modal "fetch lyrics for library" dialog
+   LibraryTagFetchWorker       L3995  Sequential per-track tag fetcher
+   TagFetchPopup               L3995  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L4093  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L4093  Modal "fetch lyrics for library" dialog
    _sanitize_filename_part()   L4032  Strip illegal filename chars (/,\0,edge dots)
    _build_new_filename()       L4043  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L4080  Sequential per-track file renamer
-   RenamePopup                 L4183  Modal "batch rename library" dialog (run-in-bg)
-     closeEvent()              L4400  Hide dialog, keep worker running in background
+   LibraryRenameWorker         L4183  Sequential per-track file renamer
+   RenamePopup                 L4222  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L4483  Hide dialog, keep worker running in background
 
  PLAYER
    RepeatMode                  L4238  Enum: NONE / ALL / ONE
@@ -7992,6 +7992,17 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a cover fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('CoverFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
         dlg.show()
 
@@ -8003,6 +8014,17 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a lyrics fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('LyricsFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = LyricsFetchPopup(all_tracks, parent=win)
         dlg.show()
 
@@ -8013,6 +8035,17 @@ class ControlBar(QFrame):
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
         if self._settings_popup: self._settings_popup.hide()
+        
+        # Check if there's already a tag fetch running in background
+        workers_list = _BaseFetchPopup._active_workers.get('TagFetchPopup', [])
+        if workers_list:
+            # Show the most recent existing popup instead of creating a new one
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = TagFetchPopup(all_tracks, parent=win)
         # When tags are written, refresh the Track objects in all pages
         dlg.tags_updated.connect(lambda fp, tags: win._on_tags_fetched(fp, tags))
@@ -8033,6 +8066,17 @@ class ControlBar(QFrame):
             return
         if self._settings_popup:
             self._settings_popup.hide()
+        
+        # Check if there's already a rename operation running in background
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Show the existing popup instead of creating a new one
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
         dlg = RenamePopup(all_tracks, parent=win)
         dlg.show()   # non-blocking - allows background operation
         
