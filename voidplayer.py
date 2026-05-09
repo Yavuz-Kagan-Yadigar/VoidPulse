@@ -3558,7 +3558,8 @@ class _BaseFetchPopup(QDialog):
         self._bg_track_name = ''
         self._bg_log_items = []  # list of (text, ok_flag)
         self._bg_result = ''
-        self._worker_id = id(self)  # Unique ID for this instance's worker
+        self._worker_id = None  # Will be set when worker is created or restored
+        self._status_widget_key = None  # Key for status bar widget
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -3645,6 +3646,8 @@ class _BaseFetchPopup(QDialog):
             self._thread = old_thread
             self._worker = old_worker
             self._running = True
+            self._worker_id = old_instance._worker_id  # Reuse same worker ID
+            self._status_widget_key = old_instance._status_widget_key
             self._btn_start.setEnabled(False)
             self._btn_cancel.setEnabled(True)
             # Restore progress, log, and track info from background state
@@ -3660,7 +3663,7 @@ class _BaseFetchPopup(QDialog):
             # Restore result label if present
             if old_instance._bg_result:
                 self._result_lbl.setText(old_instance._bg_result)
-            # Emit progress to main window status bar
+            # Emit progress to main window status bar (reuses existing widget)
             self._emit_status_update()
             # Auto-show the dialog (it may have been hidden) - but don't auto-start since it's already running
             self.show()
@@ -3702,6 +3705,11 @@ class _BaseFetchPopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
+        # Generate unique ID for this worker instance if not already set
+        if self._worker_id is None:
+            self._worker_id = id(worker)
+        if self._status_widget_key is None:
+            self._status_widget_key = f"_fetch_widget_{self._worker_id}"
         # Register this worker as active for this popup type (support multiple concurrent workers)
         if self._popup_type not in _BaseFetchPopup._active_workers:
             _BaseFetchPopup._active_workers[self._popup_type] = []
@@ -3773,29 +3781,35 @@ class _BaseFetchPopup(QDialog):
 
     def _emit_status_update(self):
         """Emit progress status to main window status bar - shows all concurrent fetches."""
-        if self._running and hasattr(self, '_bg_progress') and hasattr(self, '_bg_total'):
-            # Determine fetch type label based on popup class
-            if isinstance(self, CoverFetchPopup):
-                type_label = "Covers"
-            elif isinstance(self, TagFetchPopup):
-                type_label = "Tags"
-            elif isinstance(self, LyricsFetchPopup):
-                type_label = "Lyrics"
+        if not self._running or not self._worker_id:
+            return
+        if not (hasattr(self, '_bg_progress') and hasattr(self, '_bg_total')):
+            return
+        
+        # Determine fetch type label based on popup class
+        if isinstance(self, CoverFetchPopup):
+            type_label = "Covers"
+        elif isinstance(self, TagFetchPopup):
+            type_label = "Tags"
+        elif isinstance(self, LyricsFetchPopup):
+            type_label = "Lyrics"
+        else:
+            type_label = "Fetch"
+        
+        msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
+        # Find main window and update status bar
+        win = self.parent()
+        while win and not isinstance(win, MainWindow):
+            win = win.parent()
+        if win and hasattr(win, '_status'):
+            # Use unique widget key for this specific worker instance
+            widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
+            # Check if widget already exists
+            old_lbl = getattr(win, widget_key, None)
+            if old_lbl:
+                # Update existing widget text instead of creating new one
+                old_lbl.setText(msg)
             else:
-                type_label = "Fetch"
-            
-            msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
-            # Find main window and update status bar
-            win = self.parent()
-            while win and not isinstance(win, MainWindow):
-                win = win.parent()
-            if win and hasattr(win, '_status'):
-                # Create unique widget key for this specific instance
-                widget_key = f"_fetch_widget_{self._worker_id}"
-                # Remove old widget if exists
-                old_lbl = getattr(win, widget_key, None)
-                if old_lbl:
-                    old_lbl.deleteLater()
                 # Create new permanent widget
                 lbl = QLabel(msg)
                 lbl.setStyleSheet(f'color:{FG}; font-size:11px; padding: 0 8px;')
@@ -3805,7 +3819,7 @@ class _BaseFetchPopup(QDialog):
     def _emit_status_clear(self):
         """Clear status bar message for this specific fetch instance when finished."""
         # Use unique widget key for this instance
-        widget_key = f"_fetch_widget_{self._worker_id}"
+        widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
         
         win = self.parent()
         while win and not isinstance(win, MainWindow):
@@ -5923,15 +5937,19 @@ class MprisServer(QObject):
             self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             node = Gio.DBusNodeInfo.new_for_xml(MprisServer._MPRIS_XML)
             for iface in node.interfaces:
-                # Use only the new API (PyGObject >= 3.51) - old register_object is deprecated
+                # Try new API first (PyGObject >= 3.51), fallback to old API
                 if hasattr(self._conn, 'register_object_with_closures'):
                     rid = self._conn.register_object_with_closures(
                         '/org/mpris/MediaPlayer2', iface,
                         self._handle_method, self._handle_get, self._handle_set)
                     self._reg_ids.append(rid)
+                elif hasattr(self._conn, 'register_object'):
+                    # Fallback to deprecated API for older PyGObject versions
+                    rid = self._conn.register_object('/org/mpris/MediaPlayer2', iface,
+                        self._handle_method, self._handle_get, self._handle_set)
+                    self._reg_ids.append(rid)
                 else:
-                    # Skip registration if new API not available to avoid deprecation warning
-                    print('[MPRIS] register_object_with_closures not available, skipping MPRIS registration')
+                    print('[MPRIS] No registration method available, skipping MPRIS')
                     return False
             Gio.bus_own_name_on_connection(self._conn,
                 'org.mpris.MediaPlayer2.voidpulse',
