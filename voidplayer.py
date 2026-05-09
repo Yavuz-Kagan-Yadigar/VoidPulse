@@ -62,10 +62,10 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    AsyncCoverLoader            L3288  QThreadPool-based async cover loader
    _ensure_async_cover_loader() L3380 Module singleton factory
    _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3395  Shared base class for fetch popups (force checkbox)
-     closeEvent()              L3534  Cancel worker + join thread before closing
-   LibraryCoverFetchWorker     L3561  Sequential per-track cover fetcher
-   CoverFetchPopup             L3602  Modal "fetch covers for library" dialog
+   _BaseFetchPopup             L3515  Shared base class for fetch popups (force checkbox, run-in-bg)
+     closeEvent()              L3669  Hide dialog, keep worker running in background
+   LibraryCoverFetchWorker     L3698  Sequential per-track cover fetcher
+   CoverFetchPopup             L3739  Modal "fetch covers for library" dialog
 
  TAGS / METADATA
    fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
@@ -77,14 +77,14 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _tag() / _vtag()            L2998  Tag value helpers (case-insensitive Vorbis)
    extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
    read_metadata()             L3042  Build Track from mutagen
-   LibraryTagFetchWorker       L3671  Sequential per-track tag fetcher
-   TagFetchPopup               L3716  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L3758  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L3814  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L3846  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L3857  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L3894  Sequential per-track file renamer
-   RenamePopup                 L3943  Modal "batch rename library" dialog
+   LibraryTagFetchWorker       L3791  Sequential per-track tag fetcher
+   TagFetchPopup               L3836  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L3878  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L3934  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L3966  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L3977  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L4014  Sequential per-track file renamer
+   RenamePopup                 L4080  Modal "batch rename library" dialog (run-in-bg)
 
  PLAYER
    RepeatMode                  L4238  Enum: NONE / ALL / ONE
@@ -110,10 +110,10 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
  LIBRARY
    Track                       L2973  @dataclass: filepath + metadata
-   scan_folder()               L4151  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4166  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4188  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4206  Non-blocking playlist loader for config restore
+   scan_folder()               L4312  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4327  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L4349  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L4367  Non-blocking playlist loader for config restore
 
  VIEWS
    TrackTable                  L5902  QTableWidget with covers + sort + touch scroll
@@ -2350,7 +2350,6 @@ class EqPopup(QFrame):
         prof_layout = QHBoxLayout()
         prof_label = QLabel('Profile:')
         prof_layout.addWidget(prof_label)
-        self._loaded_lbl = None   # removed from UI, kept for compat
 
         self._NEW = '＋ New'   # sentinel — always first item
         self._profile_combo = TouchComboBox()
@@ -2526,7 +2525,6 @@ class EqPopup(QFrame):
             self._bands = []
             self._current_profile = ''
             self._profile_combo.lineEdit().clear()
-            if self._loaded_lbl: self._loaded_lbl.setText('Loaded: —')
             self._refresh_table()
             self._update_graph()
             self._apply_timer.start()
@@ -2535,7 +2533,6 @@ class EqPopup(QFrame):
             self._refresh_table()
             self._update_graph()
             self._current_profile = name
-            if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
             self._apply_timer.start()
 
 
@@ -2550,7 +2547,6 @@ class EqPopup(QFrame):
             self._profile_combo.insertItem(1, name)   # insert at 1, after ＋New
         self._profile_combo.setCurrentText(name)
         self._current_profile = name
-        if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
 
     def _delete_profile(self):
         name = self._profile_combo.currentText().strip()
@@ -2563,7 +2559,6 @@ class EqPopup(QFrame):
             self._profile_combo.setCurrentIndex(0)
             self._profile_combo.lineEdit().clear()
             self._current_profile = ''
-            if self._loaded_lbl: self._loaded_lbl.setText('Loaded: —')
             self._bands = []
             self._refresh_table()
             self._update_graph()
@@ -2584,7 +2579,6 @@ class EqPopup(QFrame):
         self._update_graph()
         if name:
             self._current_profile = name
-            if self._loaded_lbl: self._loaded_lbl.setText(f'Loaded: {name}')
             idx = self._profile_combo.findText(name)
             if idx >= 0:
                 self._profile_combo.blockSignals(True)
@@ -3528,6 +3522,9 @@ class _BaseFetchPopup(QDialog):
     And may override _on_finished(found, total) to customise the result label.
     """
 
+    # Class-level tracking of active workers per popup type
+    _active_workers = {}  # key: popup_type_name, value: (instance, worker, thread)
+
     def __init__(self, tracks: list, title: str, info_text: str, needs_count: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -3538,6 +3535,7 @@ class _BaseFetchPopup(QDialog):
         self._worker   = None
         self._running  = False
         self._found    = 0
+        self._popup_type = self.__class__.__name__
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -3589,7 +3587,7 @@ class _BaseFetchPopup(QDialog):
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Close')
+        self._btn_close  = QPushButton('Run in Background')
         self._force_cb   = QCheckBox('Force (re-fetch all)')
         self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
         btn_row.addWidget(self._btn_start)
@@ -3622,6 +3620,19 @@ class _BaseFetchPopup(QDialog):
     def _start(self):
         if self._running:
             return
+        # Check if there's an existing worker for this popup type running in background
+        existing = _BaseFetchPopup._active_workers.get(self._popup_type)
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Restore UI to show the existing running operation
+            self._thread = old_thread
+            self._worker = old_worker
+            self._running = True
+            self._btn_start.setEnabled(False)
+            self._btn_cancel.setEnabled(True)
+            self._track_lbl.setText('Continuing from background...')
+            return
+        
         self._running = True
         self._found   = 0
         self._force   = self._force_cb.isChecked()   # subclasses read self._force in _make_worker
@@ -3641,6 +3652,8 @@ class _BaseFetchPopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
+        # Register this worker as active for this popup type
+        _BaseFetchPopup._active_workers[self._popup_type] = (self, worker, thread)
         thread.start()
 
     def _cancel(self):
@@ -3650,20 +3663,13 @@ class _BaseFetchPopup(QDialog):
         self._track_lbl.setText('Cancelling…')
 
     def _on_close(self):
-        self._cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        self._thread = None
-        self.accept()
+        # Hide the dialog but keep the thread running in background
+        self.hide()
 
     def closeEvent(self, e):
-        self._cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        self._thread = None
-        super().closeEvent(e)
+        # Hide instead of closing - keeps thread alive
+        self.hide()
+        e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
         self._progress.setValue(current)
@@ -3671,11 +3677,16 @@ class _BaseFetchPopup(QDialog):
 
     def _on_finished(self, found: int, total: int):
         self._running = False
+        # Remove from active workers
+        _BaseFetchPopup._active_workers.pop(self._popup_type, None)
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
         self._progress.setValue(total)
         self._result_lbl.setText(self._finished_msg(found, total))
+        # Clean up thread references but don't quit (already quit via signal)
+        self._thread = None
+        self._worker = None
 
     def _finished_msg(self, found: int, total: int) -> str:
         return f'Processed {found} out of {total}.' 
@@ -4077,6 +4088,9 @@ class RenamePopup(QDialog):
     The caller (ControlBar._on_rename_btn) uses this to rescan and update M3Us.
     """
 
+    # Class-level tracking of active rename worker
+    _active_worker = None  # (instance, worker, thread) or None
+
     def __init__(self, tracks: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Rename Library Files')
@@ -4156,7 +4170,7 @@ class RenamePopup(QDialog):
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Close')
+        self._btn_close  = QPushButton('Run in Background')
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addStretch()
@@ -4199,6 +4213,19 @@ class RenamePopup(QDialog):
     def _start(self):
         if self._running:
             return
+        # Check if there's an existing rename worker running in background
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Restore UI to show the existing running operation
+            self._thread = old_thread
+            self._worker = old_worker
+            self._running = True
+            self._btn_start.setEnabled(False)
+            self._btn_cancel.setEnabled(True)
+            self._track_lbl.setText('Continuing from background...')
+            return
+        
         pattern = self._pat_edit.text()
         if _validate_rename_pattern(pattern):
             return
@@ -4221,6 +4248,8 @@ class RenamePopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
+        # Register this worker as active
+        RenamePopup._active_worker = (self, worker, thread)
         thread.start()
 
     def _cancel(self):
@@ -4240,12 +4269,13 @@ class RenamePopup(QDialog):
         self._worker = None
 
     def _on_close(self):
-        self._stop_thread()
-        self.accept()
+        # Hide the dialog but keep the thread running in background
+        self.hide()
 
     def closeEvent(self, e):
-        self._stop_thread()
-        super().closeEvent(e)
+        # Hide instead of closing - keeps thread alive
+        self.hide()
+        e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
@@ -4267,10 +4297,15 @@ class RenamePopup(QDialog):
 
     def _on_finished(self, renamed: int, total: int):
         self._running = False
+        # Clear active worker reference
+        RenamePopup._active_worker = None
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
         self._result_lbl.setText(f'{renamed} / {total} files renamed.')
+        # Clean up thread references
+        self._thread = None
+        self._worker = None
 
 
 
@@ -6514,11 +6549,14 @@ class GalleryView(QWidget):
         margin = self.MARGIN; gap = self.GAP
         x = pt.x() - margin; y = pt.y() - margin
         if x < 0 or y < 0: return -1
-        col = x // (self._card_w_act + gap)
-        row = y // (self._card_h_act + gap)
+        denom_w = self._card_w_act + gap
+        denom_h = self._card_h_act + gap
+        if denom_w <= 0 or denom_h <= 0: return -1
+        col = x // denom_w
+        row = y // denom_h
         if col >= self._n_cols: return -1
-        if x - col * (self._card_w_act + gap) >= self._card_w_act: return -1
-        if y - row * (self._card_h_act + gap) >= self._card_h_act: return -1
+        if x - col * denom_w >= self._card_w_act: return -1
+        if y - row * denom_h >= self._card_h_act: return -1
         # In U-mode odd rows are drawn right-to-left, so invert col to get logical pos
         logical_col = (self._n_cols - 1 - col
                        if self._layout_mode == 'gallery_s' and (row % 2 == 1)
