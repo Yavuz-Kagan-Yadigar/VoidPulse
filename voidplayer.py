@@ -3536,6 +3536,12 @@ class _BaseFetchPopup(QDialog):
         self._running  = False
         self._found    = 0
         self._popup_type = self.__class__.__name__
+        # Store background state for restoration
+        self._bg_progress = 0
+        self._bg_total = needs_count
+        self._bg_track_name = ''
+        self._bg_log_items = []  # list of (text, ok_flag)
+        self._bg_result = ''
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -3616,6 +3622,8 @@ class _BaseFetchPopup(QDialog):
         item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
         self._log.addItem(item)
         self._log.scrollToBottom()
+        # Store log item for background restoration
+        self._bg_log_items.append((text, ok))
 
     def _start(self):
         if self._running:
@@ -3624,13 +3632,25 @@ class _BaseFetchPopup(QDialog):
         existing = _BaseFetchPopup._active_workers.get(self._popup_type)
         if existing:
             old_instance, old_worker, old_thread = existing
-            # Restore UI to show the existing running operation
+            # Restore UI to show the existing running operation with full state
             self._thread = old_thread
             self._worker = old_worker
             self._running = True
             self._btn_start.setEnabled(False)
             self._btn_cancel.setEnabled(True)
-            self._track_lbl.setText('Continuing from background...')
+            # Restore progress, log, and track info from background state
+            self._progress.setValue(old_instance._bg_progress)
+            self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
+            # Restore log items
+            self._log.clear()
+            for text, ok_flag in old_instance._bg_log_items:
+                item = QListWidgetItem(text)
+                item.setForeground(QColor('#55bb55') if ok_flag else QColor('#bb3333'))
+                self._log.addItem(item)
+            self._log.scrollToBottom()
+            # Restore result label if present
+            if old_instance._bg_result:
+                self._result_lbl.setText(old_instance._bg_result)
             return
         
         self._running = True
@@ -3671,9 +3691,23 @@ class _BaseFetchPopup(QDialog):
         self.hide()
         e.ignore()
 
+    def mousePressEvent(self, e):
+        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
+        if e.button() == Qt.LeftButton:
+            # Check if click is outside the dialog's geometry
+            if not self.rect().contains(e.pos()):
+                self.hide()
+                e.ignore()
+                return
+        super().mousePressEvent(e)
+
     def _on_progress(self, current: int, total: int, name: str):
         self._progress.setValue(current)
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
+        # Store state for background restoration
+        self._bg_progress = current
+        self._bg_total = total
+        self._bg_track_name = name
 
     def _on_finished(self, found: int, total: int):
         self._running = False
@@ -3683,7 +3717,10 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
         self._progress.setValue(total)
-        self._result_lbl.setText(self._finished_msg(found, total))
+        result_msg = self._finished_msg(found, total)
+        self._result_lbl.setText(result_msg)
+        # Store result for background restoration
+        self._bg_result = result_msg
         # Clean up thread references but don't quit (already quit via signal)
         self._thread = None
         self._worker = None
@@ -4104,6 +4141,12 @@ class RenamePopup(QDialog):
         self._renamed  = 0
         # Collected as worker emits; available after exec() returns
         self.rename_map: dict = {}   # {old_path: new_path}
+        # Store background state for restoration
+        self._bg_progress = 0
+        self._bg_total = len(tracks)
+        self._bg_track_name = ''
+        self._bg_log_items = []  # list of (text, ok_flag, old_name, new_name)
+        self._bg_result = ''
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -4217,13 +4260,29 @@ class RenamePopup(QDialog):
         existing = RenamePopup._active_worker
         if existing:
             old_instance, old_worker, old_thread = existing
-            # Restore UI to show the existing running operation
+            # Restore UI to show the existing running operation with full state
             self._thread = old_thread
             self._worker = old_worker
             self._running = True
             self._btn_start.setEnabled(False)
             self._btn_cancel.setEnabled(True)
-            self._track_lbl.setText('Continuing from background...')
+            # Restore progress and track info from background state
+            self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
+            # Restore log items
+            self._log.clear()
+            for item_data in old_instance._bg_log_items:
+                text, ok_flag, old_name, new_name = item_data
+                if ok_flag:
+                    item = QListWidgetItem(f'OK    {old_name}  →  {new_name}')
+                    item.setForeground(QColor('#55bb55'))
+                else:
+                    item = QListWidgetItem(f'FAIL  {old_name}  ({new_name})')
+                    item.setForeground(QColor('#bb3333'))
+                self._log.addItem(item)
+            self._log.scrollToBottom()
+            # Restore result label if present
+            if old_instance._bg_result:
+                self._result_lbl.setText(old_instance._bg_result)
             return
         
         pattern = self._pat_edit.text()
@@ -4277,8 +4336,22 @@ class RenamePopup(QDialog):
         self.hide()
         e.ignore()
 
+    def mousePressEvent(self, e):
+        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
+        if e.button() == Qt.LeftButton:
+            # Check if click is outside the dialog's geometry
+            if not self.rect().contains(e.pos()):
+                self.hide()
+                e.ignore()
+                return
+        super().mousePressEvent(e)
+
     def _on_progress(self, current: int, total: int, name: str):
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
+        # Store state for background restoration
+        self._bg_progress = current
+        self._bg_total = total
+        self._bg_track_name = name
 
     def _on_track_done(self, old_path: str, new_path: str, ok: bool):
         old_name = Path(old_path).name
@@ -4294,6 +4367,8 @@ class RenamePopup(QDialog):
             item.setForeground(QColor('#bb3333'))
         self._log.addItem(item)
         self._log.scrollToBottom()
+        # Store log item for background restoration
+        self._bg_log_items.append((item.text(), ok, old_name, new_path if ok else new_path))
 
     def _on_finished(self, renamed: int, total: int):
         self._running = False
@@ -4302,7 +4377,10 @@ class RenamePopup(QDialog):
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
-        self._result_lbl.setText(f'{renamed} / {total} files renamed.')
+        result_msg = f'{renamed} / {total} files renamed.'
+        self._result_lbl.setText(result_msg)
+        # Store result for background restoration
+        self._bg_result = result_msg
         # Clean up thread references
         self._thread = None
         self._worker = None
