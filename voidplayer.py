@@ -8053,64 +8053,36 @@ class ControlBar(QFrame):
                     new_lines = []
                     changed = False
                     for line in lines:
-                        stripped = line.rstrip('\\n\\r')
+                        stripped = line.rstrip('\n\r')
                         if stripped in rename_map:
-                            new_lines.append(rename_map[stripped] + line[len(stripped):])
+                            new_lines.append(rename_map[stripped] + '\n')
                             changed = True
                         else:
                             new_lines.append(line)
                     if changed:
                         with open(m3u_path, 'w', encoding='utf-8') as fh:
                             fh.writelines(new_lines)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f'M3U8 update error ({m3u_path}): {exc}')
 
-            # 2. Save config
+            # 2. Update known_paths for any direct-file entries that were renamed
+            for old, new in rename_map.items():
+                if old in win._known_paths:
+                    win._known_paths.discard(old)
+                    win._known_paths.add(new)
+
+            # 3. Save config
             if hasattr(win, '_save_config'):
                 win._save_config()
 
-            # 3. Rescan all known paths
+            # 4. Rescan all known paths
+            win._status.showMessage('Rename complete — refreshing library…')
+            _cover_cache.clear()
             if hasattr(win, '_lib_page') and win._lib_page:
                 win._lib_page.rescan_all()
 
-        dlg._worker.finished.connect(_on_rename_finished) if dlg._worker else None
-        for pl in getattr(win, '_playlists', []):
-            if not hasattr(pl, '_m3u_path'):
-                continue
-            m3u_path = pl._m3u_path
-            try:
-                with open(m3u_path, encoding='utf-8', errors='replace') as fh:
-                    lines = fh.readlines()
-                new_lines = []
-                changed = False
-                for line in lines:
-                    stripped = line.rstrip('\n\r')
-                    if stripped in rename_map:
-                        new_lines.append(rename_map[stripped] + '\n')
-                        changed = True
-                    else:
-                        new_lines.append(line)
-                if changed:
-                    with open(m3u_path, 'w', encoding='utf-8') as fh:
-                        fh.writelines(new_lines)
-            except Exception as exc:
-                print(f'M3U8 update error ({m3u_path}): {exc}')
-
-        # 2. Update known_paths for any direct-file entries that were renamed
-        for old, new in rename_map.items():
-            if old in win._known_paths:
-                win._known_paths.discard(old)
-                win._known_paths.add(new)
-
-        # 3. Save config immediately (persists updated known_paths + M3U contents)
-        win._save_config()
-
-        # 4. Rescan all folders and M3U playlists so the UI reflects new names
-        win._status.showMessage('Rename complete — refreshing library…')
-        _cover_cache.clear()
-        for path in list(win._known_paths):
-            is_m3u = path.endswith(('.m3u', '.m3u8'))
-            win._scan_path(path, is_m3u, refresh=True)
+        if dlg._worker:
+            dlg._worker.finished.connect(_on_rename_finished)
 
     def _toggle_fullscreen(self):
         win = self.window()
