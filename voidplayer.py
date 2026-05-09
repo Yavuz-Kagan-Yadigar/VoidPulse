@@ -22,6 +22,10 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    SliderRow                   L598   Label + JumpSlider + value label row
    SettingsPopup               L630   Settings panel popup (child widget, Wayland-safe)
    TagEditDialog               L1014  Modal tag editor with cover management
+     _pick_cover_file()        L1114  Open file dialog → set cover bytes
+     _search_cover_online()    L1130  Background cover search → update preview
+     _fetch_tags_online()      L1175  Background tag lookup → fill empty fields
+     _fetch_lyrics_online()    L1211  Force-fetch lyrics (all APIs, synced priority) → embed
    EQSliderCell                L1227  Table cell widget for a single EQ parameter
    TouchComboBox               L2168  QComboBox immune to touch double-fire close
    EqPopup                     L2187  Parametric EQ popup + preset management
@@ -44,8 +48,8 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _src_lrclib_exact/search()  L1668  LrcLib API sources
    _src_lyrics_ovh()           L1696  Lyrics.ovh fallback source
    ClickableLyricLine          L1818  QLabel that emits clicked(ms)
-   LyricsFetcher               L1831  Worker: embedded tags → 9 online sources
-   LyricsPanel                 L1905  Scrollable lyric display with sync highlight
+   LyricsFetcher               L1926  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2000  Scrollable lyric display with sync highlight
 
  COVER ART
    _trim_cover_cache()         L3078  Evict oldest entries when cache exceeds limit
@@ -86,20 +90,20 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    RepeatMode                  L4238  Enum: NONE / ALL / ONE
    peaking_coefficients()      L4241  Biquad peaking filter coefficients
    Player                      L4264  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L4394  Load URI, build sink bin, start playback
-     play_pause()              L4442  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L4529  Load + seek after dead-pipe recovery
-     _resume_with_reload()     L4581  Reload pipeline at current position
-     _reload_at_pos()          L4621  WARNING-path pipeline reload (separate guard)
-     seek()                    L4665  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L4853 Update biquad coefficients (GLib idle)
-     _make_sink_bin()          L4881  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L4948  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L5086  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L5148  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L5178  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L5288  GLib-thread spectrum → shared buffer
-     _compute_viz_frame()      L5391  Main-thread smoothed bar computation (zero-alloc)
+     load()                    L4402  Load URI, build sink bin, start playback
+     play_pause()              L4450  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L4537  Load + seek after dead-pipe recovery
+     _resume_with_reload()     L4589  Reload pipeline at current position
+     _reload_at_pos()          L4629  WARNING-path pipeline reload (separate guard)
+     seek()                    L4673  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L4861 Update biquad coefficients (GLib idle)
+     _make_sink_bin()          L4889  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L4963  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L5102  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L5164  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L5194  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L5398  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L5514  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
    MprisServer                 L5471  MPRIS2 D-Bus interface (GLib thread)
@@ -644,7 +648,7 @@ class SettingsPopup(QFrame):
     overlay_timeout_changed   = pyqtSignal(int)    # idle seconds (10..300)
     overlay_clock_toggled     = pyqtSignal(bool)   # show/hide clock in overlay
     cover_fetch_toggled = pyqtSignal()   # emitted when user clicks "Fetch Covers" button
-    lyric_fetch_toggled = pyqtSignal()   # emitted when user clicks "Fetch Lyrics" button
+    lyric_fetch_action  = pyqtSignal()   # emitted when user clicks "Fetch Lyrics" button
     tag_fetch_toggled    = pyqtSignal()   # emitted when user clicks "Fetch Tags" button
     rename_toggled       = pyqtSignal()   # emitted when user clicks "Rename…" button
     view_mode_changed    = pyqtSignal(str)   # 'classic' | 'gallery_z' | 'gallery_s'
@@ -829,7 +833,7 @@ class SettingsPopup(QFrame):
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             b.setStyleSheet('font-size:12px;')
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
-        self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_toggled)
+        self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
         self._btn_rename.clicked.connect(self.rename_toggled)
         action_row.addWidget(self._btn_fetch_covers)
@@ -1076,6 +1080,10 @@ class TagEditDialog(QDialog):
         self._btn_tag_fetch.setFixedHeight(18)
         self._btn_tag_fetch.setStyleSheet(_tag_btn_ss)
         cover_btns.addWidget(self._btn_tag_fetch)
+        self._btn_lyrics_fetch = QPushButton('Fetch Lyrics…')
+        self._btn_lyrics_fetch.setFixedHeight(18)
+        self._btn_lyrics_fetch.setStyleSheet(_tag_btn_ss)
+        cover_btns.addWidget(self._btn_lyrics_fetch)
         cover_btns.addStretch()
         cover_row.addLayout(cover_btns)
         layout.addLayout(cover_row)
@@ -1085,6 +1093,7 @@ class TagEditDialog(QDialog):
         self._btn_cover_remove.clicked.connect(self._remove_cover)
         self._btn_cover_lock.toggled.connect(self._on_lock_toggled)
         self._btn_tag_fetch.clicked.connect(self._fetch_tags_online)
+        self._btn_lyrics_fetch.clicked.connect(self._fetch_lyrics_online)
 
         # Divider
         div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
@@ -1200,6 +1209,96 @@ class TagEditDialog(QDialog):
                 self._btn_tag_fetch.setText('Not found')
                 QTimer.singleShot(2000,
                     lambda: self._btn_tag_fetch.setText('Auto-fill Tags…'))
+
+        QTimer.singleShot(200, _poll)
+
+    def _fetch_lyrics_online(self):
+        """Force-fetch lyrics from all online sources, ignoring any embedded tags.
+
+        All APIs are queried in parallel; the worker waits for every future to
+        settle so a synced result that arrives late still beats an early plain
+        one.  On success the best result (synced preferred) is written back into
+        the audio file's tags via embed_lyrics.  The button label tracks
+        progress so the user has live feedback.
+        """
+        self._btn_lyrics_fetch.setEnabled(False)
+        self._btn_lyrics_fetch.setText('Searching…')
+
+        track  = self._track
+        artist = self._artist_edit.text().strip()  or track.artist
+        title  = self._title_edit.text().strip()   or track.title
+        album  = self._album_edit.text().strip()   or track.album
+        dur    = getattr(track, 'duration', 0) or 0
+
+        result = [None, None]   # [synced, plain]
+
+        def _fetch():
+            sources = [
+                ('LrcLib (exact)',  lambda: _src_lrclib_exact(artist, title, album, dur)),
+                ('LrcLib (search)', lambda: _src_lrclib_search(artist, title)),
+                ('Lyrics.ovh',      lambda: _src_lyrics_ovh(artist, title)),
+                ('Musixmatch',      lambda: _src_musixmatch(artist, title)),
+                ('Genius',          lambda: _src_genius_search(artist, title)),
+                ('AZLyrics',        lambda: _src_azlyrics(artist, title)),
+                ('SongLyrics',      lambda: _src_songlyrics(artist, title)),
+                ('ChartLyrics',     lambda: _src_chartlyrics(artist, title)),
+                ('Letras.mus.br',   lambda: _src_letras(artist, title)),
+            ]
+            lock        = threading.Lock()
+            best_synced = [None]
+            best_plain  = [None]
+
+            def _run(fn):
+                try:
+                    s, p = fn()
+                except Exception:
+                    return
+                with lock:
+                    if s and best_synced[0] is None:
+                        best_synced[0] = s
+                    if p and best_plain[0] is None:
+                        best_plain[0] = p
+
+            # Fire all sources in parallel and wait for EVERY future to finish.
+            # This guarantees a synced result found late beats a plain one found
+            # early — unlike the player's LyricsFetcher which short-circuits on
+            # the first synced hit for latency.  Here the user has explicitly
+            # requested a full search, so accuracy takes priority over speed.
+            with _cf.ThreadPoolExecutor(max_workers=len(sources)) as pool:
+                futs = [pool.submit(_run, fn) for _, fn in sources]
+                _cf.wait(futs)
+
+            result[0] = best_synced[0]
+            result[1] = best_plain[0]
+
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
+
+        def _poll():
+            if t.is_alive():
+                QTimer.singleShot(200, _poll)
+                return
+
+            synced = result[0]
+            plain  = result[1]
+            self._btn_lyrics_fetch.setEnabled(True)
+
+            if synced or plain:
+                # Embed result into the audio file so the player panel picks it
+                # up on the next track load without another network round-trip.
+                threading.Thread(
+                    target=embed_lyrics,
+                    args=(track.filepath, synced, plain or ''),
+                    daemon=True,
+                ).start()
+                kind = 'synced' if synced else 'plain'
+                self._btn_lyrics_fetch.setText(f'Saved ({kind})')
+                QTimer.singleShot(2500,
+                    lambda: self._btn_lyrics_fetch.setText('Fetch Lyrics…'))
+            else:
+                self._btn_lyrics_fetch.setText('Not found')
+                QTimer.singleShot(2000,
+                    lambda: self._btn_lyrics_fetch.setText('Fetch Lyrics…'))
 
         QTimer.singleShot(200, _poll)
 
@@ -1854,8 +1953,14 @@ class LyricsFetcher(QObject):
             self.status.emit('')
             self.finished.emit(None, None); return
 
-        # 2. All online sources fired in parallel.
-        #    Synced result takes priority; among each tier first-to-respond wins.
+        # 2. All online sources fired in parallel; return as soon as a synced
+        #    result arrives — don't wait for slower sources to finish.
+        #    If no synced result comes, keep the best plain result seen so far
+        #    and return once every future has settled.
+        #
+        #    Source order doubles as priority: LrcLib (the only reliable synced
+        #    provider) is first so it almost always wins the synced slot before
+        #    the scraping sources even get a response back.
         sources = [
             ('LrcLib (exact)',   lambda: _src_lrclib_exact(artist, title, album, t.duration)),
             ('LrcLib (search)',  lambda: _src_lrclib_search(artist, title)),
@@ -1873,11 +1978,13 @@ class LyricsFetcher(QObject):
         result_lock = threading.Lock()
         best_synced = [None]
         best_plain  = [None]
-        synced_event = threading.Event()   # set as soon as any synced result arrives
 
         def _run_source(fn):
-            if synced_event.is_set():
-                return   # synced already found, skip remaining
+            # Each worker checks the shared synced flag before doing network I/O.
+            # This prevents queued-but-not-yet-started tasks from making requests
+            # after a synced result has already been found.
+            if best_synced[0] is not None:
+                return
             try:
                 s, p = fn()
             except Exception:
@@ -1885,13 +1992,25 @@ class LyricsFetcher(QObject):
             with result_lock:
                 if s and best_synced[0] is None:
                     best_synced[0] = s
-                    synced_event.set()
                 elif p and best_plain[0] is None:
                     best_plain[0] = p
 
-        with _cf.ThreadPoolExecutor(max_workers=len(sources)) as pool:
+        pool = _cf.ThreadPoolExecutor(max_workers=len(sources))
+        try:
             futs = [pool.submit(_run_source, fn) for _, fn in sources]
-            _cf.wait(futs)
+            # Iterate completions as they arrive; bail out the moment we have a
+            # synced result — cancel all pending futures so slow scrapers (Genius,
+            # AZLyrics, Letras) never block the return path.
+            for fut in _cf.as_completed(futs):
+                fut.result()   # re-raise any unexpected exception into this thread
+                if best_synced[0] is not None:
+                    for f in futs:
+                        f.cancel()
+                    break
+        finally:
+            # cancel_futures=True (py3.9+) tells the pool not to start queued
+            # tasks; already-running I/O threads finish naturally in the background.
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if best_synced[0] or best_plain[0]:
             self.was_online = True
@@ -4320,23 +4439,19 @@ class Player(QObject):
         self._viz_ba: object = None          # int32 (VIZ_BANDS,)
         self._viz_bb: object = None
         self._viz_bt: object = None
-        self._viz_col_idx: object = None     # int32 (iw,)
-        self._viz_smooth: list = []          # sparse smooth entries
         self._viz_inertia: float = 0.5
         self._viz_overlay_cb: object = None  # callable(list) for overlay frames
         self._viz_discard_until: float = 0.0  # wall-clock: discard frames before this
         self._viz_last_stream_time: int = -1  # last spectrum stream-time (ns), frame skip detection
-        self._viz_elapsed_frames: int = 1     # ideal frames elapsed since last spectrum msg
+        self._viz_accumulated_el: int = 0     # total elapsed frames across burst messages since last render
         self._viz_has_new: bool = False       # GLib thread set; main thread clear
         self._viz_has_any: bool = False       # True once first spectrum arrives after load
         self._viz_frame_pending: bool = False # GLib set; Qt clear — prevents queue buildup
-        self._viz_mag_buf = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # magnitude buffer
+        self._viz_mag_buf = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # latest raw magnitude
         self._viz_bh_pre  = _np.empty(VIZ_BANDS, dtype=_np.float32)         # work buffer
         self._viz_tmp_pre = _np.empty(VIZ_BANDS, dtype=_np.float32)         # work buffer
         self._viz_bar_buf = _np.zeros(VIZ_BANDS, dtype=_np.float32)  # published bar heights (pre-alloc)
         self._viz_col_buf = _np.zeros(1, dtype=_np.float32)           # iw-sized, rebuilt in set_viz_tables
-        self._viz_safe_idx: object = None    # pre-computed np.maximum(col_idx, 0)
-        self._viz_col_neg:  object = None    # pre-computed col_idx < 0 boolean mask
         self._overlay_needs_spec: bool = False
         self._last_parsed_serial: object = None
         self._viz_mag_field_idx: int = -1   # cached 'magnitude' field index in spectrum structure
@@ -4480,13 +4595,10 @@ class Player(QObject):
             pause_dur = (_monotonic() - self._pause_ts) if self._pause_ts > 0.0 else 0.0
             if pause_dur > 2.0:
                 # Long pause: PipeWire may have reclaimed the sink.  Attempt resume;
-                # if position doesn't advance within 800 ms the stall watcher will
-                # detect and reload.  We avoid blocking get_state(300 ms) here
-                # because it hangs the UI thread on Wayland when PipeWire is busy.
-                self._pipe.set_state(Gst.State.PLAYING)
+                # if position doesn't advance within 800 ms the stall detector will
+                # catch and reload automatically.
                 print(f'[Player] resuming after {pause_dur:.1f}s pause — stall watcher armed')
-            else:
-                self._pipe.set_state(Gst.State.PLAYING)
+            self._pipe.set_state(Gst.State.PLAYING)
 
             self._playing = True; self._pos_timer.start()
             self._resume_wt = _monotonic()   # gate drift correction for 1.5 s after resume
@@ -4522,16 +4634,10 @@ class Player(QObject):
                         QTimer.singleShot(150, lambda: self._pipe and self._playing
                                           and self._anchor_from_gst())
             QTimer.singleShot(150, _deferred_anchor)
-            # Stall watcher: arm only after a long pause (PipeWire sink-reclaim risk).
-            # Baseline is queried on GLib thread 500 ms after resume (after clock
-            # settles); health check fires 1200 ms after that — enough for position
-            # to advance by at least 100 ms if the pipeline is alive.
-            # Short pauses (<2 s) don't need the watcher: the drift-correction loop
-            # and the real-position stall detector in _apply_drift_correction cover those.
-            # Active stall watcher disabled — causes false reloads on Bluetooth
-            # (position query latency tricks it into thinking pipeline stalled).
-            # Real stall detector in _apply_drift_correction (~700 ms threshold) covers stalls.
-            pass
+            # Short pauses (<2 s): the drift-correction loop and the real-position
+            # stall detector in _apply_drift_correction cover those cases.
+            # The active stall watcher was removed — it caused false reloads on
+            # Bluetooth where position query latency mimics a stalled pipeline.
 
     def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False):
         """Load filepath and seek to pos_ms after preroll. Used for dead-pipe recovery.
@@ -4646,12 +4752,9 @@ class Player(QObject):
             ok, pos = self._pipe.query_position(Gst.Format.TIME)
             gst_ms  = pos // Gst.MSECOND if ok and pos > 0 else 0
             pos_ms  = gst_ms if gst_ms > 200 else fallback_ms
-            uri = ''
-            try: uri = self._pipe.get_property('uri') or ''
-            except Exception: pass
-            if not uri:
+            fp = self._last_filepath
+            if not fp:
                 return
-            fp = _urlparse.unquote(uri.replace('file://', ''))
             self._silent_recovery = True
             self.load(fp)
             self._pause_ts = 0.0
@@ -4704,8 +4807,6 @@ class Player(QObject):
                 target_ns)
             if self._playing:
                 self._pipe.set_state(Gst.State.PLAYING)
-            # Fast pos-timer for 2 s post-seek for snappy seekbar response
-            if self._playing:
                 self._start_pos_burst(8)
             # Schedule a single anchor re-confirmation once GStreamer has settled.
             # ACCURATE seeks may land a few ms off target; this corrects the anchor
@@ -4747,22 +4848,14 @@ class Player(QObject):
         self._viz_ba      = ba
         self._viz_bb      = bb
         self._viz_bt      = bt
-        self._viz_col_idx = col_idx
-        self._viz_smooth  = smooth_entries
         self._viz_inertia = inertia
         self._viz_overlay_cb = overlay_cb
         self._viz_spec[:] = MIN_DB   # reset inertia on table change
 
         if col_idx is not None:
             iw = len(col_idx)
-            # safe_idx: clamp negatives to 0 so np.take never OOBs
-            self._viz_safe_idx = _np.maximum(col_idx, 0).astype(_np.int32)
-            # gap mask: True where col_idx < 0 (inter-bar gaps)
-            self._viz_col_neg  = col_idx < 0
             self._viz_col_buf  = _np.zeros(iw, dtype=_np.float32)
         else:
-            self._viz_safe_idx = None
-            self._viz_col_neg  = None
             self._viz_col_buf  = _np.zeros(1, dtype=_np.float32)
 
         # Build smooth entries as contiguous arrays once — avoid per-frame attribute
@@ -4828,18 +4921,14 @@ class Player(QObject):
         """Reload the currently-playing track to rebuild the pipeline."""
         if not self._pipe:
             return
-        # Query current position before destroying
         ok, pos = self._pipe.query_position(Gst.Format.TIME)
         pos_ms = pos // Gst.MSECOND if ok else 0
         was_playing = self._playing
-        # Get URI
-        uri = self._pipe.get_property('uri')
-        if not uri:
+        fp = self._last_filepath
+        if not fp:
             return
-        # Rebuild
         self._destroy()
-        filepath = _urlparse.unquote(uri.replace('file://', ''))
-        self.load(filepath)
+        self.load(fp)
         # Seek to saved position
         if pos_ms > 0:
             QTimer.singleShot(200, lambda: self.seek(pos_ms))
@@ -4894,6 +4983,13 @@ class Player(QObject):
             elements.append(eq_bin)
 
         if self._has_spec:
+            # Burst messages from large FLAC decode blocks (libFLAC 1.5.0 at 44.1 kHz/16-bit
+            # emits ~3 spectrum messages per 104 ms block) are handled in software:
+            # _store_spectrum accumulates elapsed frames; _compute_viz_frame applies
+            # alpha^N in one EMA step.  audiobuffersplit is intentionally omitted — it
+            # causes caps-negotiation failures on some format/codec combinations that
+            # result in silence, and its state-change locking can trigger pipeline crashes
+            # when tracks are switched or focus is lost.
             spec_desc = (
                 f'audioconvert ! audio/x-raw,format=F32LE '
                 f'! spectrum name=bp_spec bands={GST_BANDS} '
@@ -5073,7 +5169,7 @@ class Player(QObject):
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = 0.0
         self._viz_last_stream_time = -1
-        self._viz_elapsed_frames = 1
+        self._viz_accumulated_el = 0
         self._viz_has_new = False
         self._viz_has_any = False
         self._viz_mag_field_idx = -1   # reset field cache — new pipeline may differ
@@ -5313,6 +5409,7 @@ class Player(QObject):
         if serial != self._last_parsed_serial:
             self._last_parsed_serial = serial
             self._viz_spec[:] = MIN_DB
+            self._viz_accumulated_el = 0
             self._viz_discard_until = _monotonic() + 0.15
             self._viz_has_new = False
             return
@@ -5336,7 +5433,13 @@ class Player(QObject):
                 self._viz_last_stream_time = _st_ns
         except Exception:
             pass
-        self._viz_elapsed_frames = _elapsed
+        # Accumulate elapsed frames across burst messages (libFLAC 1.5.0 at 44.1 kHz/16-bit
+        # posts several spectrum messages in rapid succession from one large decode block).
+        # _compute_viz_frame reads the total and applies alpha^N in a single EMA step,
+        # giving the correct perceptual speed regardless of burst size.
+        # Accumulate _elapsed directly here — no intermediary attribute — so that if
+        # magnitude extraction fails below and we return early the count is still banked.
+        self._viz_accumulated_el += _elapsed
 
         # ── Magnitude extraction ──────────────────────────────────────────────
         # Fast path: GstValueList via PyGObject (avoids full s.to_string()).
@@ -5387,8 +5490,14 @@ class Player(QObject):
         if n <= 0:
             return
 
-        # Write into pre-allocated buffer — no allocation, no GC pressure.
-        self._viz_mag_buf[:n] = raw[:n]
+        # Merge raw magnitude into the shared buffer using element-wise maximum so that
+        # every burst message from a single large libFLAC decode block contributes its
+        # peak energy rather than the last message overwriting all previous ones.
+        # _viz_accumulated_el was already incremented above (before this point), so the
+        # EMA in _compute_viz_frame will apply alpha^N correctly for the full burst.
+        _np.maximum(self._viz_mag_buf[:n], raw[:n], out=self._viz_mag_buf[:n])
+        if n < GST_BANDS:
+            self._viz_mag_buf[n:] = MIN_DB
 
         self._viz_has_new = True
         self._viz_has_any = True
@@ -5406,6 +5515,8 @@ class Player(QObject):
 
         Pipeline:
           1. Inertia (exponential moving average with alpha^N gap normalisation)
+             N = total elapsed frames across all burst messages since last render,
+             keeping perceptual speed constant regardless of FLAC block size.
           2. Linear interpolation from GST_BANDS FFT bins → VIZ_BANDS display bars
           3. Clip + normalise dB to [0, 1]
           4. Power-law perceptual gamma (0.38)
@@ -5425,17 +5536,24 @@ class Player(QObject):
             tmp   = self._viz_tmp_pre    # (VIZ_BANDS,) work buffer
             alpha = max(0.0, min(1.0, float(self._viz_inertia)))
 
-            # ── 1. Inertia: alpha^N EMA ───────────────────────────────────────
-            # alpha^N normalises for sparse GStreamer delivery (libFLAC 2-6× gaps):
-            # sp_new = a^N * sp_old + (1 - a^N) * target  →  same perceptual speed
-            # regardless of how many render frames each spectrum message spans.
+            # ── 1. Inertia: alpha^N EMA with burst-accumulated N ──────────────
+            # _viz_accumulated_el sums the elapsed-frame values of every spectrum
+            # message that arrived since the last render tick.  For most codecs
+            # el=1 per message; for libFLAC 1.5.0 at 44.1 kHz/16-bit a single
+            # 104 ms decode block triggers ~3 messages, so el accumulates to ~3.
+            # Applying alpha^N once (rather than alpha^1 three times) keeps the
+            # animation speed identical to a codec that delivers single messages.
+            el = max(1, min(self._viz_accumulated_el, 8))
+            self._viz_accumulated_el = 0   # reset — count only messages since this render
             n = min(GST_BANDS, len(self._viz_mag_buf))
             if n > 0:
-                el = max(1, min(self._viz_elapsed_frames, 8))
-                ea = alpha if (el <= 1 or alpha >= 1.0) else alpha ** el
+                ea        = alpha if (el <= 1 or alpha >= 1.0) else alpha ** el
                 one_minus = 1.0 - ea
                 sp[:n] *= ea
                 sp[:n] += one_minus * self._viz_mag_buf[:n]
+                # Reset the magnitude buffer back to floor so burst-accumulated peaks
+                # from this render cycle do not bleed into the next frame.
+                self._viz_mag_buf[:n] = MIN_DB
 
             # ── 2. Freq mapping: linear interpolation (GST_BANDS → VIZ_BANDS) ─
             # bh[d] = sp[ba[d]] + (sp[bb[d]] - sp[ba[d]]) * bt[d]
@@ -7449,7 +7567,7 @@ class ControlBar(QFrame):
             pop.brightness_changed.connect(self._on_brightness_change)
             pop.cover_toggled.connect(self._on_cover_toggle)
             pop.accent_changed.connect(self._on_accent_change)
-            pop.lyrics_fetch_toggled.connect(self._on_lyrics_fetch_toggle)
+            # lyrics_fetch_toggled gates LyricsPanel; no ControlBar handler needed
             pop.overlay_viz_toggled.connect(self.set_overlay_viz_enabled)
             pop.overlay_viz_toggled.connect(
                 lambda on: getattr(self, '_blackout_ref', None) and
@@ -7466,7 +7584,7 @@ class ControlBar(QFrame):
                 lambda on: getattr(self, '_blackout_ref', None) and
                            self._blackout_ref.set_overlay_clock(on))
             pop.cover_fetch_toggled.connect(self._on_cover_fetch_btn)
-            pop.lyric_fetch_toggled.connect(self._on_lyric_fetch_btn)
+            pop.lyric_fetch_action.connect(self._on_lyric_fetch_btn)
             pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
             pop.rename_toggled.connect(self._on_rename_btn)
             if not self._player.has_spectrum:
@@ -7504,7 +7622,8 @@ class ControlBar(QFrame):
         pop = self._settings_popup
         return pop.cover_on() if pop else True
 
-    def _on_lyrics_fetch_toggle(self, on: bool): pass  # LyricsPanel reads ctrlbar flag
+    # lyrics_fetch_toggled merely gates LyricsPanel.set_track() — that method
+    # reads self._ctrlbar.lyrics_fetch_enabled at call time, so no handler needed.
 
     def _on_overlay_auto_open_toggle(self, on: bool):
         self._overlay_auto_open = on
