@@ -18,81 +18,81 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
  WIDGETS
    ToggleSwitch                L425   Animated two-state toggle (single/two-label)
-   JumpSlider                  L568   QSlider that jumps to click/touch position
-   SliderRow                   L606   Label + JumpSlider + value label row
-   SettingsPopup               L638   Settings panel popup (child widget, Wayland-safe)
-   TagEditDialog               L1022  Modal tag editor with cover management
+   JumpSlider                  L567   QSlider that jumps to click/touch position
+   SliderRow                   L605   Label + JumpSlider + value label row
+   SettingsPopup               L637   Settings panel popup (child widget, Wayland-safe)
+   TagEditDialog               L1021  Modal tag editor with cover management
      _pick_cover_file()        L1122  Open file dialog → set cover bytes
      _search_cover_online()    L1138  Background cover search → update preview
      _fetch_tags_online()      L1183  Background tag lookup → fill empty fields
      _fetch_lyrics_online()    L1219  Force-fetch lyrics (all APIs, synced priority) → embed
-   EQSliderCell                L1330  Table cell widget for a single EQ parameter
-   TouchComboBox               L2304  QComboBox immune to touch double-fire close
-   EqPopup                     L2323  Parametric EQ popup + preset management
-   EQGraph                     L2672  Frequency response curve widget
-   BlackoutOverlay             L2781  Full-screen OLED burn-in protection overlay
-   SeekSlider                  L6106  Touch-aware seek slider
-   LongPressFilter             L6218  Event filter: long-press → context menu
-   RepeatButton                L7440  Tri-state repeat cycle button
-   _FullscreenBtn              L7484  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L7532  Play/pause button with spinning reload indicator
-   TitleBarButton              L8764  Frameless window-control button
-   TitleBarCloseButton         L8789  Close variant (red hover)
-   BlackTitleBar               L8793  Custom frameless titlebar
-   _SpinningOverlay            L10097 Semi-transparent blocking overlay with spinner
+   EQSliderCell                L1328  Table cell widget for a single EQ parameter
+   TouchComboBox               L2364  QComboBox immune to touch double-fire close
+   EqPopup                     L2383  Parametric EQ popup + preset management
+   EQGraph                     L2732  Frequency response curve widget
+   BlackoutOverlay             L2841  Full-screen OLED burn-in protection overlay
+   SeekSlider                  L6349  Touch-aware seek slider
+   LongPressFilter             L6461  Event filter: long-press → context menu
+   RepeatButton                L7683  Tri-state repeat cycle button
+   _FullscreenBtn              L7724  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L7772  Play/pause button with spinning reload indicator
+   TitleBarButton              L9000  Frameless window-control button
+   TitleBarCloseButton         L9025  Close variant (red hover)
+   BlackTitleBar               L9029  Custom frameless titlebar
+   _SpinningOverlay            L10349 Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L1695  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L1706  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L1747  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L1771  LrcLib API sources
-   _src_lyrics_ovh()           L1799  Lyrics.ovh fallback source
-   ClickableLyricLine          L1921  QLabel that emits clicked(ms)
-   LyricsFetcher               L1934  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2028  Scrollable lyric display with sync highlight (touch scroll enabled)
+   _lrc_parse()                L1734  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L1745  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L1786  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L1810  LrcLib API sources
+   _src_lyrics_ovh()           L1844  Lyrics.ovh fallback source
+   ClickableLyricLine          L1938  QLabel that emits clicked(ms)
+   LyricsFetcher               L1951  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2088  Scrollable lyric display with sync highlight (touch scroll enabled)
 
  COVER ART
-   _trim_cover_cache()         L3215  Evict oldest entries when cache exceeds limit
-   _rounded_pixmap()           L3253  Scale + crop + round-corner mask
-   draw_default_cover()        L3277  Render clef placeholder pixmap
-   _cover_disk_key()           L3323  SHA1 hash for disk cache filename
-   get_cover_pixmap()          L3331  Non-blocking async cover lookup (paint path)
-   get_cover_pixmap_sync()     L3349  Blocking cover lookup (worker threads)
-   _CoverTask                  L3384  QRunnable for one cover load
-   AsyncCoverLoader            L3425  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L3517 Module singleton factory
-   _clear_cover_disk_cache()   L3523  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3532  Shared base class for fetch popups (supports multiple concurrent workers)
+   _trim_cover_cache()         L3274  Evict oldest entries when cache exceeds limit
+   _rounded_pixmap()           L3312  Scale + crop + round-corner mask
+   draw_default_cover()        L3336  Render clef placeholder pixmap
+   _cover_disk_key()           L3383  SHA1 hash for disk cache filename
+   get_cover_pixmap()          L3391  Non-blocking async cover lookup (paint path)
+   get_cover_pixmap_sync()     L3409  Blocking cover lookup (worker threads)
+   _CoverTask                  L3444  QRunnable for one cover load
+   AsyncCoverLoader            L3485  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L3577 Module singleton factory
+   _clear_cover_disk_cache()   L3583  Wipe disk + memory cover caches
+   _BaseFetchPopup             L3592  Shared base class for fetch popups (supports multiple concurrent workers)
      closeEvent()              L3732  Hide dialog, keep worker running in background
      mousePressEvent()         L3737  Click outside → hide (run in background)
      _emit_status_update()     L3783  Show each fetch instance progress as permanent widget on status bar left
-   LibraryCoverFetchWorker     L3841  Sequential per-track cover fetcher
-   CoverFetchPopup             L3882  Modal "fetch covers for library" dialog (multiple concurrent supported)
+   LibraryCoverFetchWorker     L4006  Sequential per-track cover fetcher
+   CoverFetchPopup             L4048  Modal "fetch covers for library" dialog (multiple concurrent supported)
 
  TAGS / METADATA
    fetch_cover_online()        L1474  Try iTunes/Deezer/MusicBrainz/LastFM
-   lookup_tags_online()        L1549  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L1577  Write title/artist/album via mutagen
-   embed_cover_bytes()         L1606  Write cover into audio tags
-   embed_lyrics()              L1647  Write lyrics into audio tags
-   _open_audio()               L3153  Open audio file with mutagen (fallback chain)
-   _tag() / _vtag()            L3135  Tag value helpers (case-insensitive Vorbis)
-   extract_cover_bytes()       L3228  Read raw cover bytes from audio tags
-   read_metadata()             L3179  Build Track from mutagen
-   LibraryTagFetchWorker       L3951  Sequential per-track tag fetcher
-   TagFetchPopup               L3996  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L4038  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L4094  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L4126  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L4137  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L4174  Sequential per-track file renamer
-   RenamePopup                 L4223  Modal "batch rename library" dialog (run-in-bg)
+   lookup_tags_online()        L1587  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L1616  Write title/artist/album via mutagen
+   embed_cover_bytes()         L1645  Write cover into audio tags
+   embed_lyrics()              L1686  Write lyrics into audio tags
+   _open_audio()               L3212  Open audio file with mutagen (fallback chain)
+   _tag() / _vtag()            L3194  Tag value helpers (case-insensitive Vorbis)
+   extract_cover_bytes()       L3287  Read raw cover bytes from audio tags
+   read_metadata()             L3238  Build Track from mutagen
+   LibraryTagFetchWorker       L4117  Sequential per-track tag fetcher
+   TagFetchPopup               L4163  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L4205  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L4263  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L4295  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L4306  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L4378  Sequential per-track file renamer
+   RenamePopup                 L4441  Modal "batch rename library" dialog (run-in-bg)
      closeEvent()              L4484  Hide dialog, keep worker running in background
 
  PLAYER
-   RepeatMode                  L4629  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L4632  Biquad peaking filter coefficients
-   Player                      L4655  GStreamer playbin wrapper + EQ + spectrum viz
+   RepeatMode                  L4874  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L4877  Biquad peaking filter coefficients
+   Player                      L4900  GStreamer playbin wrapper + EQ + spectrum viz
      load()                    L4775  Load URI, build sink bin, start playback
      play_pause()              L4822  Toggle play/pause with PipeWire resilience
      _load_and_seek()          L4897  Load + seek after dead-pipe recovery
@@ -109,48 +109,48 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
      _compute_viz_frame()      L5745  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
-   MprisServer                 L5834  MPRIS2 D-Bus interface (GLib thread)
+   MprisServer                 L6078  MPRIS2 D-Bus interface (GLib thread)
 
  LIBRARY
-   Track                       L3110  @dataclass: filepath + metadata
-   scan_folder()               L4542  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4557  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4579  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4597  Non-blocking playlist loader for config restore
+   Track                       L3169  @dataclass: filepath + metadata
+   scan_folder()               L4787  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4802  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L4824  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L4842  Non-blocking playlist loader for config restore
 
  VIEWS
-   TrackTable                  L6270  QTableWidget with covers + sort + touch scroll
-   GalleryView                 L6544  Virtual-scroll card gallery (Z/S layout modes)
-   PlaylistPage                L7096  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L7178  Sidebar playlist row (label + delete button)
-   Sidebar                     L7242  Left panel: search + library nav + playlist list (touch scroll enabled)
+   TrackTable                  L6513  QTableWidget with covers + sort + touch scroll
+   GalleryView                 L6787  Virtual-scroll card gallery (Z/S layout modes)
+   PlaylistPage                L7339  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L7421  Sidebar playlist row (label + delete button)
+   Sidebar                     L7485  Left panel: search + library nav + playlist list (touch scroll enabled)
 
  CONTROL BAR
-   ControlBar                  L7598  Seek bar + transport + viz + settings/EQ toggles
-     _ensure_eq_popup()        L7807  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L7832  Lazy-create SettingsPopup singleton
-     _reset_idle_timer()       L7912  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L7922  Fire overlay when idle threshold reached
-     init_from_config()        L8155  Apply saved config dict to all sub-widgets
-     config_state()            L8247  Collect current state → config dict
-     _precompute_bars()        L8276  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
-     paintEvent()              L8568  Fully vectorised numpy pixel-buffer rendering
+   ControlBar                  L7838  Seek bar + transport + viz + settings/EQ toggles
+     _ensure_eq_popup()        L8047  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L8072  Lazy-create SettingsPopup singleton
+     _reset_idle_timer()       L8152  Reset OLED overlay idle countdown
+     _on_idle_timeout()        L8162  Fire overlay when idle threshold reached
+     init_from_config()        L8396  Apply saved config dict to all sub-widgets
+     config_state()            L8488  Collect current state → config dict
+     _precompute_bars()        L8515  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
+     paintEvent()              L8807  Fully vectorised numpy pixel-buffer rendering
 
  MAIN WINDOW
-   MainWindow                  L8875  QMainWindow: layout, signals, config I/O
-     _build_ui()               L8915  Construct widget tree
-     _connect_signals()        L8992  Wire all cross-widget signals
-     _refresh_all_theme_widgets() L9097 Async theme switch + overlay
-     _edit_tags()              L9281  Tag-edit dialog + mutagen write-back
-     _start_playback()         L9613  Load track + update all UI state
-     _advance()                L9695  Next track (shuffle/repeat logic)
-     _save_config()            L9851  JSON config persistence (skips __open_with__)
-     _load_config()            L9970  JSON config restore
-     _handle_open_with()       L9899  Load file-manager / CLI "Open With" track
-     closeEvent()              L10078 Purge __open_with__ playlist, then save + stop
+   MainWindow                  L9111  QMainWindow: layout, signals, config I/O
+     _build_ui()               L9151  Construct widget tree
+     _connect_signals()        L9228  Wire all cross-widget signals
+     _refresh_all_theme_widgets() L9333 Async theme switch + overlay
+     _edit_tags()              L9516  Tag-edit dialog + mutagen write-back
+     _start_playback()         L9865  Load track + update all UI state
+     _advance()                L9947  Next track (shuffle/repeat logic)
+     _save_config()            L10103 JSON config persistence (skips __open_with__)
+     _load_config()            L10223 JSON config restore
+     _handle_open_with()       L10152 Load file-manager / CLI "Open With" track
+     closeEvent()              L10333 Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L10203
+   main()                      L10456
 ═══════════════════════════════════════════════════════════════════
 """
 import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
@@ -3692,12 +3692,14 @@ class _BaseFetchPopup(QDialog):
         root.addWidget(self._result_lbl)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Background')
+        self._btn_close  = QPushButton('Close')
         self._force_cb   = QCheckBox('Force (re-fetch all)')
         self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
+        
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addSpacing(8)
@@ -3778,9 +3780,9 @@ class _BaseFetchPopup(QDialog):
         raise NotImplementedError
 
     def _update_close_btn(self):
-        """Show 'Background' while running, 'Close' otherwise."""
+        """Show 'Run in\nbackground' while running, 'Close' otherwise."""
         if self._running:
-            self._btn_close.setText('Background')
+            self._btn_close.setText('Run in\nbackground')
         else:
             self._btn_close.setText('Close')
 
@@ -4563,9 +4565,9 @@ class RenamePopup(QDialog):
         return super().eventFilter(obj, e)
 
     def _update_close_btn(self):
-        """Show 'Background' while running, 'Close' otherwise."""
+        """Show 'Run in\nbackground' while running, 'Close' otherwise."""
         if self._running:
-            self._btn_close.setText('Background')
+            self._btn_close.setText('Run in\nbackground')
         else:
             self._btn_close.setText('Close')
 
@@ -8286,30 +8288,10 @@ class ControlBar(QFrame):
           2. Save config (known_paths, playlists)
           3. Rescan every known folder/m3u so the library reflects new filenames
         """
-        win = self.window()
-        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
-        if not all_tracks:
-            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
-            return
-        if self._settings_popup:
-            self._settings_popup.hide()
-        
-        # Check if there's already a rename operation running in background
-        existing = RenamePopup._active_worker
-        if existing:
-            old_instance, old_worker, old_thread = existing
-            # Show the existing popup instead of creating a new one
-            old_instance.show()
-            old_instance.raise_()
-            old_instance.activateWindow()
-            return
-        
-        dlg = RenamePopup(all_tracks, parent=win)
-        dlg._post_finish_cb = _on_rename_finished   # called by _on_finished when complete
-        dlg.show()   # non-blocking - allows background operation
         
         def _on_rename_finished(renamed, total):
             """Handle rename completion after dialog finishes."""
+            win = self.window()
             rename_map = dlg.rename_map
             if not rename_map:
                 return   # nothing was renamed — no need to rescan
@@ -8353,7 +8335,28 @@ class ControlBar(QFrame):
             if hasattr(win, '_lib_page') and win._lib_page:
                 win._lib_page.rescan_all()
 
-        # _on_rename_finished is wired via dlg._post_finish_cb (set above)
+        win = self.window()
+        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
+        if not all_tracks:
+            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
+            return
+        if self._settings_popup:
+            self._settings_popup.hide()
+        
+        # Check if there's already a rename operation running in background
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Show the existing popup instead of creating a new one
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
+        dlg = RenamePopup(all_tracks, parent=win)
+        
+        dlg._post_finish_cb = _on_rename_finished   # called by _on_finished when complete
+        dlg.show()   # non-blocking - allows background operation
 
     def _toggle_fullscreen(self):
         win = self.window()
