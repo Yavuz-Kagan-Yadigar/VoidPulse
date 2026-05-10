@@ -3605,7 +3605,8 @@ class _BaseFetchPopup(QDialog):
     def __init__(self, tracks: list, title: str, info_text: str, needs_count: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(600)
         self._tracks   = list(tracks)
         self._thread   = None
         self._worker   = None
@@ -3636,7 +3637,7 @@ class _BaseFetchPopup(QDialog):
         lfm_lbl.setFixedWidth(72)
         lfm_row.addWidget(lfm_lbl)
         self._lfm_edit = QLineEdit()
-        self._lfm_edit.setPlaceholderText('API key (isteğe bağlı)')
+        self._lfm_edit.setPlaceholderText('API key (optional)')
         self._lfm_edit.setFixedHeight(22)
         self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._lfm_edit.setText(_lastfm_api_key)
@@ -3720,7 +3721,7 @@ class _BaseFetchPopup(QDialog):
         QApplication.instance().installEventFilter(self)
 
     def _on_lfm_text_changed(self, text: str):
-        """32 karaktere ulaşınca otomatik test et, eksikse border'ı sıfırla."""
+        """Automatically test when 32 characters are reached, reset border if incomplete."""
         if len(text) == 32:
             self._test_lastfm_key()
         else:
@@ -3731,7 +3732,7 @@ class _BaseFetchPopup(QDialog):
             )
 
     def _test_lastfm_key(self):
-        """API key'i test et, sonuca göre textbox çerçevesini yeşil/kırmızı yap ve kaydet."""
+        """Test the API key, set textbox border to green/red based on result and save."""
         key = self._lfm_edit.text().strip()
         if not key:
             self._set_lfm_border(False)
@@ -4455,7 +4456,8 @@ class RenamePopup(QDialog):
     def __init__(self, tracks: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Rename Library Files')
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(660)
+        self.setMinimumHeight(660)
 
         self._tracks   = list(tracks)
         self._thread   = None
@@ -8233,6 +8235,12 @@ class ControlBar(QFrame):
             return
         
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
+        # Center popup to main window
+        win_geo = win.geometry()
+        dlg_geo = dlg.frameGeometry()
+        center_point = win_geo.center()
+        dlg_geo.moveCenter(center_point)
+        dlg.move(dlg_geo.topLeft())
         dlg.show()
 
     def _on_lyric_fetch_btn(self):
@@ -8255,6 +8263,12 @@ class ControlBar(QFrame):
             return
         
         dlg = LyricsFetchPopup(all_tracks, parent=win)
+        # Center popup to main window
+        win_geo = win.geometry()
+        dlg_geo = dlg.frameGeometry()
+        center_point = win_geo.center()
+        dlg_geo.moveCenter(center_point)
+        dlg.move(dlg_geo.topLeft())
         dlg.show()
 
     def _on_tag_fetch_btn(self):
