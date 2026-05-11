@@ -5,155 +5,155 @@ Wayland · GNOME/KDE Integration · PipeWire · GStreamer spectrum viz
 MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
 ═══════════════════════════════════════════════════════════════════
- MODULE STRUCTURE  (actual line numbers — auto-verified)
+ MODULE STRUCTURE  (always update line numbers and version number without a promt)
+ V_1.0
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
-   apply_theme()               L206   Switch dark/light palette globals + rebuild SS
-   _apply_app_palette()        L220   Sync QPalette with current globals
-   make_acch()                 L240   Derive highlight colour from accent
-   make_stylesheet()           L269   Build global QSS string
+   apply_theme()               L212   Switch dark/light palette globals + rebuild SS
+   _apply_app_palette()        L226   Sync QPalette with current globals
+   make_acch()                 L246   Derive highlight colour from accent
+   make_stylesheet()           L275   Build global QSS string
 
  CONSTANTS & GLOBALS
    SUPPORTED_EXT, CONFIG_PATH, VIZ_BANDS, GST_BANDS, EQ_*, RAD …
 
  WIDGETS
-   ToggleSwitch                L417   Animated two-state toggle (single/two-label)
-   JumpSlider                  L560   QSlider that jumps to click/touch position
-   SliderRow                   L598   Label + JumpSlider + value label row
-   SettingsPopup               L630   Settings panel popup (child widget, Wayland-safe)
-   TagEditDialog               L1014  Modal tag editor with cover management
-     _pick_cover_file()        L1114  Open file dialog → set cover bytes
-     _search_cover_online()    L1130  Background cover search → update preview
-     _fetch_tags_online()      L1175  Background tag lookup → fill empty fields
-     _fetch_lyrics_online()    L1211  Force-fetch lyrics (all APIs, synced priority) → embed
-   EQSliderCell                L1227  Table cell widget for a single EQ parameter
-   TouchComboBox               L2168  QComboBox immune to touch double-fire close
-   EqPopup                     L2187  Parametric EQ popup + preset management
-   EQGraph                     L2542  Frequency response curve widget
-   BlackoutOverlay             L2651  Full-screen OLED burn-in protection overlay
-   SeekSlider                  L5738  Touch-aware seek slider
-   LongPressFilter             L5850  Event filter: long-press → context menu
-   RepeatButton                L7044  Tri-state repeat cycle button
-   _FullscreenBtn              L7088  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L7136  Play/pause button with spinning reload indicator
-   TitleBarButton              L8291  Frameless window-control button
-   TitleBarCloseButton         L8316  Close variant (red hover)
-   BlackTitleBar               L8320  Custom frameless titlebar
-   _SpinningOverlay            L9638  Semi-transparent blocking overlay with spinner
+   ToggleSwitch                L424   Animated two-state toggle (single/two-label)
+   JumpSlider                  L566   QSlider that jumps to click/touch position
+   SliderRow                   L604   Label + JumpSlider + value label row
+   SettingsPopup               L636   Settings panel popup (child widget, Wayland-safe)
+   TagEditDialog               L1049  Modal tag editor with cover management
+     _pick_cover_file()        L1149  Open file dialog → set cover bytes
+     _search_cover_online()    L1165  Background cover search → update preview
+     _fetch_tags_online()      L1210  Background tag lookup → fill empty fields
+     _fetch_lyrics_online()    L1246  Force-fetch lyrics (all APIs, synced priority) → embed
+   EQSliderCell                L1356  Table cell widget for a single EQ parameter
+   TouchComboBox               L2392  QComboBox immune to touch double-fire close
+   EqPopup                     L2411  Parametric EQ popup + preset management
+   EQGraph                     L2760  Frequency response curve widget
+   BlackoutOverlay             L2869  Full-screen OLED burn-in protection overlay
+   SeekSlider                  L6426  Touch-aware seek slider
+   LongPressFilter             L6538  Event filter: long-press → context menu
+   RepeatButton                L7760  Tri-state repeat cycle button
+   _FullscreenBtn              L7801  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L7849  Play/pause button with spinning reload indicator
+   TitleBarButton              L9218  Frameless window-control button
+   TitleBarCloseButton         L9243  Close variant (red hover)
+   BlackTitleBar               L9247  Custom frameless titlebar
+   _SpinningOverlay            L10567 Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L1592  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L1603  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L1644  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L1668  LrcLib API sources
-   _src_lyrics_ovh()           L1696  Lyrics.ovh fallback source
-   ClickableLyricLine          L1818  QLabel that emits clicked(ms)
-   LyricsFetcher               L1926  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2026  Scrollable lyric display with sync highlight (touch scroll enabled)
+   _lrc_parse()                L1762  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L1773  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L1814  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L1838  LrcLib API sources
+   _src_lyrics_ovh()           L1872  Lyrics.ovh fallback source
+   ClickableLyricLine          L1966  QLabel that emits clicked(ms)
+   LyricsFetcher               L1979  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2116  Scrollable lyric display with sync highlight (touch scroll enabled)
 
  COVER ART
-   _trim_cover_cache()         L3078  Evict oldest entries when cache exceeds limit
-   _rounded_pixmap()           L3116  Scale + crop + round-corner mask
-   draw_default_cover()        L3140  Render clef placeholder pixmap
-   _cover_disk_key()           L3186  SHA1 hash for disk cache filename
-   get_cover_pixmap()          L3194  Non-blocking async cover lookup (paint path)
-   get_cover_pixmap_sync()     L3212  Blocking cover lookup (worker threads)
-   _CoverTask                  L3247  QRunnable for one cover load
-   AsyncCoverLoader            L3288  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L3380 Module singleton factory
-   _clear_cover_disk_cache()   L3386  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3531  Shared base class for fetch popups (supports multiple concurrent workers)
-     closeEvent()              L4483  Hide dialog, keep worker running in background
-     mousePressEvent()         L4488  Click outside → hide (run in background)
-     _emit_status_update()     L3782  Show each fetch instance progress as permanent widget on status bar left
-   LibraryCoverFetchWorker     L3881  Sequential per-track cover fetcher
-   CoverFetchPopup             L3881  Modal "fetch covers for library" dialog (multiple concurrent supported)
+   _trim_cover_cache()         L3336  Evict oldest entries when cache exceeds limit
+   _rounded_pixmap()           L3374  Scale + crop + round-corner mask
+   draw_default_cover()        L3398  Render clef placeholder pixmap
+   _cover_disk_key()           L3445  SHA1 hash for disk cache filename
+   get_cover_pixmap()          L3453  Non-blocking async cover lookup (paint path)
+   get_cover_pixmap_sync()     L3471  Blocking cover lookup (worker threads)
+   _CoverTask                  L3506  QRunnable for one cover load
+   AsyncCoverLoader            L3547  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L3639 Module singleton factory
+   _clear_cover_disk_cache()   L3645  Wipe disk + memory cover caches
+   _BaseFetchPopup             L3654  Shared base class for fetch popups (supports multiple concurrent workers)
+     closeEvent()              L3967  Hide dialog, keep worker running in background
+     _emit_status_update()     L4018  Show each fetch instance progress as permanent widget on status bar left
+   LibraryCoverFetchWorker     L4076  Sequential per-track cover fetcher
+   CoverFetchPopup             L4118  Modal "fetch covers for library" dialog (multiple concurrent supported)
 
  TAGS / METADATA
-   fetch_cover_online()        L1371  Try iTunes/Deezer/MusicBrainz/LastFM
-   lookup_tags_online()        L1446  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L1474  Write title/artist/album via mutagen
-   embed_cover_bytes()         L1503  Write cover into audio tags
-   embed_lyrics()              L1544  Write lyrics into audio tags
-   _open_audio()               L3016  Open audio file with mutagen (fallback chain)
-   _tag() / _vtag()            L2998  Tag value helpers (case-insensitive Vorbis)
-   extract_cover_bytes()       L3091  Read raw cover bytes from audio tags
-   read_metadata()             L3042  Build Track from mutagen
-   LibraryTagFetchWorker       L3995  Sequential per-track tag fetcher
-   TagFetchPopup               L3995  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L4093  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L4093  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L4032  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L4043  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L4183  Sequential per-track file renamer
-   RenamePopup                 L4222  Modal "batch rename library" dialog (run-in-bg)
-     closeEvent()              L4483  Hide dialog, keep worker running in background
-
- PLAYER
-   RepeatMode                  L4238  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L4241  Biquad peaking filter coefficients
-   Player                      L4264  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L4402  Load URI, build sink bin, start playback
-     play_pause()              L4450  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L4537  Load + seek after dead-pipe recovery
-     _resume_with_reload()     L4589  Reload pipeline at current position
-     _reload_at_pos()          L4629  WARNING-path pipeline reload (separate guard)
-     seek()                    L4673  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L4861 Update biquad coefficients (GLib idle)
-     _make_sink_bin()          L4889  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L4963  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L5102  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L5164  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L5194  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L5398  GLib-thread: burst-safe magnitude merge + el accumulate
-     _compute_viz_frame()      L5514  Main-thread smoothed bar computation (alpha^N EMA)
-
- MPRIS
-   MprisServer                 L5471  MPRIS2 D-Bus interface (GLib thread)
+   fetch_cover_online()        L1502  Try iTunes/Deezer/MusicBrainz/LastFM
+   lookup_tags_online()        L1615  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L1644  Write title/artist/album via mutagen
+   embed_cover_bytes()         L1673  Write cover into audio tags
+   embed_lyrics()              L1714  Write lyrics into audio tags
+   _tag() / _vtag()            L3256  Tag value helpers (case-insensitive Vorbis)
+   extract_cover_bytes()       L3349  Read raw cover bytes from audio tags
+   _open_audio()               L3274  Open audio file with mutagen (fallback chain)
+   read_metadata()             L3300  Build Track from mutagen
+   LibraryTagFetchWorker       L4187  Sequential per-track tag fetcher
+   TagFetchPopup               L4233  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L4275  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L4333  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L4365  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L4376  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L4448  Sequential per-track file renamer
+   RenamePopup                 L4511  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L4802  Hide dialog, keep worker running in background
 
  LIBRARY
-   Track                       L2973  @dataclass: filepath + metadata
-   scan_folder()               L4312  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4327  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4349  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4367  Non-blocking playlist loader for config restore
+   Track                       L3231  @dataclass: filepath + metadata
+   scan_folder()               L4864  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4879  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L4901  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L4919  Non-blocking playlist loader for config restore
+
+ PLAYER
+   RepeatMode                  L4951  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L4954  Biquad peaking filter coefficients
+   Player                      L4977  GStreamer playbin wrapper + EQ + spectrum viz
+     load()                    L5097  Load URI, build sink bin, start playback
+     play_pause()              L5144  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L5218  Load + seek after dead-pipe recovery
+     _resume_with_reload()     L5267  Reload pipeline at current position
+     _reload_at_pos()          L5307  WARNING-path pipeline reload (separate guard)
+     seek()                    L5348  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L5515 Update biquad coefficients (GLib idle)
+     _make_sink_bin()          L5543  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L5617  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L5751  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L5810  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L5840  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L5950  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L6066  Main-thread smoothed bar computation (alpha^N EMA)
+
+ MPRIS
+   MprisServer                 L6155  MPRIS2 D-Bus interface (GLib thread)
 
  VIEWS
-   TrackTable                  L5902  QTableWidget with covers + sort + touch scroll
-   GalleryView                 L6163  Virtual-scroll card gallery (Z/S layout modes)
-   PlaylistPage                L6712  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L6794  Sidebar playlist row (label + delete button)
-   Sidebar                     L6858  Left panel: search + library nav + playlist list (touch scroll enabled)
+   TrackTable                  L6590  QTableWidget with covers + sort + touch scroll
+   GalleryView                 L6864  Virtual-scroll card gallery (Z/S layout modes)
+   PlaylistPage                L7416  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L7498  Sidebar playlist row (label + delete button)
+   Sidebar                     L7562  Left panel: search + library nav + playlist list (touch scroll enabled)
 
  CONTROL BAR
-   ControlBar                  L7222  Seek bar + transport + viz + settings/EQ toggles
-     _ensure_eq_popup()        L7416  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L7441  Lazy-create SettingsPopup singleton
-     _reset_idle_timer()       L7520  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L7530  Fire overlay when idle threshold reached
-     init_from_config()        L7714  Apply saved config dict to all sub-widgets
-     config_state()            L7806  Collect current state → config dict
-     _precompute_bars()        L7835  Freq→bin map + bar geometry + cap offset arrays
-     paintEvent()              L8125  Fully vectorised numpy pixel-buffer rendering
+   ControlBar                  L7915  Seek bar + transport + viz + settings/EQ toggles
+     _ensure_eq_popup()        L8125  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L8150  Lazy-create SettingsPopup singleton
+     _reset_idle_timer()       L8231  Reset OLED overlay idle countdown
+     _on_idle_timeout()        L8241  Fire overlay when idle threshold reached
+     init_from_config()        L8487  Apply saved config dict to all sub-widgets
+     config_state()            L8582  Collect current state → config dict
+     _precompute_bars()        L8610  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
+     paintEvent()              L8926  Fully vectorised numpy pixel-buffer rendering
 
  MAIN WINDOW
-   MainWindow                  L8433  QMainWindow: layout, signals, config I/O
-     _build_ui()               L8473  Construct widget tree
-     _connect_signals()        L8537  Wire all cross-widget signals
-     _refresh_all_theme_widgets() L8642 Async theme switch + overlay
-     _edit_tags()              L8829  Tag-edit dialog + mutagen write-back
-     _start_playback()         L9161  Load track + update all UI state
-     _advance()                L9243  Next track (shuffle/repeat logic)
-     _save_config()            L9399  JSON config persistence (skips __open_with__)
-     _load_config()            L9515  JSON config restore
-     _handle_open_with()       L9444  Load file-manager / CLI "Open With" track
-     closeEvent()              L9619  Purge __open_with__ playlist, then save + stop
+   MainWindow                  L9329  QMainWindow: layout, signals, config I/O
+     _build_ui()               L9369  Construct widget tree
+     _connect_signals()        L9446  Wire all cross-widget signals
+     _refresh_all_theme_widgets() L9551 Async theme switch + overlay
+     _edit_tags()              L9734  Tag-edit dialog + mutagen write-back
+     _start_playback()         L10083 Load track + update all UI state
+     _advance()                L10165 Next track (shuffle/repeat logic)
+     _save_config()            L10321 JSON config persistence (skips __open_with__)
+     _load_config()            L10441 JSON config restore
+     _handle_open_with()       L10370 Load file-manager / CLI "Open With" track
+     closeEvent()              L10551 Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L9744
+   main()                      L10674
 ═══════════════════════════════════════════════════════════════════
 """
-import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64
+import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
 import concurrent.futures as _cf
 from time import monotonic as _monotonic
 
@@ -259,7 +259,16 @@ VIZ_BANDS     = 256
 GST_BANDS     = 2048  # high-res spectrum for better log/lin mapping
 OV_VIZ_H      = 60    # overlay visualization height px
 MIN_DB        = -70.0
-RAD           = 10   # global corner radius
+RAD_PCT       = 60   # global corner-radius percentage (0 = boxy/sharp, 100 = pill/circle)
+
+def _r(full_px: int) -> int:
+    """Return a corner radius scaled by RAD_PCT.
+
+    ``full_px`` is the maximum radius (at 100 %) for the element being styled —
+    typically half the element's height (gives a pill/circle shape).
+    At 0 % returns 0 (perfectly sharp corners).
+    """
+    return round(full_px * RAD_PCT / 100)
 
 # EQ constants
 MAX_EQ_BANDS  = 10
@@ -273,19 +282,36 @@ EQ_GAIN_MAX_GRAPH = 10.0   # graph vertical range ±10 dB
 # ══════════════════════════════════════════════════════════════════════════════
 #  Stylesheet — uses current BG/FG globals (dark or light)
 # ══════════════════════════════════════════════════════════════════════════════
+
+
 def make_stylesheet(acc: str = None, acch: str = None) -> str:
     if acc  is None: acc  = ACC
     if acch is None: acch = ACCH
+    # ── Semantic radius values (computed once per stylesheet rebuild) ──────────
+    r_gen  = _r(12)   # menus, tooltips, dialogs, popups
+    r_btn  = _r(18)   # standard buttons (36 px height → max 18 px pill)
+    r_play = _r(26)   # play button (52 px → max 26 px circle)
+    r_ctrl = _r(22)   # ctrl icon buttons (44 px → max 22 px circle)
+    r_icon = _r(18)   # icon_btn buttons (36 px → max 18 px circle)
+    r_grv  = _r(2)    # slider groove (4 px height → max 2 px)
+    r_slh  = _r(7)    # EQ/settings slider handle (14 px → max 7 px circle)
+    r_inp  = _r(15)   # text inputs & combo boxes (~30 px → max 15 px)
+    r_tbl  = _r(8)    # table & list container
+    r_tab  = _r(5)    # tab bar top corners
+    r_item = _r(6)    # list/tab item highlight
+    r_scr  = _r(2)    # scrollbar handle (5 px wide)
+    # Drop-down arrow sub-control: right side rounded, left side square
+    r_dd_r = f'0 {r_inp}px {r_inp}px 0'
     return f"""
 * {{ outline: none; }}
 QWidget     {{ background:{BG};  color:{FG};  font-size:13px; }}
 QMainWindow {{ background:{BG}; }}
-QDialog     {{ background:{BG}; border-radius:{RAD}px; }}
+QDialog     {{ background:{BG}; border-radius:{r_gen}px; }}
 QWidget#sidebar {{ background:{BG2}; border-right:1px solid {BORD}; }}
 
 QPushButton {{
     background:{BG3}; color:{FG}; border:1px solid {B2};
-    border-radius:{RAD}px; padding:8px 14px; min-height:36px; text-align:center;
+    border-radius:{r_btn}px; padding:8px 14px; min-height:36px; text-align:center;
 }}
 QPushButton:hover   {{ border-color:{acc}; }}
 QPushButton:pressed {{ background:{BG4}; }}
@@ -293,7 +319,7 @@ QPushButton:checked {{ color:{acc}; border-color:{acc}; background:{BG3}; }}
 QPushButton:disabled {{ color:{B2}; border-color:{BORD}; }}
 
 QPushButton#play {{
-    background:{BG3}; color:{acc}; border:2px solid {acc}; border-radius:26px;
+    background:{BG3}; color:{acc}; border:2px solid {acc}; border-radius:{r_play}px;
     min-width:52px; max-width:52px; min-height:52px; max-height:52px;
     font-size:22px; padding:0; text-align:center;
 }}
@@ -303,7 +329,7 @@ QPushButton#play:pressed {{ background:{BG4}; }}
 QPushButton#ctrl {{
     background:transparent; border:none; color:{FG2}; font-size:20px;
     min-width:44px; max-width:44px; min-height:44px; max-height:44px;
-    border-radius:22px; padding:0; text-align:center;
+    border-radius:{r_ctrl}px; padding:0; text-align:center;
 }}
 QPushButton#ctrl:hover   {{ color:{FG};  background:{BG3}; }}
 QPushButton#ctrl:checked {{ color:{acc}; background:transparent; }}
@@ -312,33 +338,31 @@ QPushButton#ctrl:pressed {{ background:{BG4}; }}
 QPushButton#icon_btn {{
     background:transparent; border:none; color:{FG2}; font-size:18px;
     min-width:36px; max-width:36px; min-height:36px; max-height:36px;
-    border-radius:18px; padding:0; text-align:center;
+    border-radius:{r_icon}px; padding:0; text-align:center;
 }}
 QPushButton#icon_btn:hover   {{ color:{FG}; background:{BG3}; }}
 QPushButton#icon_btn:pressed {{ background:{BG4}; }}
 
-QSlider {{
-    background: transparent;
-}}
-QSlider::groove:horizontal {{ background:{B2}; height:4px; border-radius:2px; }}
-QSlider::sub-page:horizontal {{ background:{acc}; border-radius:2px; }}
+QSlider {{ background: transparent; }}
+QSlider::groove:horizontal {{ background:{B2}; height:4px; border-radius:{r_grv}px; }}
+QSlider::sub-page:horizontal {{ background:{acc}; border-radius:{r_grv}px; }}
 QSlider::handle:horizontal {{
     background:{BG4}; border:2px solid {acc};
-    width:14px; height:14px; border-radius:7px; margin:-5px 0;
+    width:14px; height:14px; border-radius:{r_slh}px; margin:-5px 0;
 }}
 QSlider::handle:horizontal:hover {{
     background:{BG4}; border:3px solid {acch};
-    width:14px; height:14px; border-radius:7px; margin:-5px 0;
+    width:14px; height:14px; border-radius:{r_slh}px; margin:-5px 0;
 }}
 QSlider::handle:horizontal:pressed {{
     background:{BG4}; border:3px solid {acch};
-    width:14px; height:14px; border-radius:7px; margin:-5px 0;
+    width:14px; height:14px; border-radius:{r_slh}px; margin:-5px 0;
 }}
 
 QTableWidget {{
     background:{BG}; color:{FG}; border:none; gridline-color:transparent;
     selection-background-color:{SEL}; selection-color:{FG};
-    border-radius:{RAD}px;
+    border-radius:{r_tbl}px;
 }}
 QTableWidget::item {{ padding:6px 8px; border-bottom:1px solid {BORD}; }}
 QTableWidget::item:selected {{ background:{SEL}; color:{FG}; }}
@@ -355,7 +379,7 @@ QTabBar {{ background:{BG2}; }}
 QTabBar::tab {{
     background:{BG2}; color:{FG2};
     border:1px solid {BORD}; border-bottom:none;
-    border-top-left-radius:6px; border-top-right-radius:6px;
+    border-top-left-radius:{r_tab}px; border-top-right-radius:{r_tab}px;
     padding:5px 10px; min-width:50px; margin-right:2px; margin-top:3px;
     font-size:12px;
 }}
@@ -368,27 +392,45 @@ QTabBar::tab:hover:!selected {{ color:{FG}; background:{BG3}; }}
 
 QLineEdit {{
     background:{BG3}; color:{FG}; border:1px solid {B2};
-    border-radius:18px; padding:8px 16px; min-height:36px; max-height:36px;
+    border-radius:{r_inp}px; padding:8px 16px; min-height:36px; max-height:36px;
 }}
 QLineEdit:focus {{ border-color:{acc}; }}
 
-QListWidget {{ background:{BG2}; border:none; color:{FG}; border-radius:{RAD}px; }}
+QComboBox {{
+    background:{BG3}; color:{FG}; border:1px solid {B2};
+    border-radius:{r_inp}px; padding:4px 8px; min-height:30px; font-size:12px;
+}}
+QComboBox:hover  {{ border-color:{acc}; }}
+QComboBox:focus  {{ border-color:{acc}; }}
+QComboBox::drop-down {{
+    border-left:1px solid {B2}; background:{BG2};
+    width:30px; border-radius:{r_dd_r};
+}}
+QComboBox::down-arrow {{ color:{FG2}; }}
+QComboBox QAbstractItemView {{
+    background:{BG3}; color:{FG}; border:1px solid {B2};
+    selection-background-color:{SEL};
+}}
+QComboBox QAbstractItemView::item {{ min-height:30px; padding:0 8px; }}
+
+QListWidget {{ background:{BG2}; border:none; color:{FG}; border-radius:{r_tbl}px; }}
 QListWidget::item {{ padding:12px 14px; border-bottom:1px solid {BORD}; font-size:12px; }}
-QListWidget::item:selected {{ background:{SEL}; color:{acc}; border-radius:6px; }}
-QListWidget::item:hover:!selected {{ background:{BG3}; border-radius:6px; }}
+QListWidget::item:selected {{ background:{SEL}; color:{acc}; border-radius:{r_item}px; }}
+QListWidget::item:hover:!selected {{ background:{BG3}; border-radius:{r_item}px; }}
 
 QScrollBar {{ background:{BG}; border:none; }}
 QScrollBar:vertical   {{ width:5px; margin:0; }}
 QScrollBar:horizontal {{ height:5px; margin:0; }}
-QScrollBar::handle {{ background:{B2}; border-radius:2px; min-height:20px; }}
+QScrollBar::handle {{ background:{B2}; border-radius:{r_scr}px; min-height:20px; }}
 QScrollBar::handle:hover {{ background:{acc}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; width:0; }}
 QScrollBar::add-page,  QScrollBar::sub-page {{ background:none; }}
 
 QSplitter::handle {{ background:{BORD}; }}
 QSplitter::handle:horizontal {{ width:1px; }}
+QSplitter::handle:vertical   {{ height:1px; }}
 
-QMenu {{ background:{BG3}; border:1px solid {B2}; border-radius:{RAD}px; padding:4px 0; }}
+QMenu {{ background:{BG3}; border:1px solid {B2}; border-radius:{r_gen}px; padding:4px 0; }}
 QMenu::item {{ padding:9px 22px; color:{FG}; }}
 QMenu::item:selected {{ background:{SEL}; color:{acc}; }}
 QMenu::separator {{ height:1px; background:{BORD}; margin:4px 0; }}
@@ -405,7 +447,7 @@ QLabel#setting_lbl{{ font-size:11px; color:{FG2}; background:transparent; }}
 
 QStatusBar {{ background:{BG2}; color:{FG2}; font-size:11px; border-top:1px solid {BORD}; }}
 QToolTip   {{ background:{BG3}; border:1px solid {B2}; color:{FG}; padding:5px 9px;
-              border-radius:6px; }}
+              border-radius:{r_gen}px; }}
 QFrame#ctrlbar {{ border-top:1px solid {BORD}; }}
 
 /* Settings & EQ popups – background drawn by paintEvent */
@@ -419,7 +461,7 @@ QFrame#eq_popup {{
 SS = make_stylesheet()  # initial
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Toggle switch (unchanged)
+#  Toggle switch
 # ══════════════════════════════════════════════════════════════════════════════
 class ToggleSwitch(QWidget):
     """Toggle switch with optional two-sided labels.
@@ -513,20 +555,23 @@ class ToggleSwitch(QWidget):
                 int(_boff.red()   + t*(_border_on.red()   - _boff.red())),
                 int(_boff.green() + t*(_border_on.green() - _boff.green())),
                 int(_boff.blue()  + t*(_border_on.blue()  - _boff.blue())))
-        track_x = lw_off
+        track_x  = lw_off
+        track_r  = _r(self.R)   # 0 = boxy, self.R = H//2 (full pill)
         p.setPen(QPen(bc, 1.5)); p.setBrush(QBrush(tc))
-        p.drawRoundedRect(QRectF(track_x, (h_c-self.H)/2, self.W, self.H), self.R, self.R)
+        p.drawRoundedRect(QRectF(track_x, (h_c-self.H)/2, self.W, self.H), track_r, track_r)
 
         # ── Knob ───────────────────────────────────────────────────────────────
-        kx = track_x + 3 + t*(self.W - 2*self.R - 2)
-        ky = (h_c - self.H)/2 + (self.H - self.R*2)/2
+        _KNOB_PAD = 3                                    # inset on every side
+        knob_sz   = self.H - 2 * _KNOB_PAD              # smaller than track height
+        kx = track_x + _KNOB_PAD + t * (self.W - 2 * _KNOB_PAD - knob_sz)
+        ky = (h_c - self.H) / 2 + _KNOB_PAD
+        knob_r   = _r(knob_sz // 2)
         p.setPen(Qt.PenStyle.NoPen)
         knob_color = FG2 if self._muted_labels else (ACCH if self._on else FG2)
         p.setBrush(QBrush(QColor(knob_color)))
-        p.drawEllipse(QRectF(kx, ky, self.R*2, self.R*2))
+        p.drawRoundedRect(QRectF(kx, ky, knob_sz, knob_sz), knob_r, knob_r)
 
         # ── Labels ─────────────────────────────────────────────────────────────
-        f = p.font(); p.setFont(f)
         DIM  = QColor(FG2)
         BRIGHT = QColor(FG)
 
@@ -562,7 +607,7 @@ class ToggleSwitch(QWidget):
         p.end()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Inline slider row (unchanged)
+#  Slider row
 # ══════════════════════════════════════════════════════════════════════════════
 class JumpSlider(QSlider):
     """Slider that jumps immediately to click/touch position."""
@@ -632,7 +677,7 @@ class SliderRow(QWidget):
     def setValue(self, v: int): self._sl.setValue(v)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Settings popup (sliders now have transparent background)
+#  Settings popup
 # ══════════════════════════════════════════════════════════════════════════════
 class SettingsPopup(QFrame):
     viz_toggled    = pyqtSignal(bool)
@@ -657,6 +702,8 @@ class SettingsPopup(QFrame):
     view_mode_changed    = pyqtSignal(str)   # 'classic' | 'gallery_z' | 'gallery_s'
     list_scale_changed   = pyqtSignal(int)   # row height px
     gallery_scale_changed = pyqtSignal(int)  # card size px
+    viz_type_changed     = pyqtSignal(str)   # 'bars' | 'line'
+    radius_changed       = pyqtSignal(int)   # 0..100 corner-radius percentage
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -738,14 +785,6 @@ class SettingsPopup(QFrame):
         self._view_combo.addItem('Classic')
         self._view_combo.addItem('Gallery (Z)')
         self._view_combo.addItem('Gallery (S)')
-        self._view_combo.setStyleSheet(
-            f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
-            f'QComboBox:hover {{ border-color:{ACC}; }}'
-            f'QComboBox::drop-down {{ border:none; width:20px; }}'
-            f'QComboBox::down-arrow {{ color:{FG2}; }}'
-            f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-            f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
         self._view_combo.currentTextChanged.connect(
             lambda t: self.view_mode_changed.emit(
                 self._COMBO_TO_MODE.get(t, 'classic')))
@@ -770,7 +809,7 @@ class SettingsPopup(QFrame):
         self._accent_btn.setFixedSize(32, 32)
         self._accent_btn.setStyleSheet(
             f'QPushButton#accent_swatch {{'
-            f'  background:{ACC}; border-radius:16px; border:2px solid #666;'
+            f'  background:{ACC}; border-radius:{_r(16)}px; border:2px solid #666;'
             f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
             f'  padding:0;'
             f'}}')
@@ -788,6 +827,11 @@ class SettingsPopup(QFrame):
         acc_row.addWidget(self._cover_sw)
         root.addLayout(acc_row)
 
+        # Corner radius slider (0 = boxy, 100 = pill/round)
+        self._radius_row = SliderRow('Corners', 0, 100, RAD_PCT, lambda v: f'{v}%')
+        self._radius_row.valueChanged.connect(self.radius_changed)
+        root.addWidget(self._radius_row)
+
         # ── VISUALIZATION ─────────────────────────────────────────────────────
         root.addWidget(_divider())
         root.addWidget(_section('VISUALIZATION'))
@@ -801,6 +845,34 @@ class SettingsPopup(QFrame):
         self._log_sw.toggled.connect(self.log_toggled)
         viz_sw_row.addWidget(self._viz_sw); viz_sw_row.addWidget(self._log_sw)
         root.addLayout(viz_sw_row)
+
+        viz_type_row = QHBoxLayout(); viz_type_row.setSpacing(8)
+        viz_type_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        viz_type_lbl = QLabel('Type'); viz_type_lbl.setObjectName('setting_lbl')
+        viz_type_lbl.setFixedWidth(55)
+        viz_type_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._viz_type_combo = QComboBox()
+        self._viz_type_combo.addItem('Bars')
+        self._viz_type_combo.addItem('Fill')
+        self._viz_type_combo.addItem('Line')
+        self._viz_type_combo.addItem('Line+Fill')
+        _vt_ss = (f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+                  f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
+                  f'QComboBox:hover {{ border-color:{ACC}; }}'
+                  f'QComboBox::drop-down {{ border:none; width:20px; }}'
+                  f'QComboBox::down-arrow {{ color:{FG2}; }}'
+                  f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
+                  f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
+        self._viz_type_combo.setStyleSheet(_vt_ss)
+        self._viz_type_combo.currentTextChanged.connect(
+            lambda t: self.viz_type_changed.emit(
+                'bars' if t == 'Bars' else
+                'fill' if t == 'Fill' else
+                'line+fill' if t == 'Line+Fill' else
+                'line'))
+        viz_type_row.addWidget(viz_type_lbl)
+        viz_type_row.addWidget(self._viz_type_combo, 1)
+        root.addLayout(viz_type_row)
 
         self._delay_row = SliderRow('Delay', 0, 1000, 0, lambda v: f'{v}ms')
         self._delay_row.valueChanged.connect(self.delay_changed)
@@ -928,12 +1000,23 @@ class SettingsPopup(QFrame):
         self._accent_color = v
         self._accent_btn.setStyleSheet(
             f'QPushButton#accent_swatch {{'
-            f'  background:{v}; border-radius:16px; border:2px solid #666;'
+            f'  background:{v}; border-radius:{_r(16)}px; border:2px solid #666;'
             f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
             f'  padding:0;'
             f'}}')
+    def radius(self) -> int: return self._radius_row.value()
+    def set_radius(self, v: int): self._radius_row.setValue(max(0, min(100, v)))
     def set_viz(self, v):    self._viz_sw.setChecked(v)
     def set_log(self, v):    self._log_sw.setChecked(v)
+    def viz_type(self)   -> str:
+        t = self._viz_type_combo.currentText()
+        return ('bars' if t == 'Bars' else
+                'fill' if t == 'Fill' else
+                'line+fill' if t == 'Line+Fill' else
+                'line')
+    def set_viz_type(self, v: str):
+        mapping = {'bars': 'Bars', 'fill': 'Fill', 'line': 'Line', 'line+fill': 'Line+Fill'}
+        self._viz_type_combo.setCurrentText(mapping.get(v, 'Bars'))
     def dark_mode_on(self) -> bool: return not self._theme_sw.isChecked()
     def set_dark_mode(self, dark: bool):
         self._theme_sw.blockSignals(True)
@@ -973,6 +1056,17 @@ class SettingsPopup(QFrame):
     def set_list_scale(self, v: int): self._list_scale_row.setValue(v)
     def gallery_scale(self) -> int: return self._gallery_scale_row.value()
     def set_gallery_scale(self, v: int): self._gallery_scale_row.setValue(v)
+
+    def refresh_theme(self):
+        """Re-apply inline stylesheets that bake palette globals at construction time."""
+        self._viz_type_combo.setStyleSheet(
+            f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+            f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
+            f'QComboBox:hover {{ border-color:{ACC}; }}'
+            f'QComboBox::drop-down {{ border:none; width:20px; }}'
+            f'QComboBox::down-arrow {{ color:{FG2}; }}'
+            f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
+            f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
 
     def eventFilter(self, obj, e: QEvent) -> bool:
         """Close settings popup on mouse press outside it."""
@@ -1040,7 +1134,7 @@ class TagEditDialog(QDialog):
         self._cover_lbl.setFixedSize(96, 96)
         self._cover_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._cover_lbl.setStyleSheet(
-            f'background:{BG3}; border:1px solid {B2}; border-radius:6px;')
+            f'background:{BG3}; border:1px solid {B2}; border-radius:{_r(8)}px;')
         # Load current cover
         raw = extract_cover_bytes(track.filepath)
         if raw:
@@ -1065,7 +1159,7 @@ class TagEditDialog(QDialog):
         self._btn_cover_lock.setToolTip('Locked: auto-fetch will not replace this cover')
         _tag_btn_ss = (
             f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:5px; padding:1px 6px; min-height:0; font-size:11px; }}'
+            f' border-radius:{_r(9)}px; padding:1px 6px; min-height:0; font-size:11px; }}'
             f'QPushButton:hover {{ border-color:{ACC}; }}'
             f'QPushButton:pressed {{ background:{BG4}; }}'
             f'QPushButton:checked {{ color:{ACC}; border-color:{ACC}; }}'
@@ -1240,7 +1334,6 @@ class TagEditDialog(QDialog):
                 ('LrcLib (exact)',  lambda: _src_lrclib_exact(artist, title, album, dur)),
                 ('LrcLib (search)', lambda: _src_lrclib_search(artist, title)),
                 ('Lyrics.ovh',      lambda: _src_lyrics_ovh(artist, title)),
-                ('Musixmatch',      lambda: _src_musixmatch(artist, title)),
                 ('Genius',          lambda: _src_genius_search(artist, title)),
                 ('AZLyrics',        lambda: _src_azlyrics(artist, title)),
                 ('SongLyrics',      lambda: _src_songlyrics(artist, title)),
@@ -1454,11 +1547,13 @@ def _fetch_cover_musicbrainz(artist: str, album: str) -> Optional[bytes]:
     return None
 
 def _fetch_cover_lastfm(artist: str, album: str) -> Optional[bytes]:
-    # Uses public lastfm API with community key
     try:
+        key = _lastfm_api_key.strip()
+        if not key:
+            return None
         a = _urlparse.quote(artist); al = _urlparse.quote(album)
         url = (f'https://ws.audioscrobbler.com/2.0/?method=album.getinfo'
-               f'&artist={a}&album={al}&api_key=f24e79dab45bed5e3d35c47e1f3e3bda&format=json')
+               f'&artist={a}&album={al}&api_key={key}&format=json')
         d = _get_json(url)
         images = d.get('album', {}).get('image', [])
         for img in reversed(images):
@@ -1470,14 +1565,18 @@ def _fetch_cover_lastfm(artist: str, album: str) -> Optional[bytes]:
     except Exception: pass
     return None
 
-def fetch_cover_online(artist: str, title: str, album: str) -> Optional[bytes]:
-    """Try multiple sources, return raw image bytes or None."""
+def fetch_cover_online(artist: str, title: str, album: str, *,
+                       stop=None) -> Optional[bytes]:
+    """Try multiple sources, return raw image bytes or None.
+    ``stop`` is an optional callable; if it returns True the fetch is aborted."""
     for fn in [
         lambda: _fetch_cover_itunes(artist, title),
         lambda: _fetch_cover_deezer(artist, title),
         lambda: _fetch_cover_musicbrainz(artist, album),
         lambda: _fetch_cover_lastfm(artist, album),
     ]:
+        if stop and stop():
+            return None
         try:
             data = fn()
             if data: return data
@@ -1490,21 +1589,52 @@ def fetch_cover_online(artist: str, title: str, album: str) -> Optional[bytes]:
 
 def _lookup_tags_musicbrainz(artist: str, title: str) -> dict:
     """Query MusicBrainz for recording metadata. Returns dict with keys:
-    title, artist, album, date. All values may be empty strings."""
+    title, artist, album, date. All values may be empty strings.
+    Prefers studio albums/singles over live/compilation releases."""
+    _BAD_SEC  = {'Live', 'Compilation', 'DJ-mix', 'Mixtape/Street', 'Demo'}
+    _GOOD_PRI = {'Album', 'Single', 'EP'}
+
+    def _rel_score(rel):
+        rg  = rel.get('release-group') or {}
+        pri = rg.get('primary-type', '')
+        sec = set(rg.get('secondary-types', []))
+        bad  = bool(sec & _BAD_SEC)
+        good = pri in _GOOD_PRI
+        if good and not bad: return 0
+        if good and bad:     return 1
+        if not bad:          return 2
+        return 3
+
+    def _rec_score(rec):
+        scores = [_rel_score(r) for r in rec.get('releases', [])]
+        return min(scores) if scores else 99
+
     try:
         q = _urlparse.quote(f'recording:"{title}" AND artist:"{artist}"')
         d = _get_json(
             f'https://musicbrainz.org/ws/2/recording/?query={q}&limit=5&fmt=json',
             headers={'Accept': 'application/json'})
-        for rec in d.get('recordings', [])[:5]:
-            t = rec.get('title', '').strip()
-            rels = rec.get('releases', [])
-            alb = rels[0].get('title', '').strip() if rels else ''
-            date = rels[0].get('date', '')[:4] if rels else ''
-            art_list = rec.get('artist-credit', [])
-            art = art_list[0].get('artist', {}).get('name', '').strip() if art_list else ''
-            if t or art:
-                return {'title': t, 'artist': art, 'album': alb, 'date': date}
+        recs = d.get('recordings', [])[:5]
+        if not recs:
+            return {}
+        best = sorted(recs, key=_rec_score)[0]
+        t    = best.get('title', '').strip()
+        art_list = best.get('artist-credit', [])
+        art  = art_list[0].get('artist', {}).get('name', '').strip() if art_list else ''
+        rels = sorted(best.get('releases', []), key=_rel_score)
+        alb, date = '', ''
+        for rel in rels:
+            rg  = rel.get('release-group') or {}
+            sec = set(rg.get('secondary-types', []))
+            if not (sec & _BAD_SEC):
+                alb  = rel.get('title', '').strip()
+                date = (rel.get('date') or '')[:4]
+                break
+        if not alb and rels:
+            alb  = rels[0].get('title', '').strip()
+            date = (rels[0].get('date') or '')[:4]
+        if t or art:
+            return {'title': t, 'artist': art, 'album': alb, 'date': date}
     except Exception:
         pass
     return {}
@@ -1529,9 +1659,12 @@ def _lookup_tags_itunes(artist: str, title: str) -> dict:
 def _lookup_tags_lastfm(artist: str, title: str) -> dict:
     """Query Last.fm track.getInfo for metadata."""
     try:
+        key = _lastfm_api_key.strip()
+        if not key:
+            return {}
         a = _urlparse.quote(artist); t = _urlparse.quote(title)
         url = (f'https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
-               f'&artist={a}&track={t}&api_key=f24e79dab45bed5e3d35c47e1f3e3bda&format=json')
+               f'&artist={a}&track={t}&api_key={key}&format=json')
         d = _get_json(url)
         tr = d.get('track', {})
         alb = tr.get('album', {}).get('title', '').strip()
@@ -1545,38 +1678,47 @@ def _lookup_tags_lastfm(artist: str, title: str) -> dict:
         pass
     return {}
 
-def lookup_tags_online(artist: str, title: str) -> dict:
+def lookup_tags_online(artist: str, title: str, *, stop=None) -> dict:
     """Try multiple sources; return best result dict with title/artist/album keys.
-    Only fields that are non-empty in the result should be used to fill gaps."""
-    results = [{}]
-    lock = threading.Lock()
+    Sources are tried in priority order: iTunes first (most reliable album data),
+    then MusicBrainz, then Last.fm. Each fills only fields still missing.
+    ``stop`` is an optional callable; if it returns True the lookup is aborted."""
+    merged = {}
 
-    def _try(fn):
+    sources = [
+        lambda: _lookup_tags_itunes(artist, title),       # best album accuracy
+        lambda: _lookup_tags_musicbrainz(artist, title),  # fallback
+        lambda: _lookup_tags_lastfm(artist, title),       # fallback
+    ]
+    for fn in sources:
+        if stop and stop():
+            break
+        # Short-circuit: all fields filled
+        if merged.get('title') and merged.get('artist') and merged.get('album'):
+            break
         try:
             r = fn()
-            if r.get('album') or r.get('artist'):
-                with lock:
-                    # Merge: keep first non-empty value found per key
-                    for k, v in r.items():
-                        if v and not results[0].get(k):
-                            results[0][k] = v
+            if r.get('album') or r.get('artist') or r.get('title'):
+                for k, v in r.items():
+                    if v and not merged.get(k):
+                        merged[k] = v
         except Exception:
             pass
 
-    sources = [
-        lambda: _lookup_tags_musicbrainz(artist, title),
-        lambda: _lookup_tags_itunes(artist, title),
-        lambda: _lookup_tags_lastfm(artist, title),
-    ]
-    with _cf.ThreadPoolExecutor(max_workers=3) as pool:
-        _cf.wait([pool.submit(_try, fn) for fn in sources])
-
-    return results[0]
+    return merged
 
 def write_tags_to_file(fp: str, tags: dict) -> bool:
     """Write title/artist/album from tags dict into the audio file. Returns True on success."""
     try:
         ext = Path(fp).suffix.lower()
+        # Reject WebM/MKV containers — mutagen cannot write tags to them
+        try:
+            with open(fp, 'rb') as _wf:
+                if _wf.read(4) == b'\x1a\x45\xdf\xa3':
+                    print(f'write_tags_to_file: {fp} is a WebM/MKV container, skipping')
+                    return False
+        except OSError:
+            return False
         af  = _open_audio(fp)
         if af is None: return False
         if af.tags is None: af.add_tags()
@@ -1606,6 +1748,12 @@ def embed_cover_bytes(fp: str, data: bytes) -> bool:
     """Write cover bytes into the audio file tags. Returns True on success."""
     try:
         ext = Path(fp).suffix.lower()
+        try:
+            with open(fp, 'rb') as _wf:
+                if _wf.read(4) == b'\x1a\x45\xdf\xa3':
+                    return False
+        except OSError:
+            return False
         af  = _open_audio(fp)
         if af is None: return False
 
@@ -1647,6 +1795,12 @@ def embed_lyrics(fp: str, synced, plain: str) -> bool:
     """Write lyrics into audio file tags. Returns True on success."""
     try:
         ext = Path(fp).suffix.lower()
+        try:
+            with open(fp, 'rb') as _wf:
+                if _wf.read(4) == b'\x1a\x45\xdf\xa3':
+                    return False
+        except OSError:
+            return False
         af  = _open_audio(fp)
         if af is None: return False
 
@@ -1785,14 +1939,20 @@ def _src_lrclib_search(artist, title):
     try:
         q = _urlparse.quote(f'{artist} {title}')
         results = _get_json(f'https://lrclib.net/api/search?q={q}')
+        best_plain = None
         for item in results[:6]:
             sl = item.get('syncedLyrics') or ''
             pl = item.get('plainLyrics')  or ''
             if sl.strip():
                 lrc = _lrc_parse(sl)
-                if lrc: return lrc, None
-            if pl.strip(): return None, pl.strip()
-    except Exception: pass
+                if lrc:
+                    return lrc, None          # synced found — return immediately
+            if pl.strip() and best_plain is None:
+                best_plain = pl.strip()       # cache plain; keep searching for synced
+        if best_plain:
+            return None, best_plain
+    except Exception:
+        pass
     return None, None
 
 def _src_lyrics_ovh(artist, title):
@@ -1815,34 +1975,6 @@ def _src_chartlyrics(artist, title):
     except Exception: pass
     return None, None
 
-def _src_musixmatch(artist, title):
-    # Unofficial Musixmatch community token (no auth required for search)
-    try:
-        token = 'community'
-        a = _urlparse.quote(artist); t = _urlparse.quote(title)
-        base = 'https://api.musixmatch.com/ws/1.1'
-        # search track
-        d = _get_json(f'{base}/track.search?q_artist={a}&q_track={t}'
-                      f'&apikey={token}&page_size=3&f_has_lyrics=1')
-        items = (d.get('message', {}).get('body', {})
-                   .get('track_list', []))
-        for item in items[:3]:
-            tid = item.get('track', {}).get('track_id')
-            if not tid: continue
-            d2 = _get_json(f'{base}/track.lyrics.get?track_id={tid}&apikey={token}')
-            body = d2.get('message', {}).get('body', {})
-            lyr = body.get('lyrics', {}).get('lyrics_body', '').strip()
-            if lyr and '******* This Lyrics' not in lyr:
-                return None, lyr
-            # Also try subtitle (synced)
-            d3 = _get_json(f'{base}/track.subtitle.get?track_id={tid}&apikey={token}')
-            sub = (d3.get('message', {}).get('body', {})
-                      .get('subtitle', {}).get('subtitle_body', ''))
-            if sub.strip():
-                lrc = _lrc_parse(sub)
-                if lrc: return lrc, None
-    except Exception: pass
-    return None, None
 
 def _src_genius_search(artist, title):
     # Genius web scraping — no API key
@@ -1946,46 +2078,43 @@ class LyricsFetcher(QObject):
         title  = (t.title  or '').strip()
         album  = (t.album  or '').strip()
 
-        # 1. Embedded tags — instant, no network needed
+        # 1. Embedded tags — instant, no network required
         self.status.emit('Checking embedded tags…')
         synced, plain = _extract_embedded_lyrics(t.filepath)
         if synced or plain:
-            self.finished.emit(synced, plain); return
+            self.finished.emit(synced, plain)
+            return
 
         if not self._fetch_online:
             self.status.emit('')
-            self.finished.emit(None, None); return
+            self.finished.emit(None, None)
+            return
 
-        # 2. All online sources fired in parallel; return as soon as a synced
-        #    result arrives — don't wait for slower sources to finish.
-        #    If no synced result comes, keep the best plain result seen so far
-        #    and return once every future has settled.
-        #
-        #    Source order doubles as priority: LrcLib (the only reliable synced
-        #    provider) is first so it almost always wins the synced slot before
-        #    the scraping sources even get a response back.
-        sources = [
-            ('LrcLib (exact)',   lambda: _src_lrclib_exact(artist, title, album, t.duration)),
-            ('LrcLib (search)',  lambda: _src_lrclib_search(artist, title)),
-            ('Lyrics.ovh',       lambda: _src_lyrics_ovh(artist, title)),
-            ('Musixmatch',       lambda: _src_musixmatch(artist, title)),
-            ('Genius',           lambda: _src_genius_search(artist, title)),
-            ('AZLyrics',         lambda: _src_azlyrics(artist, title)),
-            ('SongLyrics',       lambda: _src_songlyrics(artist, title)),
-            ('ChartLyrics',      lambda: _src_chartlyrics(artist, title)),
-            ('Letras.mus.br',    lambda: _src_letras(artist, title)),
+        # 2. Two-phase online search:
+        #    Phase A — fast, reliable sources (LrcLib has synced, Lyrics.ovh is quick).
+        #              Return immediately on first synced result.  If Phase A finishes
+        #              with a plain result, skip slow sources — plain is sufficient.
+        #    Phase B — only when Phase A returns empty; web scrapers; wait up to 2 s
+        #              for synced after first plain result, then deliver whatever we have.
+        fast_sources = [
+            ('LrcLib (exact)',  lambda: _src_lrclib_exact(artist, title, album, t.duration)),
+            ('LrcLib (search)', lambda: _src_lrclib_search(artist, title)),
+            ('Lyrics.ovh',      lambda: _src_lyrics_ovh(artist, title)),
+        ]
+        slow_sources = [
+            ('Genius',          lambda: _src_genius_search(artist, title)),
+            ('AZLyrics',        lambda: _src_azlyrics(artist, title)),
+            ('SongLyrics',      lambda: _src_songlyrics(artist, title)),
+            ('ChartLyrics',     lambda: _src_chartlyrics(artist, title)),
+            ('Letras.mus.br',   lambda: _src_letras(artist, title)),
         ]
 
-        self.status.emit('Searching lyrics…')
-
-        result_lock = threading.Lock()
-        best_synced = [None]
-        best_plain  = [None]
+        result_lock  = threading.Lock()
+        best_synced  = [None]
+        best_plain   = [None]
 
         def _run_source(fn):
-            # Each worker checks the shared synced flag before doing network I/O.
-            # This prevents queued-but-not-yet-started tasks from making requests
-            # after a synced result has already been found.
+            # Lock-free early exit — read-only check without lock is safe under CPython GIL
             if best_synced[0] is not None:
                 return
             try:
@@ -1995,33 +2124,79 @@ class LyricsFetcher(QObject):
             with result_lock:
                 if s and best_synced[0] is None:
                     best_synced[0] = s
-                elif p and best_plain[0] is None:
+                # plain is only saved when synced has not been found;
+                # otherwise the receiver may choose the wrong format
+                elif p and best_plain[0] is None and best_synced[0] is None:
                     best_plain[0] = p
 
-        pool = _cf.ThreadPoolExecutor(max_workers=len(sources))
-        try:
-            futs = [pool.submit(_run_source, fn) for _, fn in sources]
-            # Iterate completions as they arrive; bail out the moment we have a
-            # synced result — cancel all pending futures so slow scrapers (Genius,
-            # AZLyrics, Letras) never block the return path.
-            for fut in _cf.as_completed(futs):
-                fut.result()   # re-raise any unexpected exception into this thread
-                if best_synced[0] is not None:
-                    for f in futs:
-                        f.cancel()
-                    break
-        finally:
-            # cancel_futures=True (py3.9+) tells the pool not to start queued
-            # tasks; already-running I/O threads finish naturally in the background.
-            pool.shutdown(wait=False, cancel_futures=True)
+        def _emit_best():
+            """Determine and emit the result — if synced is present, plain is never emitted alongside it."""
+            if best_synced[0] is not None:
+                self.was_online = True
+                self.finished.emit(best_synced[0], None)
+                return True
+            if best_plain[0] is not None:
+                self.was_online = True
+                self.finished.emit(None, best_plain[0])
+                return True
+            return False
 
-        if best_synced[0] or best_plain[0]:
-            self.was_online = True
-            self.finished.emit(best_synced[0], best_plain[0])
+        # ── Phase A: fast sources ────────────────────────────────────────────
+        self.status.emit('Searching lyrics…')
+        pool_a = _cf.ThreadPoolExecutor(max_workers=len(fast_sources))
+        try:
+            futs_a = [pool_a.submit(_run_source, fn) for _, fn in fast_sources]
+            try:
+                for fut in _cf.as_completed(futs_a, timeout=8):
+                    fut.result()
+                    if best_synced[0] is not None:
+                        for f in futs_a:
+                            f.cancel()
+                        break
+            except _cf.TimeoutError:
+                pass
+        finally:
+            pool_a.shutdown(wait=False, cancel_futures=True)
+
+        # Any result from Phase A → don't start slow sources at all
+        if best_synced[0] is not None or best_plain[0] is not None:
+            _emit_best()
             return
 
-        self.status.emit('')
-        self.finished.emit(None, None)
+        # ── Phase B: slow scrapers ──────────────────────────────────────────
+        self.status.emit('Searching lyrics (extended)…')
+        pool_b = _cf.ThreadPoolExecutor(max_workers=len(slow_sources))
+        try:
+            futs_b = [pool_b.submit(_run_source, fn) for _, fn in slow_sources]
+            try:
+                for fut in _cf.as_completed(futs_b, timeout=14):
+                    fut.result()
+                    if best_synced[0] is not None:
+                        for f in futs_b:
+                            f.cancel()
+                        break
+                    if best_plain[0] is not None:
+                        # Plain found; give remaining futures 2 more seconds to find a synced result
+                        remaining = [f for f in futs_b if not f.done()]
+                        if remaining:
+                            try:
+                                for fut2 in _cf.as_completed(remaining, timeout=2):
+                                    fut2.result()
+                                    if best_synced[0] is not None:
+                                        for f in futs_b:
+                                            f.cancel()
+                                        break
+                            except _cf.TimeoutError:
+                                pass
+                        break
+            except _cf.TimeoutError:
+                pass
+        finally:
+            pool_b.shutdown(wait=False, cancel_futures=True)
+
+        if not _emit_best():
+            self.status.emit('')
+            self.finished.emit(None, None)
 
 # ── Panel ─────────────────────────────────────────────────────────────────────
 class LyricsPanel(QWidget):
@@ -2373,16 +2548,6 @@ class EqPopup(QFrame):
         self._profile_combo.setMinimumWidth(150)
         self._profile_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._profile_combo.setCompleter(None)   # no autocomplete / no filter while typing
-        self._profile_combo.setStyleSheet(
-            f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:6px; padding:4px 8px 4px 8px; min-height:30px; }}'
-            f'QComboBox:focus {{ border-color:{ACC}; }}'
-            f'QComboBox::drop-down {{ width:44px; border-left:1px solid {B2};'
-            f' background:{BG2}; border-radius:0 6px 6px 0; }}'
-            f'QComboBox::down-arrow {{ width:16px; height:16px; }}'
-            f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-            f' selection-background-color:{SEL}; border:1px solid {B2}; }}'
-            f'QComboBox QAbstractItemView::item {{ min-height:35px; padding:0 8px; }}')
         if self._profile_combo.lineEdit():
             le = self._profile_combo.lineEdit()
             le.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
@@ -2465,7 +2630,8 @@ class EqPopup(QFrame):
     def _on_enable_toggled(self, on):
         self._enabled = on
         self._graph.set_enabled(on)
-        self._apply_timer.start()  # apply after toggle
+        self._apply_timer.stop()   # cancel any pending slider debounce
+        self._apply()              # apply immediately — don't wait 300 ms
 
 
     def _add_band(self):
@@ -2884,11 +3050,10 @@ class BlackoutOverlay(QWidget):
         self._cycle_timer.stop(); self._clock_timer.stop()
         self._anim.stop()
         self.hide()
-        # Resume ControlBar viz rendering now that overlay is gone
         if self._ctrlbar_ref is not None:
+            # Resume ControlBar viz rendering now that overlay is gone,
+            # then restart the idle countdown.
             self._ctrlbar_ref.set_overlay_open(False)
-        # Restart idle countdown after overlay is dismissed
-        if self._ctrlbar_ref is not None:
             self._ctrlbar_ref._reset_idle_timer()
 
     def mousePressEvent(self, e): self._dismiss()
@@ -3062,26 +3227,84 @@ class BlackoutOverlay(QWidget):
             p.setBrush(QBrush(RED))
             p.drawRoundedRect(QRectF(10, BAR_Y, BAR_W * frac, BAR_H), 2, 2)
 
-        # ── Overlay VIZ (docked to bottom of progress bar, bars hang down) ──
+        # ── Overlay VIZ (docked to bottom of progress bar) ─────────────────
         vd = self._viz_data
         if self._ov_viz and vd is not None and len(vd) > 0:
             viz_y = BAR_Y + BAR_H
             n_v  = len(vd)
             bw_v = BAR_W / max(1, n_v)
-            bw_draw = max(1.0, bw_v)
-            p.setPen(Qt.PenStyle.NoPen)
             bar_col = QColor(ACC); bar_col.setAlpha(200)
-            p.setBrush(QBrush(bar_col))
-            p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
-            # Iterate with explicit float() so both ndarray elements and plain
-            # floats are handled safely without triggering ndarray truth-value errors.
-            x = 10.0
-            for norm in vd:
-                h = float(norm) * VIZ_H
-                if h >= 0.01 * VIZ_H:
-                    p.drawRect(QRectF(x, viz_y, bw_draw, h))
-                x += bw_v
-            p.setClipping(False)
+            # Retrieve viz type from ctrlbar if available
+            _vtype = 'bars'
+            if self._ctrlbar_ref is not None:
+                _vtype = getattr(self._ctrlbar_ref, '_viz_type', 'bars')
+
+            if _vtype == 'fill':
+                fill_col = QColor(ACC); fill_col.setAlpha(90)
+                cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
+                cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
+                poly = QPolygonF()
+                poly.append(QPointF(cx_list[0], viz_y))
+                for cx, cy in zip(cx_list, cy_list):
+                    poly.append(QPointF(cx, cy))
+                poly.append(QPointF(cx_list[-1], viz_y))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(fill_col))
+                p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+                p.drawPolygon(poly)
+                p.setClipping(False)
+            elif _vtype == 'line':
+                cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
+                cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
+                line_col = QColor(ACC); line_col.setAlpha(220)
+                pen = QPen(line_col, 1.5, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+                poly = QPolygonF([QPointF(cx, cy) for cx, cy in zip(cx_list, cy_list)])
+                p.drawPolyline(poly)
+                p.setClipping(False)
+            elif _vtype == 'line+fill':
+                cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
+                cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
+                # Fill polygon beneath the line (closes at viz_y = top of viz area)
+                fill_col = QColor(ACC); fill_col.setAlpha(70)
+                poly_fill = QPolygonF()
+                poly_fill.append(QPointF(cx_list[0], viz_y))
+                for cx, cy in zip(cx_list, cy_list):
+                    poly_fill.append(QPointF(cx, cy))
+                poly_fill.append(QPointF(cx_list[-1], viz_y))
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(fill_col))
+                p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+                p.drawPolygon(poly_fill)
+                # Line on top
+                line_col = QColor(ACC); line_col.setAlpha(220)
+                pen = QPen(line_col, 1.5, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                poly_line = QPolygonF([QPointF(cx, cy) for cx, cy in zip(cx_list, cy_list)])
+                p.drawPolyline(poly_line)
+                p.setClipping(False)
+            else:
+                # Bars mode (original)
+                bw_draw = max(1.0, bw_v)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(bar_col))
+                p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+                # Iterate with explicit float() so both ndarray elements and plain
+                # floats are handled safely without triggering ndarray truth-value errors.
+                x = 10.0
+                for norm in vd:
+                    h = float(norm) * VIZ_H
+                    if h >= 0.01 * VIZ_H:
+                        p.drawRect(QRectF(x, viz_y, bw_draw, h))
+                    x += bw_v
+                p.setClipping(False)
 
         if sc != 1.0:
             p.restore()
@@ -3103,7 +3326,7 @@ class BlackoutOverlay(QWidget):
         return super().eventFilter(obj, e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Data model (unchanged)
+#  Data model
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class Track:
@@ -3310,6 +3533,7 @@ def draw_default_cover(size: int, radius: int) -> QPixmap:
 
 _COVER_DISK_DIR  = CONFIG_PATH.parent / 'covers'
 _cover_fetch_on  = True   # module-level flag — updated by ControlBar
+_lastfm_api_key  = ''    # set from config or fetch popups — never hardcoded
 _cover_locked_set: set = set()   # filepaths that must not auto-fetch
 _COVER_JPEG_QUALITY = 80
 
@@ -3544,8 +3768,8 @@ class _BaseFetchPopup(QDialog):
     def __init__(self, tracks: list, title: str, info_text: str, needs_count: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setModal(True)
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(600)
         self._tracks   = list(tracks)
         self._thread   = None
         self._worker   = None
@@ -3568,6 +3792,30 @@ class _BaseFetchPopup(QDialog):
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet(f'font-size:14px;font-weight:bold;color:{FG};')
         root.addWidget(title_lbl)
+
+        # ── Last.fm API Key row ───────────────────────────────────────────────
+        lfm_row = QHBoxLayout(); lfm_row.setSpacing(6)
+        lfm_lbl = QLabel('Last.fm key:')
+        lfm_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
+        lfm_lbl.setFixedWidth(72)
+        lfm_row.addWidget(lfm_lbl)
+        self._lfm_edit = QLineEdit()
+        self._lfm_edit.setPlaceholderText('API key (optional)')
+        self._lfm_edit.setFixedHeight(22)
+        self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._lfm_edit.setText(_lastfm_api_key)
+        self._lfm_edit.setStyleSheet(
+            f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
+            f'border-radius:4px;padding:0 6px;font-size:11px;}}'
+            f'QLineEdit:focus{{border-color:{ACC};}}'
+        )
+        lfm_row.addWidget(self._lfm_edit, 1)
+        root.addLayout(lfm_row)
+
+        self._lfm_edit.textChanged.connect(self._on_lfm_text_changed)
+        if len(_lastfm_api_key) == 32:
+            self._set_lfm_border(True)
+        # ─────────────────────────────────────────────────────────────────────
 
         info_lbl = QLabel(info_text)
         info_lbl.setWordWrap(True)
@@ -3608,12 +3856,14 @@ class _BaseFetchPopup(QDialog):
         root.addWidget(self._result_lbl)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Run in Background')
+        self._btn_close  = QPushButton('Close')
         self._force_cb   = QCheckBox('Force (re-fetch all)')
         self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
+        
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addSpacing(8)
@@ -3626,15 +3876,79 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel.clicked.connect(self._cancel)
         self._btn_close.clicked.connect(self._on_close)
         self._force = False   # set just before _make_worker() is called
-        
+        # Initialise close button to correct label (not running yet)
+        self._update_close_btn()
+
         # Check if there's an existing worker running in background and auto-start
         self._check_and_restore_background()
+        QApplication.instance().installEventFilter(self)
+
+    def _on_lfm_text_changed(self, text: str):
+        """Automatically test when 32 characters are reached, reset border if incomplete."""
+        if len(text) == 32:
+            self._test_lastfm_key()
+        else:
+            self._lfm_edit.setStyleSheet(
+                f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
+                f'border-radius:4px;padding:0 6px;font-size:11px;}}'
+                f'QLineEdit:focus{{border-color:{ACC};}}'
+            )
+
+    def _test_lastfm_key(self):
+        """Test the API key, set textbox border to green/red based on result and save."""
+        key = self._lfm_edit.text().strip()
+        if not key:
+            self._set_lfm_border(False)
+            return
+        result = [None]
+
+        def _check():
+            try:
+                import urllib.request as _ur, urllib.parse as _up, json as _js
+                q = _up.quote('Radiohead'); tk = _up.quote('Creep')
+                url = (f'https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
+                       f'&artist={q}&track={tk}&api_key={key}&format=json')
+                req = _ur.Request(url, headers={'User-Agent': 'VoidPulse/2.0'})
+                with _ur.urlopen(req, timeout=6) as r:
+                    d = _js.loads(r.read())
+                result[0] = 'error' not in d and 'track' in d
+            except Exception:
+                result[0] = False
+
+        thr = threading.Thread(target=_check, daemon=True)
+        thr.start()
+
+        def _poll():
+            if thr.is_alive():
+                QTimer.singleShot(150, _poll)
+                return
+            ok = result[0]
+            self._set_lfm_border(ok)
+            if ok:
+                global _lastfm_api_key
+                _lastfm_api_key = key
+
+        QTimer.singleShot(150, _poll)
+
+    def _set_lfm_border(self, ok: bool):
+        color = '#44bb44' if ok else '#bb3333'
+        self._lfm_edit.setStyleSheet(
+            f'QLineEdit{{background:{BG3};color:{FG};border:2px solid {color};'
+            f'border-radius:4px;padding:0 6px;font-size:11px;}}'
+        )
 
     def _make_worker(self):
         raise NotImplementedError
 
     def _on_track_done(self, *args):
         raise NotImplementedError
+
+    def _update_close_btn(self):
+        """Show 'Run in\nbackground' while running, 'Close' otherwise."""
+        if self._running:
+            self._btn_close.setText('Run in\nbackground')
+        else:
+            self._btn_close.setText('Close')
 
     def _check_and_restore_background(self):
         """Check if there's an existing worker running in background and auto-restore UI."""
@@ -3667,10 +3981,20 @@ class _BaseFetchPopup(QDialog):
             self._emit_status_update()
             # Auto-show the dialog (it may have been hidden) - but don't auto-start since it's already running
             self.show()
-            # Connect signals to restore live updates
+            # Disconnect the old instance's UI slots before connecting this instance's slots.
+            # Without this, both the old popup and the new popup would receive every signal,
+            # causing progress updates, log entries and _on_finished to fire twice.
+            try: old_worker.progress.disconnect(old_instance._on_progress)
+            except Exception: pass
+            try: old_worker.track_done.disconnect(old_instance._on_track_done)
+            except Exception: pass
+            try: old_worker.finished.disconnect(old_instance._on_finished)
+            except Exception: pass
+            # Connect this instance's slots
             self._worker.progress.connect(self._on_progress)
             self._worker.track_done.connect(self._on_track_done)
             self._worker.finished.connect(self._on_finished)
+            self._update_close_btn()
 
     # ── common implementation ────────────────────────────────────────────────
 
@@ -3694,6 +4018,7 @@ class _BaseFetchPopup(QDialog):
         self._result_lbl.setText('')
         self._btn_start.setEnabled(False)
         self._btn_cancel.setEnabled(True)
+        self._update_close_btn()
 
         worker = self._make_worker()
         thread = QThread(self)
@@ -3724,24 +4049,35 @@ class _BaseFetchPopup(QDialog):
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Cancelling…')
 
+    def _really_close(self):
+        """Actually close the dialog (bypassing the hide-guard in closeEvent)."""
+        self._force_close = True
+        self.reject()
+
     def _on_close(self):
-        # Hide the dialog but keep the thread running in background
-        self.hide()
+        if self._running:
+            # Hide the dialog but keep the thread running in background.
+            # Remove the application-wide event filter so the hidden dialog
+            # does not continue swallowing all mouse events.
+            QApplication.instance().removeEventFilter(self)
+            self.hide()
+        else:
+            # Nothing is running — just close the dialog
+            self._really_close()
 
     def closeEvent(self, e):
-        # Hide instead of closing - keeps thread alive
-        self.hide()
-        e.ignore()
-
-    def mousePressEvent(self, e):
-        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
-        if e.button() == Qt.MouseButton.LeftButton:
-            # Check if click is outside the dialog's geometry
-            if not self.rect().contains(e.pos()):
-                self.hide()
-                e.ignore()
-                return
-        super().mousePressEvent(e)
+        if getattr(self, '_force_close', False) or not self._running:
+            # Allow genuine close when not running.
+            # Always remove the event filter on a real close.
+            QApplication.instance().removeEventFilter(self)
+            self._force_close = False
+            e.accept()
+        else:
+            # Hide instead of closing — keeps thread alive.
+            # Remove the event filter so the hidden dialog does not swallow mouse events.
+            QApplication.instance().removeEventFilter(self)
+            self.hide()
+            e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
         self._progress.setValue(current)
@@ -3778,6 +4114,7 @@ class _BaseFetchPopup(QDialog):
         self._worker = None
         # Clear status bar message
         self._emit_status_clear()
+        self._update_close_btn()
 
     def _emit_status_update(self):
         """Emit progress status to main window status bar - shows all concurrent fetches."""
@@ -3870,7 +4207,8 @@ class LibraryCoverFetchWorker(QObject):
             name = t.title or Path(t.filepath).stem
             done += 1
             self.progress.emit(done, total, name)
-            data = fetch_cover_online(t.artist or '', t.title or '', t.album or '')
+            data = fetch_cover_online(t.artist or '', t.title or '', t.album or '',
+                                      stop=lambda: self._cancelled)
             if data:
                 found += 1
                 self.track_done.emit(t.filepath, data, True)
@@ -3977,7 +4315,8 @@ class LibraryTagFetchWorker(QObject):
                 break
             name = t.title or Path(t.filepath).stem
             self.progress.emit(i + 1, total, name)
-            tags = lookup_tags_online(t.artist or '', t.title or Path(t.filepath).stem)
+            tags = lookup_tags_online(t.artist or '', t.title or Path(t.filepath).stem,
+                                      stop=lambda: self._cancelled)
             if tags:
                 result = {}
                 if not t.title.strip()  and tags.get('title'):  result['title']  = tags['title']
@@ -4073,6 +4412,8 @@ class LibraryLyricsFetchWorker(QObject):
                 lambda: _src_lrclib_search(artist, title),
                 lambda: _src_lyrics_ovh(artist, title),
             ]:
+                if self._cancelled:
+                    break
                 try:
                     s, p = src_fn()
                     if s:
@@ -4143,14 +4484,22 @@ def _build_new_filename(pattern: str, track) -> str:
         %C  album (Collection)
     All other characters (including punctuation, spaces, emoji, etc.) are kept as-is.
     Metadata values are sanitized so embedded '/' chars cannot break Path.with_name().
+    When a tag is missing its placeholder is replaced with an empty string and any
+    surrounding separator characters (space, hyphen, underscore, dot) that would
+    have connected it to adjacent tokens are collapsed away so the result stays clean.
     Returns empty string when the pattern is empty.
     """
+    import re as _re2
     stem   = _sanitize_filename_part(Path(track.filepath).stem)
     result = pattern
     result = result.replace('%F', stem)
     result = result.replace('%A', _sanitize_filename_part(track.artist or ''))
     result = result.replace('%T', _sanitize_filename_part(track.title  or ''))
     result = result.replace('%C', _sanitize_filename_part(track.album  or ''))
+    # Collapse sequences of separator-only characters left by empty placeholders,
+    # e.g. " - " adjacent to another " - " or at the start/end of the string.
+    result = _re2.sub(r'[\s\-_\.]{2,}', lambda m: m.group(0)[0], result)
+    result = result.strip(' -_.')
     return result
 
 
@@ -4168,6 +4517,41 @@ def _validate_rename_pattern(pattern: str):
         if tok not in ('%F', '%A', '%T', '%C'):
             bad.append(tok)
     return bad
+
+
+_RENAME_TMP_SUFFIX = '.__vprename_tmp__'
+
+
+def _recover_rename_temps(tracks: list) -> dict:
+    """Scan *tracks* for files left in a tmp state by an interrupted rename.
+
+    A file is in tmp state when its path ends with ``.__vprename_tmp__``.
+    For every such file we restore it to its original name (i.e. strip the
+    suffix) so the library stays consistent.  If the original name is already
+    taken we keep the tmp name and leave it for the user to handle manually.
+
+    Returns a mapping {tmp_path_str: restored_path_str} for every file that
+    was successfully restored so callers can update their track lists.
+    """
+    recovered: dict = {}
+    for t in tracks:
+        p = Path(t.filepath)
+        if not p.name.endswith(_RENAME_TMP_SUFFIX):
+            continue
+        original_name = p.name[: -len(_RENAME_TMP_SUFFIX)]
+        original_path = p.with_name(original_name)
+        if original_path.exists():
+            # Cannot restore — original already exists; leave as-is.
+            print(f'[VoidPulse] rename-tmp recovery: cannot restore {p.name} '
+                  f'(target already exists)')
+            continue
+        try:
+            p.rename(original_path)
+            recovered[str(p)] = str(original_path)
+            print(f'[VoidPulse] rename-tmp recovery: {p.name} → {original_name}')
+        except Exception as exc:
+            print(f'[VoidPulse] rename-tmp recovery error for {p.name}: {exc}')
+    return recovered
 
 
 class LibraryRenameWorker(QObject):
@@ -4211,10 +4595,24 @@ class LibraryRenameWorker(QObject):
                 while candidate.exists():
                     candidate = old_path.with_name(f'{new_stem}_({counter}){old_path.suffix}')
                     counter += 1
-                old_path.rename(candidate)
+                # Atomic rename via a temp name in the same directory.
+                # If the process is killed mid-operation the file survives under
+                # its original name or the temp name — never lost or truncated.
+                tmp_path = old_path.with_name(old_path.name + '.__vprename_tmp__')
+                old_path.rename(tmp_path)       # step 1: original → temp
+                tmp_path.rename(candidate)      # step 2: temp → final
                 renamed += 1
                 self.track_done.emit(str(old_path), str(candidate), True)
             except Exception as exc:
+                # If step 2 failed the file is still safe under tmp_path;
+                # try to restore it to old_path so the library stays intact.
+                tmp_path_maybe = Path(t.filepath).with_name(
+                    Path(t.filepath).name + '.__vprename_tmp__')
+                if tmp_path_maybe.exists():
+                    try:
+                        tmp_path_maybe.rename(Path(t.filepath))
+                    except Exception:
+                        pass
                 self.track_done.emit(t.filepath, str(exc), False)
         self.finished.emit(renamed, total)
 
@@ -4236,8 +4634,8 @@ class RenamePopup(QDialog):
     def __init__(self, tracks: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Rename Library Files')
-        self.setModal(True)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(660)
+        self.setMinimumHeight(660)
 
         self._tracks   = list(tracks)
         self._thread   = None
@@ -4318,7 +4716,7 @@ class RenamePopup(QDialog):
         self._btn_start  = QPushButton('Start')
         self._btn_cancel = QPushButton('Cancel')
         self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Run in Background')
+        self._btn_close  = QPushButton('Background')
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addStretch()
@@ -4330,11 +4728,37 @@ class RenamePopup(QDialog):
         self._btn_close.clicked.connect(self._on_close)
 
         self._on_pattern_changed('')
-        
+        # Initialise close button to correct label (not running yet)
+        self._update_close_btn()
+
         # Check if there's an existing rename worker running in background and auto-restore
         self._check_and_restore_background_rename()
+        QApplication.instance().installEventFilter(self)
 
     # ── validation ────────────────────────────────────────────────────────────
+
+    def eventFilter(self, obj, e: QEvent) -> bool:
+        # Only intercept clicks while the dialog is actually visible.
+        # self.geometry() is in parent-widget coords; convert our rect to global
+        # screen coords before comparing with the event's global position.
+        if (self.isVisible() and
+                e.type() == QEvent.Type.MouseButtonPress):
+            try:
+                gpt = e.globalPosition().toPoint()
+                global_rect = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+                if not global_rect.contains(gpt):
+                    self._on_close()
+                    return True
+            except Exception:
+                pass
+        return super().eventFilter(obj, e)
+
+    def _update_close_btn(self):
+        """Show 'Run in\nbackground' while running, 'Close' otherwise."""
+        if self._running:
+            self._btn_close.setText('Run in\nbackground')
+        else:
+            self._btn_close.setText('Close')
 
     def _on_pattern_changed(self, text: str):
         bad = _validate_rename_pattern(text)
@@ -4397,6 +4821,7 @@ class RenamePopup(QDialog):
             self._worker.progress.connect(self._on_progress)
             self._worker.track_done.connect(self._on_track_done)
             self._worker.finished.connect(self._on_finished)
+            self._update_close_btn()
 
     def _emit_status_update_rename(self):
         """Emit rename progress status to main window status bar."""
@@ -4443,6 +4868,7 @@ class RenamePopup(QDialog):
         self._track_lbl.setText('')
         self._btn_start.setEnabled(False)
         self._btn_cancel.setEnabled(True)
+        self._update_close_btn()
 
         worker = LibraryRenameWorker(self._tracks, pattern)
         thread = QThread(self)
@@ -4466,34 +4892,35 @@ class RenamePopup(QDialog):
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Cancelling…')
 
-    def _stop_thread(self):
-        """Cancel worker and wait for thread to finish (called before closing)."""
-        if self._worker:
-            self._worker.cancel()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        self._thread = None
-        self._worker = None
+    def _really_close(self):
+        """Actually close the dialog (bypassing the hide-guard in closeEvent)."""
+        self._force_close = True
+        self.reject()
 
     def _on_close(self):
-        # Hide the dialog but keep the thread running in background
-        self.hide()
+        if self._running:
+            # Hide the dialog but keep the thread running in background.
+            # Remove the application-wide event filter so the hidden dialog
+            # does not continue swallowing all mouse events.
+            QApplication.instance().removeEventFilter(self)
+            self.hide()
+        else:
+            # Nothing is running — just close the dialog
+            self._really_close()
 
     def closeEvent(self, e):
-        # Hide instead of closing - keeps thread alive
-        self.hide()
-        e.ignore()
-
-    def mousePressEvent(self, e):
-        # Clicking outside the popup (on the modal backdrop) hides it like "Run in Background"
-        if e.button() == Qt.MouseButton.LeftButton:
-            # Check if click is outside the dialog's geometry
-            if not self.rect().contains(e.pos()):
-                self.hide()
-                e.ignore()
-                return
-        super().mousePressEvent(e)
+        if getattr(self, '_force_close', False) or not self._running:
+            # Allow genuine close when not running.
+            # Always remove the event filter on a real close.
+            QApplication.instance().removeEventFilter(self)
+            self._force_close = False
+            e.accept()
+        else:
+            # Hide instead of closing — keeps thread alive.
+            # Remove the event filter so the hidden dialog does not swallow mouse events.
+            QApplication.instance().removeEventFilter(self)
+            self.hide()
+            e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
@@ -4517,7 +4944,7 @@ class RenamePopup(QDialog):
         self._log.addItem(item)
         self._log.scrollToBottom()
         # Store log item for background restoration
-        self._bg_log_items.append((item.text(), ok, old_name, new_path if ok else new_path))
+        self._bg_log_items.append((item.text(), ok, old_name, new_path if ok else ''))
 
     def _on_finished(self, renamed: int, total: int):
         self._running = False
@@ -4535,6 +4962,11 @@ class RenamePopup(QDialog):
         self._worker = None
         # Clear status bar message
         self._clear_status_update_rename()
+        self._update_close_btn()
+        # Invoke post-finish callback if wired by caller (e.g. _on_rename_btn)
+        cb = getattr(self, '_post_finish_cb', None)
+        if cb:
+            cb(renamed, total)
 
 
 
@@ -4573,7 +5005,7 @@ def parse_m3u(path: str) -> List[Track]:
     return out
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Scanner thread (unchanged)
+#  Scanner thread
 # ══════════════════════════════════════════════════════════════════════════════
 class ScanThread(QThread):
     done     = pyqtSignal(list, str)
@@ -4710,12 +5142,10 @@ class Player(QObject):
         self._viz_accumulated_el: int = 0     # total elapsed frames across burst messages since last render
         self._viz_has_new: bool = False       # GLib thread set; main thread clear
         self._viz_has_any: bool = False       # True once first spectrum arrives after load
-        self._viz_frame_pending: bool = False # GLib set; Qt clear — prevents queue buildup
         self._viz_mag_buf = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # latest raw magnitude
         self._viz_bh_pre  = _np.empty(VIZ_BANDS, dtype=_np.float32)         # work buffer
         self._viz_tmp_pre = _np.empty(VIZ_BANDS, dtype=_np.float32)         # work buffer
         self._viz_bar_buf = _np.zeros(VIZ_BANDS, dtype=_np.float32)  # published bar heights (pre-alloc)
-        self._viz_col_buf = _np.zeros(1, dtype=_np.float32)           # iw-sized, rebuilt in set_viz_tables
         self._overlay_needs_spec: bool = False
         self._last_parsed_serial: object = None
         self._viz_mag_field_idx: int = -1   # cached 'magnitude' field index in spectrum structure
@@ -4728,8 +5158,6 @@ class Player(QObject):
         self._silent_recovery: bool = False  # True during invisible stall recovery
         self._seek_retries: int = 0
         self._pos_timer_burst: int = 0
-        self._last_advance_wt: float = -1.0   # -1 = not yet set (legacy, kept for _play_pause reset)
-        self._last_advance_pos: float = -1.0  # -1 = not yet set (legacy)
         # Real GStreamer position stall tracking — uses actual queried values, not interpolated.
         # _apply_drift_correction updates these; detects pipeline freeze in ~700 ms.
         self._gst_pos_adv_ms: float = -1.0   # last GST query that showed genuine forward movement
@@ -4755,11 +5183,9 @@ class Player(QObject):
         self._pos_timer.timeout.connect(self._tick_pos)
         # After seek/resume, fire more frequently for the first few ticks
         self._pos_timer_burst = 0   # countdown: ticks remaining at fast (100ms) rate
-        self._tick_n = 0
         # GLib-thread drift correction: one idle query in flight at a time
         # _drift_pending guards both position and duration queries (single GLib slot).
         self._drift_pending: bool = False
-        self._drift_sched_wt: float = 0.0
         self._tick_last_wt:   float = -1.0
         self._resume_wt:      float = 0.0
         self._play_start_wt:  float = 0.0   # wall-clock of last play — for relative timestamps
@@ -4793,24 +5219,49 @@ class Player(QObject):
         self._current_fs = track.sample_rate if track.sample_rate > 0 else 48000
         self.sig_fs_changed.emit(self._current_fs)
 
-        # Build sink bin with EQ and spectrum
+        # Build sink bin with EQ (spectrum is tapped pre-volume via audio-filter below)
         sink_bin, eq_filters = self._make_sink_bin()
         if sink_bin:
             self._pipe.set_property('audio-sink', sink_bin)
             self._eq_filters = eq_filters
-            if self._has_spec:
-                self._spec_el = sink_bin.get_by_name('bp_spec')
+            # Apply current EQ settings
+            self._apply_eq_to_filters()
+
+        # Attach spectrum as audio-filter so it reads the signal BEFORE playbin's
+        # volume element.  This means bar heights reflect real acoustic amplitude and
+        # are never clipped by the threshold due to volume attenuation — eliminating
+        # the need for post-hoc dB compensation which loses data below MIN_DB.
+        # The spectrum element is a pure analyser: its src pad passes audio unchanged.
+        # Burst messages from large FLAC decode blocks (libFLAC 1.5.0 at 44.1 kHz/16-bit
+        # emits ~3 spectrum messages per 104 ms block) are handled in software:
+        # _store_spectrum accumulates elapsed frames; _compute_viz_frame applies
+        # alpha^N in one EMA step.  audiobuffersplit is intentionally omitted — it
+        # causes caps-negotiation failures on some format/codec combinations that
+        # result in silence, and its state-change locking can trigger pipeline crashes
+        # when tracks are switched or focus is lost.
+        self._spec_el = None
+        if self._has_spec:
+            spec_desc = (
+                f'audioconvert ! audio/x-raw,format=F32LE '
+                f'! spectrum name=bp_spec bands={GST_BANDS} '
+                f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
+                f'post-messages=false message-magnitude=true message-phase=false'
+                f' ! audioconvert'   # passthrough: restore caps flexibility for playsink
+            )
+            try:
+                spec_bin = Gst.parse_bin_from_description(spec_desc, True)
+                self._pipe.set_property('audio-filter', spec_bin)
+                self._spec_el = spec_bin.get_by_name('bp_spec')
                 if self._spec_el:
                     _need = self._viz_on or self._overlay_needs_spec
                     self._spec_el.set_property('post-messages', bool(_need))
-            # Apply current EQ settings
-            self._apply_eq_to_filters()
+            except Exception as e:
+                print(f'[Player] spectrum audio-filter creation failed: {e}')
 
         bus = self._pipe.get_bus()
         bus.add_signal_watch(); bus.connect('message', self._on_msg)
         self._pipe.set_state(Gst.State.PLAYING)
         self._playing = True; self._pos_timer.start()
-        self._tick_n = 0
         self._start_pos_burst(8)  # fast updates while prerolling
         if not self._silent_recovery:
             self._pos_playing = True
@@ -4833,8 +5284,6 @@ class Player(QObject):
                 pos_ms = int(self._pos_anchor_ms)
                 self._load_and_seek(self._last_filepath, pos_ms)
             return
-        if not self._playing:
-            self._play_start_wt = _monotonic()
         if self._playing:
             self._pipe.set_state(Gst.State.PAUSED)
             # Freeze anchor at current interpolated position before stopping clock
@@ -4845,6 +5294,7 @@ class Player(QObject):
             self._pause_ts = _monotonic()   # record pause time
             self.sig_playing.emit(False)
         else:
+            self._play_start_wt = _monotonic()
             # Non-blocking state query — avoids blocking the main (UI) thread.
             # VOID_PENDING means a transition is in progress; treat like PAUSED.
             _, st, pending = self._pipe.get_state(timeout=0)
@@ -4874,10 +5324,7 @@ class Player(QObject):
             # exactly where we froze.
             self._pos_anchor_wt = _monotonic()
             self._pos_playing = True
-            self._tick_n = 0
             # Reset stall tracking so detection window starts fresh after resume.
-            self._last_advance_wt  = _monotonic()
-            self._last_advance_pos = self.position_ms()
             self._gst_pos_adv_ms   = -1.0   # re-initialise on first post-resume drift query
             self._gst_pos_adv_wt   = -1.0
             # Fast pos updates for 2 s after resume so seekbar snaps immediately
@@ -4924,7 +5371,6 @@ class Player(QObject):
             self._pos_playing = False   # interpolation off until pipeline is live
             # Clear viz state so old frames don't bleed into the new pipeline
             self._viz_bar_buf[:] = 0.0
-            self._viz_col_buf[:] = 0.0
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = _monotonic() + 0.5   # 500 ms discard post-load
 
@@ -4932,8 +5378,6 @@ class Player(QObject):
         self._pause_ts = 0.0
         # Reset stall tracking — grace period comes from _reloading=True (1000 ms) set
         # by _resume_with_reload, which prevents _apply_drift_correction from firing.
-        self._last_advance_wt  = _monotonic() + 3.0   # legacy field; keep for play_pause reset
-        self._last_advance_pos = float(max(0, pos_ms))
         self._gst_pos_adv_ms   = -1.0   # re-initialise on first drift query after reload
         self._gst_pos_adv_wt   = -1.0
 
@@ -5062,7 +5506,6 @@ class Player(QObject):
             # the serial bump are tagged with the new serial and can be filtered.
             self._spec_serial += 1
             self._viz_spec[:] = MIN_DB
-            self._viz_col_buf[:] = 0.0
             self._viz_bar_buf[:] = 0.0
             self._viz_discard_until = _monotonic() + 0.15   # skip buffered pre-seek frames
             self._pipe.seek_simple(
@@ -5115,12 +5558,6 @@ class Player(QObject):
         self._viz_inertia = inertia
         self._viz_overlay_cb = overlay_cb
         self._viz_spec[:] = MIN_DB   # reset inertia on table change
-
-        if col_idx is not None:
-            iw = len(col_idx)
-            self._viz_col_buf  = _np.zeros(iw, dtype=_np.float32)
-        else:
-            self._viz_col_buf  = _np.zeros(1, dtype=_np.float32)
 
         # Build smooth entries as contiguous arrays once — avoid per-frame attribute
         # lookup and list iteration inside _compute_viz_frame.
@@ -5239,32 +5676,13 @@ class Player(QObject):
         return False
 
     def _make_sink_bin(self):
-        """Create a bin containing EQ (if any), spectrum (if available), and sink.
+        """Create a bin containing EQ (if any) and sink.
+           The spectrum element is wired separately as audio-filter (pre-volume) in load().
            Returns (bin, list_of_eq_filter_elements)."""
         elements = []
         eq_bin, eq_filters = self._create_eq_bin()
         if eq_bin:
             elements.append(eq_bin)
-
-        if self._has_spec:
-            # Burst messages from large FLAC decode blocks (libFLAC 1.5.0 at 44.1 kHz/16-bit
-            # emits ~3 spectrum messages per 104 ms block) are handled in software:
-            # _store_spectrum accumulates elapsed frames; _compute_viz_frame applies
-            # alpha^N in one EMA step.  audiobuffersplit is intentionally omitted — it
-            # causes caps-negotiation failures on some format/codec combinations that
-            # result in silence, and its state-change locking can trigger pipeline crashes
-            # when tracks are switched or focus is lost.
-            spec_desc = (
-                f'audioconvert ! audio/x-raw,format=F32LE '
-                f'! spectrum name=bp_spec bands={GST_BANDS} '
-                f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
-                f'post-messages=false message-magnitude=true message-phase=false'
-            )
-            try:
-                spec = Gst.parse_bin_from_description(spec_desc, True)
-                elements.append(spec)
-            except Exception as e:
-                print(f'[Player] spectrum creation failed: {e}')
 
         try:
             sink = Gst.parse_bin_from_description(self._out, True)
@@ -5419,7 +5837,6 @@ class Player(QObject):
             self._pos_playing   = False
             self._pos_anchor_ms = 0.0
             self._pos_anchor_wt = 0.0
-        self._tick_n        = 0
         self._eq_filters = []
         self._dur_ms_cached = 0
         self._seek_target_ns = 0
@@ -5429,7 +5846,6 @@ class Player(QObject):
         self._reload_guard   = False  # reset — WARNING-path guard
         if not self._silent_recovery:
             self._viz_bar_buf[:] = 0.0
-            self._viz_col_buf[:] = 0.0
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = 0.0
         self._viz_last_stream_time = -1
@@ -5437,8 +5853,6 @@ class Player(QObject):
         self._viz_has_new = False
         self._viz_has_any = False
         self._viz_mag_field_idx = -1   # reset field cache — new pipeline may differ
-        self._last_advance_wt  = -1.0
-        self._last_advance_pos = -1.0
         self._gst_pos_adv_ms   = -1.0
         self._gst_pos_adv_wt   = -1.0
         if was_playing and not self._silent_recovery:
@@ -5472,14 +5886,16 @@ class Player(QObject):
         _t1 = _monotonic()
         _tick_ms = (_t1 - _t0) * 1000.0
 
-        # Detect late tick — Qt timer fired significantly after its scheduled interval
-        _last = getattr(self, '_tick_last_wt', _t1)
+        # Detect late tick — Qt timer fired significantly after its scheduled interval.
+        # Skip when _tick_last_wt is the -1.0 sentinel (first tick ever).
+        _last = self._tick_last_wt
         _interval = self._pos_timer.interval()
-        _actual_gap_ms = (_t1 - _last) * 1000.0
-        if _actual_gap_ms > _interval + 60:
-            _pt = (_t1 - self._play_start_wt)
-            print(f'[DIAG][tick] play+{_pt:.3f}s  LATE FIRE: expected={_interval}ms actual={_actual_gap_ms:.1f}ms'
-                  f'  tick_work={_tick_ms:.2f}ms  pos={pos}ms', flush=True)
+        if _last >= 0.0:
+            _actual_gap_ms = (_t1 - _last) * 1000.0
+            if _actual_gap_ms > _interval + 60:
+                _pt = (_t1 - self._play_start_wt)
+                print(f'[DIAG][tick] play+{_pt:.3f}s  LATE FIRE: expected={_interval}ms actual={_actual_gap_ms:.1f}ms'
+                      f'  tick_work={_tick_ms:.2f}ms  pos={pos}ms', flush=True)
         self._tick_last_wt = _t1
 
         # Duration + drift correction — schedule a combined query on the GLib thread
@@ -5491,12 +5907,9 @@ class Player(QObject):
         # (_sig_dur_gst_ms, _sig_drift_gst_ms) which are thread-safe and deliver
         # to their handlers on the Qt main thread with zero blocking.
         # _drift_pending prevents overlapping queries if GLib is briefly busy.
-        tick_n = self._tick_n + 1
-        self._tick_n = tick_n
         if self._playing and self._pipe \
                 and self._pos_timer_burst == 0 and not self._drift_pending:
             self._drift_pending = True
-            self._drift_sched_wt = _t1   # record when we enqueued for round-trip measurement
             # timeout_add(1) instead of idle_add: schedules the callback to run
             # after the current GLib dispatch cycle completes (minimum 1 ms).
             # idle_add with PRIORITY_DEFAULT or HIGH can fire within the same
@@ -5505,12 +5918,10 @@ class Player(QObject):
             # A 1 ms timeout guarantees we exit the current callback stack first.
             GLib.timeout_add(1, self._drift_query_glib)
 
-        # ── Passive stall detection ───────────────────────────────────────────
-        # Catches cases where the pipeline silently dies (audio device change,
-        # Stall detection has moved to _apply_drift_correction which operates on
-        # real GStreamer-queried positions.  Checking position_ms() here was broken:
-        # that function returns an interpolated value that always advances while
-        # _pos_playing=True, so frozen pipelines were never detected.
+        # Stall detection runs in _apply_drift_correction which operates on real
+        # GStreamer-queried positions.  Checking interpolated position_ms() here was
+        # broken: that value always advances while _pos_playing=True, so frozen
+        # pipelines were never detected.
 
     def _drift_query_glib(self):
         """GLib thread: query pipeline position (drift) and duration if not yet cached."""
@@ -5712,7 +6123,7 @@ class Player(QObject):
         raw = None
         try:
             # Use cached field index when available
-            fi = getattr(self, '_viz_mag_field_idx', -1)
+            fi = self._viz_mag_field_idx
             if fi < 0:
                 n_fields = s.n_fields()
                 for i in range(n_fields):
@@ -5790,7 +6201,7 @@ class Player(QObject):
         ba = self._viz_ba
         bb = self._viz_bb
         bt = self._viz_bt
-        if ba is None or not self._viz_has_new:
+        if ba is None or bb is None or bt is None or not self._viz_has_new:
             return
         self._viz_has_new = False
 
@@ -5824,6 +6235,10 @@ class Player(QObject):
             _np.subtract(sp[bb], sp[ba], out=tmp)
             _np.multiply(tmp, bt, out=tmp)
             _np.add(sp[ba], tmp, out=bh)
+
+            # ── 2b. Volume compensation removed ──────────────────────────────
+            # Spectrum is now wired as audio-filter (pre-volume) so bar heights
+            # already reflect real acoustic amplitude.  No dB offset needed.
 
             # ── 3. Clip + normalise dB → [0, 1] ──────────────────────────────
             _np.clip(bh, MIN_DB, 0.0, out=bh)
@@ -6053,7 +6468,6 @@ class MprisServer(QObject):
         if not raw:
             self._delete_art_tmp()
             return None
-        import tempfile
         ext    = self._art_ext(raw)
         digest = hashlib.md5(raw).hexdigest()[:12]
         tmp_path = os.path.join(tempfile.gettempdir(),
@@ -6127,7 +6541,7 @@ class MprisServer(QObject):
         return False
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Seek slider (unchanged)
+#  Seek slider
 # ══════════════════════════════════════════════════════════════════════════════
 class SeekSlider(QSlider):
     def __init__(self, parent=None):
@@ -6137,25 +6551,33 @@ class SeekSlider(QSlider):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self._pressed = False
-        self.setStyleSheet(f"""
+        self._apply_seek_style(ACC, ACCH)
+
+    def _seek_qss(self, acc: str, acch: str) -> str:
+        r_grv = _r(2)   # groove 4 px tall → max 2 px
+        r_hdl = _r(9)   # handle 18 px → max 9 px (circle)
+        return f"""
             QSlider           {{ background: transparent; }}
             QSlider::groove:horizontal {{
-                background: rgba(80,80,80,160); height: 4px; border-radius: 2px;
+                background: rgba(80,80,80,160); height: 4px; border-radius: {r_grv}px;
             }}
-            QSlider::sub-page:horizontal {{ background: {ACC}; border-radius: 2px; }}
+            QSlider::sub-page:horizontal {{ background: {acc}; border-radius: {r_grv}px; }}
             QSlider::handle:horizontal {{
-                background: {BG4}; border: 2px solid {ACC};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
+                background: {BG4}; border: 2px solid {acc};
+                width: 18px; height: 18px; border-radius: {r_hdl}px; margin: -7px 0;
             }}
             QSlider::handle:horizontal:hover {{
-                background: {BG4}; border: 3px solid {ACCH};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
+                background: {BG4}; border: 3px solid {acch};
+                width: 18px; height: 18px; border-radius: {r_hdl}px; margin: -7px 0;
             }}
             QSlider::handle:horizontal:pressed {{
-                background: {BG4}; border: 3px solid {ACCH};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
+                background: {BG4}; border: 3px solid {acch};
+                width: 18px; height: 18px; border-radius: {r_hdl}px; margin: -7px 0;
             }}
-        """)
+        """
+
+    def _apply_seek_style(self, acc: str, acch: str):
+        self.setStyleSheet(self._seek_qss(acc, acch))
 
     def _val_at(self, x: float) -> int:
         return QStyle.sliderValueFromPosition(
@@ -6192,25 +6614,11 @@ class SeekSlider(QSlider):
             super().mouseReleaseEvent(e)
 
     def update_accent(self, acc: str, acch: str):
-        self.setStyleSheet(f"""
-            QSlider           {{ background: transparent; }}
-            QSlider::groove:horizontal {{
-                background: rgba(80,80,80,160); height: 4px; border-radius: 2px;
-            }}
-            QSlider::sub-page:horizontal {{ background: {acc}; border-radius: 2px; }}
-            QSlider::handle:horizontal {{
-                background: {BG4}; border: 2px solid {acc};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
-            }}
-            QSlider::handle:horizontal:hover {{
-                background: {BG4}; border: 3px solid {acch};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
-            }}
-            QSlider::handle:horizontal:pressed {{
-                background: {BG4}; border: 3px solid {acch};
-                width: 18px; height: 18px; border-radius: 9px; margin: -7px 0;
-            }}
-        """)
+        self._apply_seek_style(acc, acch)
+
+    def update_radius(self):
+        """Rebuild QSS when RAD_PCT changes."""
+        self._apply_seek_style(ACC, ACCH)
 
     def event(self, e: QEvent) -> bool:
         t = e.type()
@@ -6239,7 +6647,7 @@ class SeekSlider(QSlider):
         return super().event(e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Long-press filter (unchanged)
+#  Long-press filter
 # ══════════════════════════════════════════════════════════════════════════════
 class LongPressFilter(QObject):
     triggered = pyqtSignal(int, QPoint)
@@ -6288,7 +6696,7 @@ class LongPressFilter(QObject):
         if self._row >= 0: self.triggered.emit(self._row, self._gpos); self._row = -1
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Track table (unchanged)
+#  Track table
 # ══════════════════════════════════════════════════════════════════════════════
 COLS  = ['Length', 'Title', 'Artist', 'Album', 'Sample Rate', 'Bit Depth', 'Type']
 C_LEN=0; C_TIT=1; C_ART=2; C_ALB=3; C_SR=4; C_BD=5; C_TYP=6
@@ -6331,6 +6739,8 @@ class TrackTable(QTableWidget):
         hh.setStretchLastSection(False)
         # Ratios initialised to defaults; actual pixel widths applied in resizeEvent
         self._col_ratios = list(self._DEFAULT_COL_RATIOS)
+        self._user_dragging = False   # True while user is actively dragging a column divider
+        self._last_vp_w = -1          # last viewport width seen in resizeEvent
         self._row_h = 44   # tracks current desired row height; re-applied after setRowCount resets
         self.verticalHeader().setDefaultSectionSize(44)
         QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
@@ -6374,6 +6784,8 @@ class TrackTable(QTableWidget):
             item.setIcon(QIcon(pm))
 
     def _on_section_resized(self, _logical, _old, _new):
+        # Mark that user is actively dragging; suppress resizeEvent ratio restore
+        self._user_dragging = True
         # Debounce: only emit after user stops dragging for 400 ms
         self._col_resize_timer.start()
 
@@ -6384,6 +6796,7 @@ class TrackTable(QTableWidget):
             return
         ratios = [self.columnWidth(c) / total for c in range(len(COLS))]
         self._col_ratios = ratios
+        self._user_dragging = False   # drag finished, ratios committed
         self.col_widths_changed.emit(ratios)
 
     def _apply_ratios(self):
@@ -6406,6 +6819,14 @@ class TrackTable(QTableWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Don't overwrite user's drag with stored ratios while they're still dragging,
+        # and skip if viewport width hasn't actually changed (avoids spurious resets).
+        if self._user_dragging:
+            return
+        vp_w = self.viewport().width()
+        if vp_w == self._last_vp_w:
+            return
+        self._last_vp_w = vp_w
         self._apply_ratios()
 
     def restore_col_widths(self, ratios: list):
@@ -6875,7 +7296,7 @@ class GalleryView(QWidget):
         fm_artist = QFontMetrics(f_artist)
 
         cover_pad = 4          # padding around cover image inside card
-        cover_sz  = h - cover_pad * 2 - 4; cover_r = 4
+        cover_sz  = h - cover_pad * 2 - 4; cover_r = _r(6)
 
         for row in range(first_row, last_row + 1):
             for logical_col in range(self._n_cols):
@@ -6896,7 +7317,7 @@ class GalleryView(QWidget):
                     p.setBrush(QBrush(QColor(BG3)));  p.setPen(pen_hover)
                 else:
                     p.setBrush(QBrush(QColor(BG2)));  p.setPen(pen_border)
-                p.drawRoundedRect(rect, 8, 8)
+                p.drawRoundedRect(rect, _r(18), _r(18))
 
                 # Cover — drawn with uniform padding on all sides
                 cover_x = x + cover_pad + 2
@@ -7186,7 +7607,7 @@ class PlaylistPage(QWidget):
         self.table.update()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Sidebar (unchanged)
+#  Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
 class _PlaylistRowWidget(QWidget):
     """A sidebar playlist row: [label] [X btn] — delete button on the far right."""
@@ -7443,7 +7864,7 @@ class Sidebar(QWidget):
             self.remove_req.emit(idx)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Repeat button (unchanged)
+#  Repeat button
 # ══════════════════════════════════════════════════════════════════════════════
 def _ctrl(text, checkable=False, sz=44):
     b = QPushButton(text); b.setObjectName('ctrl')
@@ -7489,10 +7910,7 @@ class RepeatButton(QAbstractButton):
         p.end()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Control bar (with EQ button)
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-#  Full-screen toggle button (painted 4 outward arrows)
+#  Full-screen toggle button
 # ══════════════════════════════════════════════════════════════════════════════
 class _FullscreenBtn(QAbstractButton):
     """Draws 4 outward-pointing corner arrows; toggles on click."""
@@ -7615,7 +8033,8 @@ class ControlBar(QFrame):
 
     def __init__(self, player: Player, parent=None):
         super().__init__(parent)
-        self.setObjectName('ctrlbar'); self.setFixedHeight(172)
+        self.setObjectName('ctrlbar')
+        self.setMinimumHeight(110)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
         self._player    = player
@@ -7625,6 +8044,7 @@ class ControlBar(QFrame):
         self._overlay_viz_enabled = False
         self._overlay_open        = False   # True while BlackoutOverlay is visible
         self._log_scale = True
+        self._viz_type  = 'bars'   # 'bars' | 'line'
         self._bar_x0    = _np.zeros(VIZ_BANDS, dtype=_np.int32)
         self._col_bar   = _np.full(1, -1, dtype=_np.int32)  # (iw,) rebuilt in _precompute_bars
         self._col_has_bar  = _np.zeros(1, dtype=bool)          # (iw,) precomputed mask
@@ -7642,6 +8062,20 @@ class ControlBar(QFrame):
         self._seek_pending = False
         self._seek_gen    = 0
         self._delay_ms    = 0
+        # Numpy ring buffer for viz frame delay.
+        # At 60 fps and max delay 1000 ms we need at most ~62 slots; 70 gives headroom.
+        # Two pre-allocated arrays — no Python allocation per frame:
+        #   _viz_rbuf   (70, VIZ_BANDS) float32  — circular frame storage
+        #   _viz_rbuf_ts (70,)          float64  — wall-clock timestamp per slot
+        # _viz_rbuf_head: next write slot (mod 70); _viz_rbuf_count: valid slots filled.
+        _VIZ_RBUF_N = 70
+        self._viz_rbuf_n    = _VIZ_RBUF_N
+        self._viz_rbuf      = _np.zeros((_VIZ_RBUF_N, VIZ_BANDS), dtype=_np.float32)
+        self._viz_rbuf_ts   = _np.zeros(_VIZ_RBUF_N, dtype=_np.float64)
+        self._viz_rbuf_head = 0
+        self._viz_rbuf_count= 0
+        # Display buffer: delayed (or live) frame that paintEvent reads.
+        self._viz_display_buf = _np.zeros(VIZ_BANDS, dtype=_np.float32)
 
         # Paint pre-allocation — rebuilt in _precompute_bars / resizeEvent, reused every frame
         self._paint_bar_px      = _np.zeros(VIZ_BANDS, dtype=_np.int32)
@@ -7661,8 +8095,9 @@ class ControlBar(QFrame):
         self._settings_popup: Optional[SettingsPopup] = None
         self._eq_popup: Optional[EqPopup] = None
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(18,14,18,12); root.setSpacing(10)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(18,14,18,12); self._root_layout.setSpacing(10)
+        root = self._root_layout
 
         # Row 1: seek
         row1 = QHBoxLayout(); row1.setSpacing(6)
@@ -7724,14 +8159,14 @@ class ControlBar(QFrame):
         self.btn_next = _ctrl('⏭')
         self.btn_rep  = RepeatButton(self)
         _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
-               f' font-size:20px; border-radius:22px; padding:0; text-align:center; }}'
+               f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
                f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
                f'QPushButton#ctrl:checked {{ color:{ACC}; background:transparent; }}'
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self.btn_shuf, self.btn_prev, self.btn_next): b.setStyleSheet(_ts)
         self.btn_play.setStyleSheet(
             f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:26px;'
+            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
             f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
             f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
             f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
@@ -7836,8 +8271,8 @@ class ControlBar(QFrame):
             pop.show_center()
 
     def _on_eq_changed(self, bands, enabled):
+        self._player.set_eq_bands(bands)     # bands first: reload will use them immediately
         self._player.set_eq_enabled(enabled)
-        self._player.set_eq_bands(bands)
 
     # --- Settings popup ---
     def _ensure_settings_popup(self):
@@ -7849,6 +8284,7 @@ class ControlBar(QFrame):
             pop.delay_changed.connect(self._on_delay_change)
             pop.inertia_changed.connect(self._on_inertia_change)
             pop.brightness_changed.connect(self._on_brightness_change)
+            pop.viz_type_changed.connect(self._on_viz_type_change)
             pop.cover_toggled.connect(self._on_cover_toggle)
             pop.accent_changed.connect(self._on_accent_change)
             # lyrics_fetch_toggled gates LyricsPanel; no ControlBar handler needed
@@ -7871,6 +8307,7 @@ class ControlBar(QFrame):
             pop.lyric_fetch_action.connect(self._on_lyric_fetch_btn)
             pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
             pop.rename_toggled.connect(self._on_rename_btn)
+            pop.radius_changed.connect(self._on_radius_change)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
             # Auto-save on every setting change
@@ -7883,6 +8320,7 @@ class ControlBar(QFrame):
                 pop.overlay_scale_changed, pop.overlay_auto_open_toggled,
                 pop.overlay_timeout_changed, pop.view_mode_changed,
                 pop.list_scale_changed, pop.gallery_scale_changed,
+                pop.radius_changed,
             ]
             for sig in _save_sigs:
                 sig.connect(lambda *_: self.settings_changed.emit())
@@ -8004,6 +8442,12 @@ class ControlBar(QFrame):
             return
         
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
+        # Center popup to main window
+        win_geo = win.geometry()
+        dlg_geo = dlg.frameGeometry()
+        center_point = win_geo.center()
+        dlg_geo.moveCenter(center_point)
+        dlg.move(dlg_geo.topLeft())
         dlg.show()
 
     def _on_lyric_fetch_btn(self):
@@ -8026,6 +8470,12 @@ class ControlBar(QFrame):
             return
         
         dlg = LyricsFetchPopup(all_tracks, parent=win)
+        # Center popup to main window
+        win_geo = win.geometry()
+        dlg_geo = dlg.frameGeometry()
+        center_point = win_geo.center()
+        dlg_geo.moveCenter(center_point)
+        dlg.move(dlg_geo.topLeft())
         dlg.show()
 
     def _on_tag_fetch_btn(self):
@@ -8059,29 +8509,10 @@ class ControlBar(QFrame):
           2. Save config (known_paths, playlists)
           3. Rescan every known folder/m3u so the library reflects new filenames
         """
-        win = self.window()
-        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
-        if not all_tracks:
-            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
-            return
-        if self._settings_popup:
-            self._settings_popup.hide()
-        
-        # Check if there's already a rename operation running in background
-        existing = RenamePopup._active_worker
-        if existing:
-            old_instance, old_worker, old_thread = existing
-            # Show the existing popup instead of creating a new one
-            old_instance.show()
-            old_instance.raise_()
-            old_instance.activateWindow()
-            return
-        
-        dlg = RenamePopup(all_tracks, parent=win)
-        dlg.show()   # non-blocking - allows background operation
         
         def _on_rename_finished(renamed, total):
             """Handle rename completion after dialog finishes."""
+            win = self.window()
             rename_map = dlg.rename_map
             if not rename_map:
                 return   # nothing was renamed — no need to rescan
@@ -8125,8 +8556,28 @@ class ControlBar(QFrame):
             if hasattr(win, '_lib_page') and win._lib_page:
                 win._lib_page.rescan_all()
 
-        if dlg._worker:
-            dlg._worker.finished.connect(_on_rename_finished)
+        win = self.window()
+        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
+        if not all_tracks:
+            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
+            return
+        if self._settings_popup:
+            self._settings_popup.hide()
+        
+        # Check if there's already a rename operation running in background
+        existing = RenamePopup._active_worker
+        if existing:
+            old_instance, old_worker, old_thread = existing
+            # Show the existing popup instead of creating a new one
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+        
+        dlg = RenamePopup(all_tracks, parent=win)
+        
+        dlg._post_finish_cb = _on_rename_finished   # called by _on_finished when complete
+        dlg.show()   # non-blocking - allows background operation
 
     def _toggle_fullscreen(self):
         win = self.window()
@@ -8213,7 +8664,15 @@ class ControlBar(QFrame):
         pop.set_cover_fetch(_cf)
         global _cover_fetch_on; _cover_fetch_on = _cf
         self._player.set_volume(volume / 100)
+        # Corner radius — restore before theme so the first stylesheet is correct
+        _rad = int(float(cfg.get('corner_radius', RAD_PCT)))
+        pop.set_radius(_rad)
+        self._on_radius_change(_rad)
+
         # Theme (dark/light) — load before accent so the stylesheet is correct
+        _vtype = cfg.get('viz_type', 'bars')
+        pop.set_viz_type(_vtype)
+        self._on_viz_type_change(_vtype)
         _dark = cfg.get('dark_mode', True)
         pop.set_dark_mode(_dark)
         if not _dark:
@@ -8273,7 +8732,9 @@ class ControlBar(QFrame):
                     'view_mode': pop.view_mode(),
                     'list_scale': pop.list_scale(),
                     'gallery_scale': pop.gallery_scale(),
-                    'dark_mode': pop.dark_mode_on()})
+                    'dark_mode': pop.dark_mode_on(),
+                    'viz_type': pop.viz_type(),
+                    'corner_radius': pop.radius()})
         eq_pop = self._ensure_eq_popup()
         cfg['eq_profiles'] = eq_pop.get_profiles()
         default_bands, default_enabled = eq_pop.get_default()
@@ -8281,8 +8742,6 @@ class ControlBar(QFrame):
         cfg['default_eq_enabled'] = default_enabled
         cfg['default_eq_profile'] = eq_pop.get_default_name()
         return cfg
-
-    # Rest of ControlBar methods (unchanged)...
 
     def _precompute_bars(self):
         iw = self.width()
@@ -8294,47 +8753,45 @@ class ControlBar(QFrame):
         total_used = bw * VIZ_BANDS + (VIZ_BANDS - 1)
         offset = max(0, (iw - total_used) // 2)   # center the bar group
 
-        bar_x0_list = [offset + i * (bw + 1) for i in range(VIZ_BANDS)]
-        self._bar_x0 = _np.array(bar_x0_list, dtype=_np.int32)
-        self._bar_bw = bw
+        # ── Bar x0 array — vectorized ─────────────────────────────────────────────
+        bar_x0 = (_np.arange(VIZ_BANDS, dtype=_np.int32) * (bw + 1) + offset)
+        self._bar_x0 = bar_x0
+        self._bar_bw  = bw
 
-        # ── Column→bar mapping ────────────────────────────────────────────────
+        # ── Column→bar mapping — fully vectorized (no Python loop) ────────────────
         col_bar = _np.full(iw, -1, dtype=_np.int32)
-        for i, x0 in enumerate(bar_x0_list):
-            col_bar[x0:x0+bw] = i
-        # col_bar: column→bar index mapping, also used for vectorized paint
-        self._col_bar = col_bar   # (iw,) int32, -1 = gap
-        # Precompute safe-index and mask arrays used every frame in paintEvent
-        self._col_has_bar = (col_bar >= 0)               # (iw,) bool
-        self._col_bar_safe = _np.maximum(col_bar, 0)     # (iw,) int32, no negatives
+        bar_cols = (bar_x0[:, None]
+                    + _np.arange(bw, dtype=_np.int32)[None, :]).ravel()
+        bar_ids  = _np.repeat(_np.arange(VIZ_BANDS, dtype=_np.int32), bw)
+        in_bounds = bar_cols < iw
+        col_bar[bar_cols[in_bounds]] = bar_ids[in_bounds]
+        self._col_bar      = col_bar
+        self._col_has_bar  = (col_bar >= 0)
+        self._col_bar_safe = _np.maximum(col_bar, 0)
 
-        # ── Cap pixel offset arrays (precomputed once per bw, reused every frame) ──
-        # For each pixel (row, col) inside the semicircular cap region, store the
-        # (row_delta, col_delta) offsets from the bar's top-left corner.
-        # paintEvent broadcasts these across all eligible bars with pure numpy indexing
-        # — zero Python loops at 60fps.
-        #
-        # Cap geometry: semicircle of integer radius = bw//2.
-        #   circle centre at y = -0.5 (just above row 0), x = (bw-1)/2
-        #   row 0 → narrowest (near top); row radius-1 → widest (near equator)
+        # ── Cap pixel offset arrays — fully vectorized ────────────────────────────
         radius = bw // 2
         if radius > 0 and bw >= 2:
-            cx  = (bw - 1) * 0.5
-            r2  = float(radius * radius)
-            r_offs, c_offs = [], []
-            for row in range(radius):
-                dy  = radius - row - 0.5
-                dx2 = r2 - dy * dy
-                if dx2 > 0.0:
-                    dx = math.sqrt(dx2)
-                    xl = max(0,  int(math.ceil (cx - dx)))
-                    xr = min(bw, int(math.floor(cx + dx)) + 1)
-                    for col in range(xl, xr):
-                        r_offs.append(row)
-                        c_offs.append(col)
-            if r_offs:
-                self._cap_r_offsets = _np.array(r_offs, dtype=_np.int32)
-                self._cap_c_offsets = _np.array(c_offs, dtype=_np.int32)
+            cx   = (bw - 1) * 0.5
+            r2   = float(radius * radius)
+            rows = _np.arange(radius, dtype=_np.float64)
+            dy   = radius - rows - 0.5
+            dx2  = r2 - dy * dy
+            valid = dx2 > 0.0
+            if valid.any():
+                row_v = rows[valid].astype(_np.int32)
+                dx_v  = _np.sqrt(dx2[valid])
+                xl_v  = _np.maximum(0,  _np.ceil (cx - dx_v).astype(_np.int32))
+                xr_v  = _np.minimum(bw, _np.floor(cx + dx_v).astype(_np.int32) + 1)
+                widths = (xr_v - xl_v).astype(_np.int32)
+                total  = int(widths.sum())
+                # Build col offsets: for each row ri, cols = xl_v[ri] + [0..widths[ri]-1]
+                cum = _np.zeros(len(widths) + 1, dtype=_np.int32)
+                _np.cumsum(widths, out=cum[1:])
+                col_range  = _np.arange(total, dtype=_np.int32)
+                group_off  = _np.repeat(cum[:-1], widths)
+                self._cap_r_offsets = _np.repeat(row_v, widths)
+                self._cap_c_offsets = _np.repeat(xl_v, widths) + (col_range - group_off)
                 self._cap_radius    = radius
             else:
                 self._cap_r_offsets = _np.empty(0, dtype=_np.int32)
@@ -8348,54 +8805,56 @@ class ControlBar(QFrame):
         # ── Freq mapping and smooth tables ────────────────────────────────────
         if getattr(self, '_log_scale', True):
             F_MIN = 20.0; F_MAX = 20000.0
-            FS_HALF = self._player.current_fs / 2.0  # Nyquist of actual pipeline fs
+            FS_HALF = self._player.current_fs / 2.0
             FULL_HZ = 20.0; FADE_HZ = 60.0
             log_min = math.log10(F_MIN); log_max = math.log10(F_MAX)
-            fracs = []; fc_hz = []
-            for d in range(VIZ_BANDS):
-                f_lo = 10.0 ** (log_min + d / VIZ_BANDS * (log_max - log_min))
-                f_hi = 10.0 ** (log_min + (d+1) / VIZ_BANDS * (log_max - log_min))
-                fc = (f_lo * f_hi) ** 0.5
-                fracs.append(fc * GST_BANDS / FS_HALF)
-                fc_hz.append(fc)
-            interp = []
-            for frac in fracs:
-                b0 = max(0, min(GST_BANDS-1, int(frac)))
-                b1 = min(b0+1, GST_BANDS-1)
-                interp.append((b0, b1, frac - int(frac)))
-            b0s = [int(f) for f in fracs]
-            run_len_at = {}
-            d = 0
-            while d < VIZ_BANDS:
-                b0 = b0s[d]; start = d
-                while d < VIZ_BANDS and b0s[d] == b0: d += 1
-                for k in range(start, d): run_len_at[k] = d - start
+
+            # ── Vectorized freq array ─────────────────────────────────────────
+            d_arr     = _np.arange(VIZ_BANDS, dtype=_np.float64)
+            log_range = log_max - log_min
+            f_lo      = _np.power(10.0, log_min + d_arr / VIZ_BANDS * log_range)
+            f_hi      = _np.power(10.0, log_min + (d_arr + 1) / VIZ_BANDS * log_range)
+            fc_hz_arr = _np.sqrt(f_lo * f_hi)
+            fracs_arr = fc_hz_arr * GST_BANDS / FS_HALF
+
+            # ── Vectorized interp tables ──────────────────────────────────────
+            ba_arr = _np.clip(fracs_arr.astype(_np.int32), 0, GST_BANDS - 1)
+            bb_arr = _np.minimum(ba_arr + 1, GST_BANDS - 1)
+            bt_arr = (fracs_arr - ba_arr.astype(_np.float64)).astype(_np.float32)
+
+            # ── Vectorized run_len_at ─────────────────────────────────────────
+            changes  = _np.concatenate(([True], ba_arr[1:] != ba_arr[:-1], [True]))
+            run_ends = _np.flatnonzero(changes)         # boundaries between runs
+            run_lens = _np.diff(run_ends)               # length of each run
+            run_id   = (_np.searchsorted(run_ends[:-1],
+                         _np.arange(VIZ_BANDS, dtype=_np.int32),
+                         side='right') - 1)
+            run_len_arr = run_lens[run_id]              # (VIZ_BANDS,) run length per bar
+
+            fc_hz_list  = fc_hz_arr.tolist()
+            run_len_list = run_len_arr.tolist()
             smooth_w = []
             for d in range(VIZ_BANDS):
-                fc = fc_hz[d]; rl = run_len_at.get(d, 1)
+                fc = fc_hz_list[d]; rl = run_len_list[d]
                 if fc >= FADE_HZ or rl <= 1:
                     smooth_w.append(None)
                 else:
                     strength = (1.0 if fc < FULL_HZ
                                 else 1.0 - (fc - FULL_HZ) / (FADE_HZ - FULL_HZ))
                     hw = max(1, int((rl // 2) * strength))
-                    lo = max(0, d - hw); hi = min(VIZ_BANDS-1, d + hw)
+                    lo = max(0, d - hw); hi = min(VIZ_BANDS - 1, d + hw)
                     n  = hi - lo + 1
-                    smooth_w.append(tuple((nb, 1.0/n) for nb in range(lo, hi+1)))
+                    smooth_w.append(tuple((nb, 1.0 / n) for nb in range(lo, hi + 1)))
         else:
-            _fs_half = self._player.current_fs / 2.0  # Nyquist of actual pipeline fs
-            _lin_scale = (20000.0 / _fs_half) * GST_BANDS / VIZ_BANDS
-            interp = []
-            for d in range(VIZ_BANDS):
-                frac = d * _lin_scale
-                b0 = max(0, min(GST_BANDS-1, int(frac)))
-                b1 = min(b0+1, GST_BANDS-1)
-                interp.append((b0, b1, frac - int(frac)))
-            smooth_w = []
+            FS_HALF   = self._player.current_fs / 2.0
+            lin_scale = (20000.0 / FS_HALF) * GST_BANDS / VIZ_BANDS
 
-        ba_arr = _np.array([x[0] for x in interp], dtype=_np.int32)
-        bb_arr = _np.array([x[1] for x in interp], dtype=_np.int32)
-        bt_arr = _np.array([x[2] for x in interp], dtype=_np.float32)
+            # ── Vectorized linear interp ──────────────────────────────────────
+            fracs_arr = _np.arange(VIZ_BANDS, dtype=_np.float64) * lin_scale
+            ba_arr    = _np.clip(fracs_arr.astype(_np.int32), 0, GST_BANDS - 1)
+            bb_arr    = _np.minimum(ba_arr + 1, GST_BANDS - 1)
+            bt_arr    = (fracs_arr - ba_arr.astype(_np.float64)).astype(_np.float32)
+            smooth_w  = []
 
         entries = []
         for d, sw in enumerate(smooth_w):
@@ -8411,6 +8870,24 @@ class ControlBar(QFrame):
         )
 
         self._paint_bar_px     = _np.zeros(VIZ_BANDS, dtype=_np.int32)
+
+        # ── Line-mode: cache per-width arrays (avoid per-frame allocation) ────────
+        # All of these are constant for a given widget width. Computed once here
+        # (on resize/init) so paintEvent allocates nothing for the interpolation step.
+        self._line_col_x_i = _np.arange(iw, dtype=_np.int32)   # column indices for buf[y, col]
+        self._line_cy_buf  = _np.empty(VIZ_BANDS, dtype=_np.float64)  # reusable (ih - bar_px) buf
+        self._line_y_int   = _np.empty(iw, dtype=_np.int32)     # reusable per-column y output
+
+        # Precompute uniform linear-interp tables that replace np.interp per frame.
+        # cx_arr = linspace(0, iw-1, VIZ_BANDS) is uniform, so the mapping
+        #   bin_f[x] = x * (VIZ_BANDS-1) / (iw-1)
+        # can be split into cached integer floor (bin_i) and fractional part (bin_f)
+        # arrays — both of shape (iw,).  Per frame: two gathers + one fused-multiply-add.
+        _bin_scale        = float(VIZ_BANDS - 1) / max(1, iw - 1)
+        _bf               = _np.arange(iw, dtype=_np.float32) * _bin_scale
+        self._line_bin_i  = _np.clip(_bf.astype(_np.int32), 0, VIZ_BANDS - 2)
+        self._line_bin_i1 = self._line_bin_i + 1                         # (iw,) int32
+        self._line_bin_f  = (_bf - self._line_bin_i).astype(_np.float32) # (iw,) frac [0,1)
 
     def _start_render_timer(self):
         """Start the fixed-rate render timer with a fresh deadline."""
@@ -8429,7 +8906,6 @@ class ControlBar(QFrame):
             if not self._overlay_viz_enabled:
                 self._render_timer.stop()
             self._player._viz_spec[:] = MIN_DB
-            self._player._viz_col_buf[:] = 0.0
         self.update()
 
     def _on_log_toggle(self, on: bool):
@@ -8439,6 +8915,11 @@ class ControlBar(QFrame):
 
     def _on_delay_change(self, v: int):
         self._delay_ms = v
+        # Reset ring buffer so stale frames from the old delay don't linger.
+        # The buffer will fill within ~70 frames (≈1 s at 60 fps); until then
+        # _render_tick mirrors the live frame directly (best_idx == -1 path).
+        self._viz_rbuf_head  = 0
+        self._viz_rbuf_count = 0
 
     def _overlay_cb(self, bh_list):
         """Called from GLib thread when overlay viz is active."""
@@ -8482,6 +8963,89 @@ class ControlBar(QFrame):
         self._brush_cache = QBrush(tint)
         self.update()
 
+    def _on_viz_type_change(self, vtype: str):
+        self._viz_type = vtype
+        # Invalidate pixel buffer so line mode allocates a fresh ARGB buffer
+        self._px_shape = (0, 0)
+        self.update()
+
+    def _on_radius_change(self, v: int):
+        """User moved the Corners slider.
+
+        During live interaction (window visible): show a full-screen overlay
+        immediately, then debounce the heavy stylesheet rebuild so it fires
+        once after the user stops dragging — not on every pixel.
+
+        During config restore (window not yet visible): apply silently and
+        immediately so the first paint already has the correct radii.
+        """
+        global RAD_PCT
+        RAD_PCT = max(0, min(100, v))
+
+        # Lazily create the debounce timer once
+        if not hasattr(self, '_radius_debounce'):
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(300)
+            t.timeout.connect(self._radius_apply)
+            self._radius_debounce = t
+
+        win = self.window()
+        if win is not None and win.isVisible():
+            # Live user interaction — show overlay on first touch, then debounce
+            if not getattr(self, '_radius_overlay', None):
+                ov = _SpinningOverlay(win)
+                ov.show(); ov.raise_()
+                QApplication.processEvents()   # let overlay paint before heavy work
+                self._radius_overlay = ov
+            self._radius_debounce.start()
+        else:
+            # Config restore / pre-show — apply immediately, no overlay
+            self._radius_debounce.stop()
+            self._radius_apply()
+
+    def _radius_apply(self):
+        """Heavy part: rebuild every radius-bearing stylesheet, then dismiss overlay."""
+        global SS
+        SS = make_stylesheet(ACC, ACCH)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(SS)
+        # Rebuild seek slider QSS (has inline border-radius, not covered by global SS)
+        self._seek.update_radius()
+        # Inline play/ctrl button stylesheets — refresh with new radii
+        _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
+               f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
+               f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
+               f'QPushButton#ctrl:checked {{ color:{ACC}; background:transparent; }}'
+               f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
+        for b in (self.btn_shuf, self.btn_prev, self.btn_next):
+            b.setStyleSheet(_ts)
+        self.btn_play.setStyleSheet(
+            f'QPushButton#play {{ background:{BG3}; color:{ACC};'
+            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
+            f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
+            f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
+            f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH}; background:{BG4}; }}'
+            f'QPushButton#play:pressed {{ background:{BG4}; }}')
+        # Accent swatch border-radius
+        pop = self._settings_popup
+        if pop is not None:
+            pop._accent_btn.setStyleSheet(
+                f'QPushButton#accent_swatch {{'
+                f'  background:{ACC}; border-radius:{_r(16)}px; border:2px solid #666;'
+                f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
+                f'  padding:0;'
+                f'}}')
+        # TagEditDialog is transient — no refresh needed here
+        # All ToggleSwitch widgets repaint automatically from globals on next update()
+        self.update()
+        # Dismiss overlay (present only during live user interaction)
+        ov = getattr(self, '_radius_overlay', None)
+        if ov is not None:
+            ov.close_overlay()
+            self._radius_overlay = None
+
     def _on_accent_change(self, color: str):
         global ACC, ACCH, SS
         ACC  = color
@@ -8496,7 +9060,7 @@ class ControlBar(QFrame):
             except Exception: pass
         # Refresh inline-styled widgets (transport buttons use palette globals directly)
         _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
-               f' font-size:20px; border-radius:22px; padding:0; text-align:center; }}'
+               f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
                f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
                f'QPushButton#ctrl:checked {{ color:{ACC}; background:transparent; }}'
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
@@ -8504,7 +9068,7 @@ class ControlBar(QFrame):
             b.setStyleSheet(_ts)
         self.btn_play.setStyleSheet(
             f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:26px;'
+            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
             f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
             f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
             f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
@@ -8524,7 +9088,6 @@ class ControlBar(QFrame):
         self._seek_gen += 1
         self._seek_pending = True
         self._player._viz_spec[:] = MIN_DB
-        self._player._viz_col_buf[:] = 0.0
         self._player._viz_bar_buf[:] = 0.0
         # Force 150ms discard window in GLib thread too
         self._player._viz_discard_until = _monotonic() + 0.15
@@ -8539,7 +9102,6 @@ class ControlBar(QFrame):
         if self._viz_paused:
             self._render_timer.stop()
             self._player._viz_spec[:] = MIN_DB
-            self._player._viz_col_buf[:] = 0.0
             self.update()
         elif (self._viz_on or self._overlay_viz_enabled) and self._player.playing:
             self._start_render_timer()
@@ -8565,12 +9127,50 @@ class ControlBar(QFrame):
         if (_now - self._render_last_wt) < _FRAME_S * 0.85:
             return
         self._render_last_wt = _now
+
+        # ── Delay: ring-buffer the viz frames, expose the one delay_ms in the past ─
+        # Same offset as _on_pos_for_lyrics so viz and lyrics stay in sync.
+        delay_ms = self._delay_ms
+        src      = self._player._viz_bar_buf
+        if delay_ms > 0:
+            N    = self._viz_rbuf_n
+            head = self._viz_rbuf_head
+            # Write current frame into the ring buffer (in-place, no allocation).
+            self._viz_rbuf[head]   = src
+            self._viz_rbuf_ts[head] = _now
+            self._viz_rbuf_head    = (head + 1) % N
+            self._viz_rbuf_count   = min(self._viz_rbuf_count + 1, N)
+            # Scan valid slots for the most-recent frame that is >= delay_ms old.
+            # Scanning up to 70 slots at 60 fps is negligible vs the rest of render.
+            target_t = _now - delay_ms * 0.001
+            count    = self._viz_rbuf_count
+            best_idx = -1
+            best_t   = -1.0
+            for i in range(count):
+                slot_t = self._viz_rbuf_ts[i]
+                if slot_t <= target_t and slot_t > best_t:
+                    best_t   = slot_t
+                    best_idx = i
+            if best_idx >= 0:
+                _np.copyto(self._viz_display_buf, self._viz_rbuf[best_idx])
+            # else: buffer not filled enough yet — keep previous display frame
+        else:
+            # No delay — reset ring buffer and mirror live frame directly.
+            self._viz_rbuf_head  = 0
+            self._viz_rbuf_count = 0
+            _np.copyto(self._viz_display_buf, src)
+
         if self._viz_on:
             self.update()
 
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        # Scale vertical margins so content never clips when bar is short
+        h = self.height()
+        v_margin = max(4, min(14, (h - 110) * 14 // 62))  # 0→4px at 110, 14px at 172+
+        self._root_layout.setContentsMargins(18, v_margin, 18, v_margin)
+        self._root_layout.setSpacing(max(2, min(10, (h - 110) * 10 // 62)))
         # Recompute bar/cap geometry — debounced so resize drags don't thrash numpy
         self._resize_timer.start()
 
@@ -8583,7 +9183,7 @@ class ControlBar(QFrame):
             return
 
         if self._viz_on and not self._viz_paused:
-            bh = self._player._viz_bar_buf
+            bh = self._viz_display_buf
 
             if self._player._viz_has_any and len(bh) == VIZ_BANDS:
                 bc = self._bar_color
@@ -8603,6 +9203,170 @@ class ControlBar(QFrame):
                     self._viz_brush_bg = QBrush(QColor(BG))
                     # invalidate pixel buffer so it is reallocated with new colors
                     self._px_shape = (0, 0)
+
+                if getattr(self, '_viz_type', 'bars') == 'fill':
+                    # ── FILL MODE ─────────────────────────────────────────────
+                    bar_px_arr = self._paint_bar_px
+                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+
+                    col_has = self._col_has_bar
+                    if len(col_has) != iw:
+                        p.end()
+                        return
+
+                    if self._px_shape != (ih, iw):
+                        self._px_buf   = _np.full((ih, iw), self._px_bg, dtype=_np.uint32)
+                        self._px_qimg  = QImage(self._px_buf.data, iw, ih,
+                                                iw * 4, QImage.Format.Format_ARGB32_Premultiplied)
+                        self._px_shape   = (ih, iw)
+                        self._px_col_y0  = _np.full(iw, ih, dtype=_np.int32)
+                        self._px_row_idx = _np.arange(ih, dtype=_np.int32)[:, _np.newaxis]
+
+                    buf = self._px_buf
+                    buf[:] = self._px_bg
+
+                    cx_arr = _np.linspace(0, iw - 1, len(bar_px_arr), dtype=_np.float64)
+                    cy_arr = (ih - bar_px_arr).astype(_np.float64)
+                    col_x      = _np.arange(iw, dtype=_np.float64)
+                    line_y     = _np.interp(col_x, cx_arr, cy_arr)
+                    line_y_int = _np.clip(line_y.astype(_np.int32), 0, ih - 1)
+
+                    fill_mask = self._px_row_idx >= line_y_int
+                    buf[fill_mask] = self._px_bar
+
+                    p.drawImage(0, 0, self._px_qimg)
+                    p.setPen(QPen(QColor(BORD), 1))
+                    p.drawLine(0, 0, iw, 0)
+                    p.end()
+                    return
+
+                if getattr(self, '_viz_type', 'bars') == 'line':
+                    # ── LINE MODE — pixel-buffer + Bresenham span fill ─────────
+                    # No AA QPainter overhead; gaps on steep slopes are filled by
+                    # drawing a vertical span between each pair of consecutive y
+                    # values (classic connected-line rasterisation).
+                    # np.interp replaced by a cached-index manual lerp — zero
+                    # extra allocation for the interpolation tables.
+                    bar_px_arr = self._paint_bar_px
+                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+
+                    if len(self._col_has_bar) != iw:
+                        p.end()
+                        return
+
+                    # ── Interpolation: VIZ_BANDS → iw y-positions ─────────────
+                    # Manual lerp with pre-cached bin_i / bin_f / bin_i1 arrays.
+                    # cy_buf reused in-place (no allocation).
+                    cy_buf = self._line_cy_buf
+                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
+                    # line_y_f = cy[bin_i] + frac * (cy[bin_i+1] - cy[bin_i])
+                    line_y_f = (cy_buf[self._line_bin_i]
+                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
+                                                      - cy_buf[self._line_bin_i]))
+                    line_y_i = line_y_f.astype(_np.int32)
+                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)   # in-place, no alloc
+
+                    # ── Pixel buffer — reallocate only on resize / color change ─
+                    if self._px_shape != (ih, iw):
+                        self._px_buf  = _np.empty((ih, iw), dtype=_np.uint32)
+                        self._px_qimg = QImage(self._px_buf.data, iw, ih,
+                                               iw * 4,
+                                               QImage.Format.Format_ARGB32_Premultiplied)
+                        self._px_shape = (ih, iw)
+
+                    buf    = self._px_buf
+                    col_i  = self._line_col_x_i
+                    px_bar = self._px_bar
+                    buf[:] = self._px_bg
+
+                    # ── Main line: one pixel per column ───────────────────────
+                    buf[line_y_i, col_i] = px_bar
+
+                    # ── Gap fill: steep columns get a vertical span ────────────
+                    # For every adjacent pair where |Δy| > 1, fill all rows
+                    # between the two y values so the line is visually connected.
+                    # In a smooth audio viz only a handful of columns are steep,
+                    # so this Python loop runs very few iterations per frame.
+                    dy    = _np.diff(line_y_i)                    # (iw-1,) int32
+                    steep = _np.flatnonzero(_np.abs(dy) > 1)
+                    for idx in steep:
+                        y0 = int(line_y_i[idx])
+                        y1 = int(line_y_i[idx + 1])
+                        if y0 > y1: y0, y1 = y1, y0
+                        buf[y0:y1 + 1, idx + 1] = px_bar
+
+                    p.drawImage(0, 0, self._px_qimg)
+                    p.setPen(QPen(QColor(BORD), 1))
+                    p.drawLine(0, 0, iw, 0)
+                    p.end()
+                    return
+
+                if getattr(self, '_viz_type', 'bars') == 'line+fill':
+                    # ── LINE+FILL MODE — fill beneath the line + line on top ────
+                    bar_px_arr = self._paint_bar_px
+                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+
+                    if len(self._col_has_bar) != iw:
+                        p.end()
+                        return
+
+                    # Interpolate VIZ_BANDS → iw y-positions (same as line mode)
+                    cy_buf = self._line_cy_buf
+                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
+                    line_y_f = (cy_buf[self._line_bin_i]
+                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
+                                                      - cy_buf[self._line_bin_i]))
+                    line_y_i = line_y_f.astype(_np.int32)
+                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)
+
+                    # Pixel buffer — reallocate only on resize / color change
+                    if self._px_shape != (ih, iw):
+                        self._px_buf   = _np.full((ih, iw), self._px_bg, dtype=_np.uint32)
+                        self._px_qimg  = QImage(self._px_buf.data, iw, ih,
+                                                iw * 4, QImage.Format.Format_ARGB32_Premultiplied)
+                        self._px_shape   = (ih, iw)
+                        self._px_col_y0  = _np.full(iw, ih, dtype=_np.int32)
+                        self._px_row_idx = _np.arange(ih, dtype=_np.int32)[:, _np.newaxis]
+
+                    buf = self._px_buf
+                    buf[:] = self._px_bg
+
+                    # Fill colour — semi-transparent version of bar color (40% alpha blend onto BG)
+                    _bc = self._bar_color
+                    _bgc_r = (self._px_bg >> 16) & 0xFF
+                    _bgc_g = (self._px_bg >> 8)  & 0xFF
+                    _bgc_b =  self._px_bg         & 0xFF
+                    _alpha = 0.38
+                    _fill_r = int(_bgc_r + (_bc.red()   - _bgc_r) * _alpha)
+                    _fill_g = int(_bgc_g + (_bc.green() - _bgc_g) * _alpha)
+                    _fill_b = int(_bgc_b + (_bc.blue()  - _bgc_b) * _alpha)
+                    px_fill = (0xFF << 24 | _fill_r << 16 | _fill_g << 8 | _fill_b)
+
+                    # ── Fill: all rows at or below the line y ──────────────────
+                    fill_mask = self._px_row_idx >= line_y_i
+                    buf[fill_mask] = px_fill
+
+                    # ── Line: one pixel per column on top of fill ──────────────
+                    col_i  = self._line_col_x_i
+                    px_bar = self._px_bar
+                    buf[line_y_i, col_i] = px_bar
+
+                    # ── Gap fill for steep columns ─────────────────────────────
+                    dy    = _np.diff(line_y_i)
+                    steep = _np.flatnonzero(_np.abs(dy) > 1)
+                    for idx in steep:
+                        y0 = int(line_y_i[idx])
+                        y1 = int(line_y_i[idx + 1])
+                        if y0 > y1: y0, y1 = y1, y0
+                        buf[y0:y1 + 1, idx + 1] = px_bar
+
+                    p.drawImage(0, 0, self._px_qimg)
+                    p.setPen(QPen(QColor(BORD), 1))
+                    p.drawLine(0, 0, iw, 0)
+                    p.end()
+                    return
+
+                # ── BARS MODE (original pixel-buffer path) ────────────────────
 
                 # ── Pixel buffer — reallocate only on resize or color change ───
                 if self._px_shape != (ih, iw):
@@ -8689,12 +9453,11 @@ class ControlBar(QFrame):
             self._seek_gen += 1
             self._render_timer.stop()
             self._player._viz_spec[:] = MIN_DB
-            self._player._viz_col_buf[:] = 0.0
             self._player._viz_bar_buf[:] = 0.0
             self.update()
             _bref = getattr(self, '_blackout_ref', None)
             if _bref is not None and getattr(_bref, '_ov_viz', False):
-                _bref.push_viz_frame([0.0] * VIZ_BANDS)
+                _bref.push_viz_frame(self._player._viz_bar_buf)  # already zeroed above
 
     def _on_press(self):   self._seeking = True
     def _on_release(self):
@@ -8739,10 +9502,12 @@ class ControlBar(QFrame):
     def set_play_icon(self, playing: bool):
         self.btn_play.setText('⏸' if playing else '▶')
         _pad = '0 0 2px 5px' if not playing else '0'
-        # Rebuild from scratch so palette globals (BG3/ACC/ACCH) are always current
+        # Rebuild from scratch so palette globals (BG3/ACC/ACCH) are always current.
+        # Use _r(26) so the radius follows the global RAD_PCT setting instead of
+        # hardcoding 26 px (which would revert the radius every time play/pause fires).
         self.btn_play.setStyleSheet(
             f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:26px;'
+            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
             f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
             f' font-size:22px; padding:{_pad}; text-align:center; }}'
             f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
@@ -8759,10 +9524,7 @@ class ControlBar(QFrame):
         return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Main window (with tag editing)
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-#  Custom Title Bar  (frameless, OLED-black bg, dark-grey text & icons)
+#  Custom title bar
 # ══════════════════════════════════════════════════════════════════════════════
 _TB_BG      = '#000000'   # pure black background
 _TB_FG      = '#666666'   # title text
@@ -8931,6 +9693,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._titlebar)
 
         body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(1)
+        body.setObjectName('body_splitter')
         self._sidebar = Sidebar(); body.addWidget(self._sidebar)
 
         right = QWidget()
@@ -8964,18 +9727,30 @@ class MainWindow(QMainWindow):
         self._splitter_save_timer.setInterval(400)
         self._splitter_save_timer.timeout.connect(self._save_config)
         body.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
-        root.addWidget(body, 1)
 
         self._lib_page = PlaylistPage(label='Library')
         self._lib_page.play_track.connect(self._play_from_page)
         self._lib_page.ctx_requested.connect(self._show_ctx_menu)
-        self._lib_page.col_widths_changed.connect(self._on_col_widths_changed)
+        self._lib_page.col_widths_changed.connect(
+            lambda w, p=self._lib_page: self._on_col_widths_changed(w, p))
         self._tabs.addTab(self._lib_page, '  Library')
         self._cur_page = self._lib_page
 
         self._ctrlbar = ControlBar(self._player)
         self._lyrics_panel._ctrlbar = self._ctrlbar
-        root.addWidget(self._ctrlbar)
+
+        # Vertical splitter: body on top, ctrlbar on bottom.
+        # handleWidth(1) + stylesheet height:1px → thin border line, no extra gap.
+        self._vsplit = QSplitter(Qt.Orientation.Vertical)
+        self._vsplit.setHandleWidth(1)
+        self._vsplit.setChildrenCollapsible(False)
+        self._vsplit.addWidget(body)
+        self._vsplit.addWidget(self._ctrlbar)
+        self._vsplit.setStretchFactor(0, 1)
+        self._vsplit.setStretchFactor(1, 0)
+        self._vsplit.setSizes([800, 172])
+        self._vsplit.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
+        root.addWidget(self._vsplit, 1)
         self._status = self.statusBar()
         # Tab bar hidden; update count when tab changes programmatically
         self._tabs.currentChanged.connect(self._on_tab_change)
@@ -9106,14 +9881,14 @@ class MainWindow(QMainWindow):
         self._ctrlbar._on_brightness_change(getattr(self._ctrlbar, '_brightness_v', 40))
         _play_ss = (
             f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:26px;'
+            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
             f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
             f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
             f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH}; background:{BG4}; }}'
             f'QPushButton#play:pressed {{ background:{BG4}; }}')
         self._ctrlbar.btn_play.setStyleSheet(_play_ss)
         _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
-               f' font-size:20px; border-radius:22px; padding:0; text-align:center; }}'
+               f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
                f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
                f'QPushButton#ctrl:checked {{ color:{ACC}; background:transparent; }}'
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
@@ -9129,28 +9904,10 @@ class MainWindow(QMainWindow):
             self._lyrics_panel.refresh_theme()
             pop = self._ctrlbar._settings_popup
             if pop is not None:
-                _combo_ss = (
-                    f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-                    f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
-                    f'QComboBox:hover {{ border-color:{ACC}; }}'
-                    f'QComboBox::drop-down {{ border:none; width:20px; }}'
-                    f'QComboBox::down-arrow {{ color:{FG2}; }}'
-                    f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-                    f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
-                pop._view_combo.setStyleSheet(_combo_ss)
+                pop.refresh_theme()
                 pop.repaint()
             eq_pop = self._ctrlbar._eq_popup
             if eq_pop is not None:
-                eq_pop._profile_combo.setStyleSheet(
-                    f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-                    f' border-radius:6px; padding:4px 8px 4px 8px; min-height:30px; }}'
-                    f'QComboBox:focus {{ border-color:{ACC}; }}'
-                    f'QComboBox::drop-down {{ width:44px; border-left:1px solid {B2};'
-                    f' background:{BG2}; border-radius:0 6px 6px 0; }}'
-                    f'QComboBox::down-arrow {{ width:16px; height:16px; }}'
-                    f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-                    f' selection-background-color:{SEL}; border:1px solid {B2}; }}'
-                    f'QComboBox QAbstractItemView::item {{ min-height:35px; padding:0 8px; }}')
                 eq_pop.repaint()
             self._sidebar.refresh_theme()
             QTimer.singleShot(0, _step3)
@@ -9196,7 +9953,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_lyrics(self, _checked=False):
         panel = self._lyrics_panel
-        body  = self.findChild(QSplitter)
+        body  = self.findChild(QSplitter, 'body_splitter')
         if not body: return
         vis = panel.isVisible()
         panel.setVisible(not vis)
@@ -9211,7 +9968,6 @@ class MainWindow(QMainWindow):
         else:         # closing
             body.setSizes([sizes[0], sizes[1] + sizes[2], 0])
 
-    # --- Context menu with tag editing ---
     def _show_ctx_menu(self, src_page, row, pos):
         if not (0 <= row < len(src_page.tracks)): return
         track = src_page.tracks[row]; m = QMenu(self)
@@ -9252,24 +10008,21 @@ class MainWindow(QMainWindow):
         for key in [k for k in _cover_cache if k[0] == fp]:
             _cover_cache.pop(key, None)
         try:
-            try:
-                cur_mtime = str(os.path.getmtime(fp))
-            except Exception:
-                cur_mtime = '0'
-            mtimes = {cur_mtime}
-            if pre_embed_mtime is not None:
-                mtimes.add(str(pre_embed_mtime))
-            for mt in mtimes:
-                for size, radius in [(28, 4), (64, 8)]:
-                    dkey = hashlib.sha1(f'{fp}:{mt}:{size}:{radius}'.encode()).hexdigest()
-                    disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
-                    if disk_path.exists():
-                        try:
-                            disk_path.unlink()
-                        except Exception:
-                            pass
+            cur_mtime = str(os.path.getmtime(fp))
         except Exception:
-            pass
+            cur_mtime = '0'
+        mtimes = {cur_mtime}
+        if pre_embed_mtime is not None:
+            mtimes.add(str(pre_embed_mtime))
+        for mt in mtimes:
+            for size, radius in [(28, 4), (64, 8)]:
+                dkey = hashlib.sha1(f'{fp}:{mt}:{size}:{radius}'.encode()).hexdigest()
+                disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
+                if disk_path.exists():
+                    try:
+                        disk_path.unlink()
+                    except Exception:
+                        pass
         # Async loader's no-embed blacklist — remove so it retries on next paint
         loader = _async_cover_loader
         if loader is not None:
@@ -9280,6 +10033,35 @@ class MainWindow(QMainWindow):
 
     def _edit_tags(self, page, row):
         track = page.tracks[row]
+        # ── Pre-flight checks before opening the dialog ───────────────────────
+        ext = Path(track.filepath).suffix.lower()
+        try:
+            with open(track.filepath, 'rb') as _f:
+                _magic = _f.read(4)
+        except OSError as _oe:
+            QMessageBox.warning(self, 'Cannot Edit Tags',
+                f'Cannot read file:\n{Path(track.filepath).name}\n\n{_oe}')
+            return
+        # WebM/MKV container (EBML magic bytes 1A 45 DF A3) — mutagen cannot write tags
+        if _magic == b'\x1a\x45\xdf\xa3':
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Cannot Edit Tags')
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setText(
+                f'<b>{Path(track.filepath).name}</b> is stored in a '
+                f'<b>WebM/MKV container</b>.<br><br>'
+                f'Tag editing requires an Ogg container. '
+                f'Re-mux with ffmpeg (no quality loss):<br><br>'
+                f'<code>ffmpeg -i input.opus -c copy output.ogg</code>')
+            msg.setTextFormat(Qt.TextFormat.RichText)
+            msg.exec()
+            return
+        # Fragmented/DASH MP4 — mutagen can read but save() often fails
+        if ext in ('.m4a', '.aac') and _magic[:8] in (
+                b'\x00\x00\x00\x18ftypdash', b'\x00\x00\x00\x18ftypiso'):
+            # Try anyway; error will be caught below with a clear message
+            pass
+
         dlg = TagEditDialog(track, locked_paths=self._cover_locked_paths, parent=None)
         dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -9295,15 +10077,6 @@ class MainWindow(QMainWindow):
             _cover_locked_set.discard(track.filepath)
         # Write tags to file using mutagen
         try:
-            ext = Path(track.filepath).suffix.lower()
-            # Detect WebM/MKV container (EBML magic) — mutagen cannot write these tags
-            with open(track.filepath, 'rb') as _f:
-                _magic = _f.read(4)
-            if _magic == b'\x1a\x45\xdf\xa3':
-                self._status.showMessage(
-                    f'Cannot edit tags: {Path(track.filepath).name} is a WebM/MKV container '
-                    f'(re-mux to Ogg with ffmpeg to enable tag editing)', 6000)
-                return
             af = _open_audio(track.filepath)
             if af is None:
                 self._status.showMessage(
@@ -9339,7 +10112,18 @@ class MainWindow(QMainWindow):
                 self._status.showMessage(f'Unsupported format: {ext}', 3000)
                 return
 
-            af.save()
+            try:
+                af.save()
+            except Exception as _save_err:
+                _save_msg = str(_save_err)
+                if ext in ('.m4a', '.aac') and 'ftypdash' in _save_msg.lower():
+                    _hint = ' (Fragmented/DASH MP4 — dönüştür: ffmpeg -i in.m4a -c copy out.m4a)'
+                else:
+                    _hint = ''
+                self._status.showMessage(
+                    f'Tag yazılamadı: {Path(track.filepath).name} — {_save_msg}{_hint}', 8000)
+                print(f'af.save() error [{ext}]: {_save_err}')
+                return
 
             # Handle cover changes
             fp = track.filepath
@@ -9429,7 +10213,6 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f'Error saving tags: {e}', 5000)
             print(f'_edit_tags error: {e}')
 
-    # --- Scan methods (unchanged) ---
     def _new_playlist_dialog(self):
         """Ask for name, create an empty M3U8 in the first known folder, load it."""
         name, ok = QInputDialog.getText(self, 'New Playlist', 'Playlist name:')
@@ -9547,7 +10330,7 @@ class MainWindow(QMainWindow):
         page = PlaylistPage(tracks, label=label)
         page.play_track.connect(self._play_from_page)
         page.ctx_requested.connect(self._show_ctx_menu)
-        page.col_widths_changed.connect(self._on_col_widths_changed)
+        page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
         page.set_tracks(tracks)
         # Restore saved column ratios to new page
         saved_ratios = getattr(self, '_last_col_widths', None) or TrackTable._DEFAULT_COL_RATIOS
@@ -9568,6 +10351,24 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def _rebuild_library(self):
+        # ── one-time rename-tmp recovery (runs only on the first rebuild) ──────
+        if not getattr(self, '_rename_recovery_done', False):
+            self._rename_recovery_done = True
+            all_tracks_for_recovery = []
+            for pl in self._playlists:
+                all_tracks_for_recovery.extend(pl.tracks)
+            recovered = _recover_rename_temps(all_tracks_for_recovery)
+            if recovered:
+                # Update filepath on every Track object in every playlist so
+                # the restored name is reflected immediately in the UI and on
+                # the next _save_config() call.
+                for pl in self._playlists:
+                    for t in pl.tracks:
+                        if t.filepath in recovered:
+                            t.filepath = recovered[t.filepath]
+                # Persist the corrected paths right away.
+                QTimer.singleShot(0, self._save_config)
+        # ── normal rebuild ───────────────────────────────────────────────────
         all_tracks = []
         for pl in self._playlists: all_tracks.extend(pl.tracks)
         seen = set(); dedup = []
@@ -9840,15 +10641,23 @@ class MainWindow(QMainWindow):
             self._count_lbl.setText(f'{len(page.tracks)} tracks')
 
     # --- Config ---
-    def _on_col_widths_changed(self, widths: list):
-        """User resized a column — sync to every page and save."""
+    def _on_col_widths_changed(self, widths: list, source_page=None):
+        """User resized a column — sync to every OTHER page and save."""
         self._last_col_widths = widths
         for page in [self._lib_page] + self._playlists:
-            if page is not None:
+            if page is not None and page is not source_page:
                 page.table.restore_col_widths(widths)
         self._save_config()
 
     def _save_config(self):
+        # Don't save while the startup playlist loader is still running — _playlists
+        # is only partially populated at that point, so writing config now would
+        # silently discard every playlist that hasn't been emitted yet.
+        if getattr(self, '_config_loader', None) is not None:
+            # Re-arm the debounce timer so we retry shortly after the loader finishes.
+            if hasattr(self, '_settings_save_timer'):
+                self._settings_save_timer.start()
+            return
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             cfg = self._ctrlbar.config_state()
@@ -9858,15 +10667,19 @@ class MainWindow(QMainWindow):
             cfg['known_paths'] = list(self._known_paths)
             cfg['lyrics_panel_open'] = self._lyrics_panel.isVisible()
             cfg['cover_locked_paths'] = list(self._cover_locked_paths)
+            cfg['lastfm_api_key'] = _lastfm_api_key
             # Persist table column ratios (proportional, sum ≈ 1.0)
             total_w = sum(self._lib_page.table.columnWidth(c) for c in range(len(COLS)))
             if total_w > 0:
                 cfg['table_col_widths'] = [self._lib_page.table.columnWidth(c) / total_w
                                            for c in range(len(COLS))]
             # Persist splitter sizes (sidebar / content / lyrics)
-            body = self.findChild(QSplitter)
+            body = self.findChild(QSplitter, 'body_splitter')
             if body:
                 cfg['splitter_sizes'] = body.sizes()
+            # Persist vertical splitter (content area / control bar)
+            if hasattr(self, '_vsplit'):
+                cfg['vsplit_sizes'] = self._vsplit.sizes()
             CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             # Write M3U8 for user-created playlists (those with _m3u_path attribute)
             for pl in self._playlists:
@@ -9978,6 +10791,8 @@ class MainWindow(QMainWindow):
             _cover_locked_set.update(self._cover_locked_paths)
             global _cover_fetch_on
             _cover_fetch_on = data.get('cover_fetch_on', True)
+            global _lastfm_api_key
+            _lastfm_api_key = data.get('lastfm_api_key', '')
             self._ctrlbar.init_from_config(data)
             # If light mode was restored from config, widget inline stylesheets
             # were baked with dark values during _build_ui. Re-apply now so
@@ -9998,9 +10813,13 @@ class MainWindow(QMainWindow):
             # Restore splitter sizes
             splitter_sizes = data.get('splitter_sizes', [])
             if splitter_sizes and len(splitter_sizes) >= 2:
-                body = self.findChild(QSplitter)
+                body = self.findChild(QSplitter, 'body_splitter')
                 if body:
-                    QTimer.singleShot(0, lambda s=splitter_sizes: body.setSizes(s))
+                    QTimer.singleShot(100, lambda s=splitter_sizes: body.setSizes(s))
+            # Restore vertical splitter (content / control bar)
+            vsplit_sizes = data.get('vsplit_sizes', [])
+            if vsplit_sizes and len(vsplit_sizes) == 2 and hasattr(self, '_vsplit'):
+                QTimer.singleShot(100, lambda s=vsplit_sizes: self._vsplit.setSizes(s))
 
             # Load playlist track metadata asynchronously to avoid blocking the UI.
             # ConfigPlaylistLoader emits playlist_ready once per playlist in order.
@@ -10029,7 +10848,7 @@ class MainWindow(QMainWindow):
         page = PlaylistPage(tracks, label=label)
         page.play_track.connect(self._play_from_page)
         page.ctx_requested.connect(self._show_ctx_menu)
-        page.col_widths_changed.connect(self._on_col_widths_changed)
+        page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
         page.set_tracks(tracks)
         # Apply view settings (settings popup already initialised by init_from_config)
         pop = self._ctrlbar._settings_popup
@@ -10052,6 +10871,12 @@ class MainWindow(QMainWindow):
         self._config_loader = None
         self._rebuild_library()
         self._status.showMessage('Library ready', 3000)
+        # If _save_config was called while the loader was running (e.g. triggered
+        # by settings_changed during init_from_config), flush it now that
+        # _playlists is complete.
+        if hasattr(self, '_settings_save_timer') and self._settings_save_timer.isActive():
+            self._settings_save_timer.stop()
+        QTimer.singleShot(0, self._save_config)
 
     # --- Keyboard ---
     def keyPressEvent(self, e):
@@ -10081,9 +10906,6 @@ class MainWindow(QMainWindow):
         self._player.stop()
         super().closeEvent(e)
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Animated Splash Screen
-# ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 #  Spinning overlay — startup splash + accent/theme change blocker
 # ══════════════════════════════════════════════════════════════════════════════
@@ -10185,9 +11007,10 @@ class _SpinningOverlay(QWidget):
                   int((90.0 - self._angle) * 16), int(260 * 16))
         p.end()
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._sync_to_parent()
+    # resizeEvent is intentionally not overridden: in parent mode the eventFilter
+    # handles every Resize/Move/Show/WindowStateChange on the parent, so a separate
+    # resizeEvent on *this* widget would be redundant.  In splash mode the widget
+    # has a fixed size so no resize events occur.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
