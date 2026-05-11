@@ -9,148 +9,148 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
  V_1.0
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
-   apply_theme()               L212   Switch dark/light palette globals + rebuild SS
-   _apply_app_palette()        L226   Sync QPalette with current globals
-   make_acch()                 L246   Derive highlight colour from accent
-   make_stylesheet()           L275   Build global QSS string
+   apply_theme()               L213   Switch dark/light palette globals + rebuild SS
+   _apply_app_palette()        L227   Sync QPalette with current globals
+   make_acch()                 L247   Derive highlight colour from accent
+   make_stylesheet()           L287   Build global QSS string
 
  CONSTANTS & GLOBALS
    SUPPORTED_EXT, CONFIG_PATH, VIZ_BANDS, GST_BANDS, EQ_*, RAD …
 
  WIDGETS
-   ToggleSwitch                L424   Animated two-state toggle (single/two-label)
-   JumpSlider                  L566   QSlider that jumps to click/touch position
-   SliderRow                   L604   Label + JumpSlider + value label row
-   SettingsPopup               L636   Settings panel popup (child widget, Wayland-safe)
-   TagEditDialog               L1049  Modal tag editor with cover management
-     _pick_cover_file()        L1149  Open file dialog → set cover bytes
-     _search_cover_online()    L1165  Background cover search → update preview
-     _fetch_tags_online()      L1210  Background tag lookup → fill empty fields
-     _fetch_lyrics_online()    L1246  Force-fetch lyrics (all APIs, synced priority) → embed
-   EQSliderCell                L1356  Table cell widget for a single EQ parameter
-   TouchComboBox               L2392  QComboBox immune to touch double-fire close
-   EqPopup                     L2411  Parametric EQ popup + preset management
-   EQGraph                     L2760  Frequency response curve widget
-   BlackoutOverlay             L2869  Full-screen OLED burn-in protection overlay
-   SeekSlider                  L6426  Touch-aware seek slider
-   LongPressFilter             L6538  Event filter: long-press → context menu
-   RepeatButton                L7760  Tri-state repeat cycle button
-   _FullscreenBtn              L7801  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L7849  Play/pause button with spinning reload indicator
-   TitleBarButton              L9218  Frameless window-control button
-   TitleBarCloseButton         L9243  Close variant (red hover)
-   BlackTitleBar               L9247  Custom frameless titlebar
-   _SpinningOverlay            L10567 Semi-transparent blocking overlay with spinner
+   ToggleSwitch                L466   Animated two-state toggle (single/two-label)
+   JumpSlider                  L612   QSlider that jumps to click/touch position
+   SliderRow                   L650   Label + JumpSlider + value label row
+   SettingsPopup               L682   Settings panel popup (child widget, Wayland-safe)
+   TagEditDialog               L1115  Modal tag editor with cover management
+     _pick_cover_file()        L1215  Open file dialog → set cover bytes
+     _search_cover_online()    L1231  Background cover search → update preview
+     _fetch_tags_online()      L1276  Background tag lookup → fill empty fields
+     _fetch_lyrics_online()    L1312  Force-fetch lyrics (all APIs, synced priority) → embed
+   EQSliderCell                L1422  Table cell widget for a single EQ parameter
+   TouchComboBox               L2478  QComboBox immune to touch double-fire close
+   EqPopup                     L2497  Parametric EQ popup + preset management
+   EQGraph                     L2837  Frequency response curve widget
+   BlackoutOverlay             L2946  Full-screen OLED burn-in protection overlay
+   SeekSlider                  L6546  Touch-aware seek slider
+   LongPressFilter             L6652  Event filter: long-press → context menu
+   RepeatButton                L7874  Tri-state repeat cycle button
+   _FullscreenBtn              L7915  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L7963  Play/pause button with spinning reload indicator
+   TitleBarButton              L9536  Frameless window-control button
+   TitleBarCloseButton         L9561  Close variant (red hover)
+   BlackTitleBar               L9565  Custom frameless titlebar
+   _SpinningOverlay            L10912 Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L1762  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L1773  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L1814  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L1838  LrcLib API sources
-   _src_lyrics_ovh()           L1872  Lyrics.ovh fallback source
-   ClickableLyricLine          L1966  QLabel that emits clicked(ms)
-   LyricsFetcher               L1979  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2116  Scrollable lyric display with sync highlight (touch scroll enabled)
+   _lrc_parse()                L1848  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L1859  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L1900  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L1924  LrcLib API sources
+   _src_lyrics_ovh()           L1958  Lyrics.ovh fallback source
+   ClickableLyricLine          L2052  QLabel that emits clicked(ms)
+   LyricsFetcher               L2065  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2202  Scrollable lyric display with sync highlight (touch scroll enabled)
 
  COVER ART
-   _trim_cover_cache()         L3336  Evict oldest entries when cache exceeds limit
-   _rounded_pixmap()           L3374  Scale + crop + round-corner mask
-   draw_default_cover()        L3398  Render clef placeholder pixmap
-   _cover_disk_key()           L3445  SHA1 hash for disk cache filename
-   get_cover_pixmap()          L3453  Non-blocking async cover lookup (paint path)
-   get_cover_pixmap_sync()     L3471  Blocking cover lookup (worker threads)
-   _CoverTask                  L3506  QRunnable for one cover load
-   AsyncCoverLoader            L3547  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L3639 Module singleton factory
-   _clear_cover_disk_cache()   L3645  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3654  Shared base class for fetch popups (supports multiple concurrent workers)
-     closeEvent()              L3967  Hide dialog, keep worker running in background
-     _emit_status_update()     L4018  Show each fetch instance progress as permanent widget on status bar left
-   LibraryCoverFetchWorker     L4076  Sequential per-track cover fetcher
-   CoverFetchPopup             L4118  Modal "fetch covers for library" dialog (multiple concurrent supported)
+   _trim_cover_cache()         L3437  Evict oldest entries when cache exceeds limit
+   _rounded_pixmap()           L3475  Scale + crop + round-corner mask
+   draw_default_cover()        L3499  Render clef placeholder pixmap
+   _cover_disk_key()           L3546  SHA1 hash for disk cache filename
+   get_cover_pixmap()          L3554  Non-blocking async cover lookup (paint path)
+   get_cover_pixmap_sync()     L3572  Blocking cover lookup (worker threads)
+   _CoverTask                  L3607  QRunnable for one cover load
+   AsyncCoverLoader            L3648  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L3740 Module singleton factory
+   _clear_cover_disk_cache()   L3746  Wipe disk + memory cover caches
+   _BaseFetchPopup             L3755  Shared base class for fetch popups (supports multiple concurrent workers)
+     closeEvent()              L4073  Hide dialog, keep worker running in background
+     _emit_status_update()     L4124  Show each fetch instance progress as permanent widget on status bar left
+   LibraryCoverFetchWorker     L4177  Sequential per-track cover fetcher
+   CoverFetchPopup             L4219  Modal "fetch covers for library" dialog (multiple concurrent supported)
 
  TAGS / METADATA
-   fetch_cover_online()        L1502  Try iTunes/Deezer/MusicBrainz/LastFM
-   lookup_tags_online()        L1615  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L1644  Write title/artist/album via mutagen
-   embed_cover_bytes()         L1673  Write cover into audio tags
-   embed_lyrics()              L1714  Write lyrics into audio tags
-   _tag() / _vtag()            L3256  Tag value helpers (case-insensitive Vorbis)
-   extract_cover_bytes()       L3349  Read raw cover bytes from audio tags
-   _open_audio()               L3274  Open audio file with mutagen (fallback chain)
-   read_metadata()             L3300  Build Track from mutagen
-   LibraryTagFetchWorker       L4187  Sequential per-track tag fetcher
-   TagFetchPopup               L4233  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L4275  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L4333  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L4365  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L4376  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L4448  Sequential per-track file renamer
-   RenamePopup                 L4511  Modal "batch rename library" dialog (run-in-bg)
-     closeEvent()              L4802  Hide dialog, keep worker running in background
+   fetch_cover_online()        L1568  Try iTunes/Deezer/MusicBrainz/LastFM
+   lookup_tags_online()        L1681  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L1710  Write title/artist/album via mutagen
+   embed_cover_bytes()         L1747  Write cover into audio tags
+   embed_lyrics()              L1794  Write lyrics into audio tags
+   _tag() / _vtag()            L3357  Tag value helpers (case-insensitive Vorbis)
+   extract_cover_bytes()       L3450  Read raw cover bytes from audio tags
+   _open_audio()               L3375  Open audio file with mutagen (fallback chain)
+   read_metadata()             L3401  Build Track from mutagen
+   LibraryTagFetchWorker       L4288  Sequential per-track tag fetcher
+   TagFetchPopup               L4334  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L4376  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L4434  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L4466  Strip illegal filename chars (/,\\0,edge dots)
+   _build_new_filename()       L4477  Build new filename stem from pattern + metadata
+   LibraryRenameWorker         L4557  Sequential per-track file renamer
+   RenamePopup                 L4620  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L4912  Hide dialog, keep worker running in background
 
  LIBRARY
-   Track                       L3231  @dataclass: filepath + metadata
-   scan_folder()               L4864  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4879  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4901  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4919  Non-blocking playlist loader for config restore
+   Track                       L3332  @dataclass: filepath + metadata
+   scan_folder()               L4973  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L4988  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L5010  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L5028  Non-blocking playlist loader for config restore
 
  PLAYER
-   RepeatMode                  L4951  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L4954  Biquad peaking filter coefficients
-   Player                      L4977  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L5097  Load URI, build sink bin, start playback
-     play_pause()              L5144  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L5218  Load + seek after dead-pipe recovery
-     _resume_with_reload()     L5267  Reload pipeline at current position
-     _reload_at_pos()          L5307  WARNING-path pipeline reload (separate guard)
-     seek()                    L5348  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L5515 Update biquad coefficients (GLib idle)
-     _make_sink_bin()          L5543  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L5617  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L5751  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L5810  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L5840  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L5950  GLib-thread: burst-safe magnitude merge + el accumulate
-     _compute_viz_frame()      L6066  Main-thread smoothed bar computation (alpha^N EMA)
+   RepeatMode                  L5060  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L5063  Biquad peaking filter coefficients
+   Player                      L5086  GStreamer playbin wrapper + EQ + spectrum viz
+     load()                    L5203  Load URI, build sink bin, start playback
+     play_pause()              L5250  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L5324  Load + seek after dead-pipe recovery
+     _resume_with_reload()     L5373  Reload pipeline at current position
+     _reload_at_pos()          L5413  WARNING-path pipeline reload (separate guard)
+     seek()                    L5454  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L5621 Update biquad coefficients (GLib idle)
+     _make_sink_bin()          L5649  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L5723  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L5857  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L5916  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L5946  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L6056  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L6172  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
-   MprisServer                 L6155  MPRIS2 D-Bus interface (GLib thread)
+   MprisServer                 L6275  MPRIS2 D-Bus interface (GLib thread)
 
  VIEWS
-   TrackTable                  L6590  QTableWidget with covers + sort + touch scroll
-   GalleryView                 L6864  Virtual-scroll card gallery (Z/S layout modes)
-   PlaylistPage                L7416  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L7498  Sidebar playlist row (label + delete button)
-   Sidebar                     L7562  Left panel: search + library nav + playlist list (touch scroll enabled)
+   TrackTable                  L6704  QTableWidget with covers + sort + touch scroll
+   GalleryView                 L6978  Virtual-scroll card gallery (Z/S layout modes)
+   PlaylistPage                L7530  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L7612  Sidebar playlist row (label + delete button)
+   Sidebar                     L7676  Left panel: search + library nav + playlist list (touch scroll enabled)
 
  CONTROL BAR
-   ControlBar                  L7915  Seek bar + transport + viz + settings/EQ toggles
-     _ensure_eq_popup()        L8125  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L8150  Lazy-create SettingsPopup singleton
-     _reset_idle_timer()       L8231  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L8241  Fire overlay when idle threshold reached
-     init_from_config()        L8487  Apply saved config dict to all sub-widgets
-     config_state()            L8582  Collect current state → config dict
-     _precompute_bars()        L8610  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
-     paintEvent()              L8926  Fully vectorised numpy pixel-buffer rendering
+   ControlBar                  L8029  Seek bar + transport + viz + settings/EQ toggles
+     _ensure_eq_popup()        L8231  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L8256  Lazy-create SettingsPopup singleton
+     _reset_idle_timer()       L8337  Reset OLED overlay idle countdown
+     _on_idle_timeout()        L8347  Fire overlay when idle threshold reached
+     init_from_config()        L8593  Apply saved config dict to all sub-widgets
+     config_state()            L8688  Collect current state → config dict
+     _precompute_bars()        L8716  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
+     paintEvent()              L9032  Fully vectorised numpy pixel-buffer rendering
 
  MAIN WINDOW
-   MainWindow                  L9329  QMainWindow: layout, signals, config I/O
-     _build_ui()               L9369  Construct widget tree
-     _connect_signals()        L9446  Wire all cross-widget signals
-     _refresh_all_theme_widgets() L9551 Async theme switch + overlay
-     _edit_tags()              L9734  Tag-edit dialog + mutagen write-back
-     _start_playback()         L10083 Load track + update all UI state
-     _advance()                L10165 Next track (shuffle/repeat logic)
-     _save_config()            L10321 JSON config persistence (skips __open_with__)
-     _load_config()            L10441 JSON config restore
-     _handle_open_with()       L10370 Load file-manager / CLI "Open With" track
-     closeEvent()              L10551 Purge __open_with__ playlist, then save + stop
+   MainWindow                  L9647  QMainWindow: layout, signals, config I/O
+     _build_ui()               L9686  Construct widget tree
+     _connect_signals()        L9763  Wire all cross-widget signals
+     _refresh_all_theme_widgets() L9868 Async theme switch + overlay
+     _edit_tags()              L10051 Tag-edit dialog + mutagen write-back
+     _start_playback()         L10400 Load track + update all UI state
+     _advance()                L10482 Next track (shuffle/repeat logic)
+     _save_config()            L10638 JSON config persistence (skips __open_with__)
+     _load_config()            L10758 JSON config restore
+     _handle_open_with()       L10687 Load file-manager / CLI "Open With" track
+     closeEvent()              L10868 Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L10674
+   main()                      L11019
 ═══════════════════════════════════════════════════════════════════
 """
 import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
@@ -10117,11 +10117,11 @@ class MainWindow(QMainWindow):
             except Exception as _save_err:
                 _save_msg = str(_save_err)
                 if ext in ('.m4a', '.aac') and 'ftypdash' in _save_msg.lower():
-                    _hint = ' (Fragmented/DASH MP4 — dönüştür: ffmpeg -i in.m4a -c copy out.m4a)'
+                    _hint = ' (Fragmented/DASH MP4 — convert: ffmpeg -i in.m4a -c copy out.m4a)'
                 else:
                     _hint = ''
                 self._status.showMessage(
-                    f'Tag yazılamadı: {Path(track.filepath).name} — {_save_msg}{_hint}', 8000)
+                    f'Tag could not be written: {Path(track.filepath).name} — {_save_msg}{_hint}', 8000)
                 print(f'af.save() error [{ext}]: {_save_err}')
                 return
 
