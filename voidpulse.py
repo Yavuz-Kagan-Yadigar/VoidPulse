@@ -10731,12 +10731,15 @@ class ControlBar(QFrame):
                     # Hz per FFT bin
                     hz_per_bin = fs / fft_size  # = fs / (2*GST_BANDS)
 
-                    # Get RAW magnitude data directly from player (before interpolation/smoothing)
-                    # This is the actual FFT output from the audio wave decomposition
-                    raw_mags = getattr(self._player, '_viz_mag_buf', None)
-                    if raw_mags is None:
-                        # Fallback to processed data if raw not available
+                    # Get RAW magnitude data directly from player's spectrum buffer
+                    # Use _viz_spec which contains the inertia-smoothed FFT magnitudes
+                    # (_viz_mag_buf gets reset after each frame, so we use the persistent buffer)
+                    spec_buf = getattr(self._player, '_viz_spec', None)
+                    if spec_buf is None:
+                        # Fallback to processed data if spectrum not available
                         raw_mags = bh
+                    else:
+                        raw_mags = spec_buf
                     
                     # Convert raw dB magnitudes to linear [0,1] scale
                     # MIN_DB = -70.0, so: linear = (mag - MIN_DB) / (-MIN_DB), clipped to [0,1]
@@ -10759,7 +10762,7 @@ class ControlBar(QFrame):
 
                     # Aggressive peak detection: suppress notes that are not clear local maxima
                     # A note is "real" only if it stands significantly above ALL neighbors
-                    _PEAK_THRESHOLD_MULT = 1.8  # must be 1.8x higher than neighbors
+                    _PEAK_THRESHOLD_MULT = 1.5  # must be 1.5x higher than neighbors
                     for ni in range(1, _N_NOTES - 1):
                         left  = note_heights[ni - 1]
                         right = note_heights[ni + 1]
@@ -10791,8 +10794,8 @@ class ControlBar(QFrame):
                     p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
 
                     # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    _AMP_THRESH = 0.25  # High threshold - only clear notes show
-                    _LABEL_THRESH = 0.35  # Only label very clear notes
+                    _AMP_THRESH = 0.15  # Lower threshold since we use smoothed data
+                    _LABEL_THRESH = 0.25  # Only label very clear notes
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
