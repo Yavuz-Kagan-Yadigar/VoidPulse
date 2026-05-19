@@ -6059,12 +6059,11 @@ class Player(QObject):
         self._spec_el = None
         if self._has_spec:
             # Use direct FFT on audio signal with higher resolution for better note detection
-            # window-function=hann reduces spectral leakage between adjacent bins
             spec_desc = (
                 f'audioconvert ! audio/x-raw,format=F32LE '
                 f'! spectrum name=bp_spec bands={GST_BANDS} '
                 f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
-                f'window-function=hann post-messages=false message-magnitude=true message-phase=false'
+                f'message-magnitude=true message-phase=false'
                 f' ! audioconvert'   # passthrough: restore caps flexibility for playsink
             )
             try:
