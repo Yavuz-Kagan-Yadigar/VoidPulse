@@ -10705,9 +10705,8 @@ class ControlBar(QFrame):
                 if self._viz_type == 'fourier_notes':
                     # ── FOURIER NOTES MODE ─────────────────────────────────────
                     # Maps each musical note (C2–B7, 72 notes) to its FFT bin,
-                    # draws a bar per note coloured by frequency group, and
-                    # labels each peak with both Turkish (Do/Re/Mi…) and
-                    # Western (C/D/E…) note names.
+                    # draws a bar per note ONLY if amplitude exceeds threshold,
+                    # colored by accent hue with saturation proportional to amplitude.
                     import math as _math
 
                     # Musical note → frequency: A4 = 440 Hz, equal temperament
@@ -10753,16 +10752,12 @@ class ControlBar(QFrame):
                     gap         = max(1.0, bar_total_w * 0.15)
                     bar_w       = max(1.0, bar_total_w - gap)
 
-                    # Colour groups by octave (C2..B2=0, C3..B3=1, …, C7..B7=5)
-                    # Six hues cycling through the spectrum — pre-computed as QColor
-                    _OCT_COLORS = [
-                        QColor(180,  60,  60),  # oct 2 — deep red
-                        QColor(200, 120,  40),  # oct 3 — orange
-                        QColor(170, 170,  40),  # oct 4 — yellow-green
-                        QColor( 60, 170,  90),  # oct 5 — green
-                        QColor( 50, 130, 200),  # oct 6 — blue
-                        QColor(150,  60, 200),  # oct 7 — violet
-                    ]
+                    # Get accent color HSV for saturation-based coloring
+                    acc_qcolor = QColor(ACC)
+                    acc_h, acc_s, acc_v, _ = acc_qcolor.getHsvF()
+                    # Ensure we have valid HSV values
+                    if acc_h < 0: acc_h = 0.0
+                    if acc_s < 0: acc_s = 0.5
 
                     # Background fill
                     p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
@@ -10770,6 +10765,8 @@ class ControlBar(QFrame):
                     # Determine which notes to label (only the tallest per semitone
                     # group, above 0.15 threshold) — avoid cluttering
                     _LABEL_THRESH = 0.15
+                    # Minimum amplitude threshold to draw a note bar (reduces false detections)
+                    _AMP_THRESH = 0.08
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
@@ -10781,6 +10778,11 @@ class ControlBar(QFrame):
                         octave    = (midi // 12) - 1        # C2 → oct 2
                         semitone  = midi % 12
                         h_norm    = float(note_heights[ni])
+                        
+                        # Skip notes below amplitude threshold (prevents false detections)
+                        if h_norm < _AMP_THRESH:
+                            continue
+                        
                         bar_h_px  = int(h_norm * bar_area)
                         if bar_h_px < 1:
                             continue
@@ -10788,13 +10790,13 @@ class ControlBar(QFrame):
                         x0 = ni * bar_total_w + gap * 0.5
                         y0 = label_area + (bar_area - bar_h_px)
 
-                        oct_idx   = max(0, min(5, octave - 2))
-                        base_col  = _OCT_COLORS[oct_idx]
-                        # Brighten bar for white-key (natural) notes
-                        if semitone in (0, 2, 4, 5, 7, 9, 11):
-                            bar_col = base_col.lighter(130)
-                        else:
-                            bar_col = base_col
+                        # Color: accent hue with saturation proportional to amplitude
+                        # Higher amplitude = higher saturation (more vivid)
+                        # Lower amplitude = lower saturation (more muted/gray)
+                        note_sat = acc_s * (0.2 + 0.8 * h_norm)  # 20%-100% of accent saturation
+                        note_val = acc_v if acc_v > 0 else 0.7
+                        bar_col = QColor()
+                        bar_col.setHsvF(acc_h, note_sat, note_val)
 
                         p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
 
