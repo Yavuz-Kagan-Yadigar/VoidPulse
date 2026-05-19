@@ -6058,11 +6058,13 @@ class Player(QObject):
         # when tracks are switched or focus is lost.
         self._spec_el = None
         if self._has_spec:
+            # Use direct FFT on audio signal with higher resolution for better note detection
+            # window-function=hann reduces spectral leakage between adjacent bins
             spec_desc = (
                 f'audioconvert ! audio/x-raw,format=F32LE '
                 f'! spectrum name=bp_spec bands={GST_BANDS} '
                 f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
-                f'post-messages=false message-magnitude=true message-phase=false'
+                f'window-function=hann post-messages=false message-magnitude=true message-phase=false'
                 f' ! audioconvert'   # passthrough: restore caps flexibility for playsink
             )
             try:
@@ -10728,7 +10730,12 @@ class ControlBar(QFrame):
                     hz_per_bin = fs / fft_size  # = fs / (2*GST_BANDS)
 
                     # For each note: find the nearest FFT bin and read magnitude
+                    # Apply peak detection: only consider local maxima to reduce false detections
                     note_heights = _np.zeros(_N_NOTES, dtype=_np.float32)
+                    
+                    # Pre-compute all bin magnitudes for peak detection
+                    bh_array = bh.copy()  # bh is already normalized [0,1]
+                    
                     for ni in range(_N_NOTES):
                         midi  = _MIDI_START + ni
                         freq  = 440.0 * (2.0 ** ((midi - 69) / 12.0))
@@ -10742,6 +10749,19 @@ class ControlBar(QFrame):
                             note_heights[ni] = bh[min(b0, len(bh)-1)]
                         else:
                             note_heights[ni] = bh[b0] * (1.0 - frac) + bh[b1] * frac
+                    
+                    # Peak detection: suppress notes that are not local maxima
+                    # A note is considered "real" only if it's significantly higher than neighbors
+                    _PEAK_RATIO = 0.7  # must be at least 70% of neighbor height to count
+                    for ni in range(1, _N_NOTES - 1):
+                        left  = note_heights[ni - 1]
+                        right = note_heights[ni + 1]
+                        center = note_heights[ni]
+                        # If both neighbors are higher, this is likely spectral leakage
+                        if left > center and right > center:
+                            # Suppress if neighbors are significantly higher
+                            if left > center * (1.0 / _PEAK_RATIO) or right > center * (1.0 / _PEAK_RATIO):
+                                note_heights[ni] *= 0.3  # strongly suppress non-peaks
 
                     # ── Layout ─────────────────────────────────────────────────
                     label_area = 36     # px at top reserved for note labels
@@ -10764,9 +10784,12 @@ class ControlBar(QFrame):
 
                     # Determine which notes to label (only the tallest per semitone
                     # group, above 0.15 threshold) — avoid cluttering
-                    _LABEL_THRESH = 0.15
+                    _LABEL_THRESH = 0.20
                     # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    _AMP_THRESH = 0.08
+                    # Increased threshold to reduce spurious detections from spectral leakage
+                    _AMP_THRESH = 0.15
+                    # Peak prominence: note must be significantly higher than surrounding noise floor
+                    _PEAK_PROMINENCE = 0.10  # must exceed neighbors by at least this amount
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
@@ -10783,6 +10806,14 @@ class ControlBar(QFrame):
                         if h_norm < _AMP_THRESH:
                             continue
                         
+                        # Additional peak prominence check: note must stand out from neighbors
+                        # This catches cases where spectral leakage creates small bumps
+                        left_h  = float(note_heights[ni - 1]) if ni > 0 else 0.0
+                        right_h = float(note_heights[ni + 1]) if ni < _N_NOTES - 1 else 0.0
+                        neighbor_avg = (left_h + right_h) / 2.0
+                        if h_norm - neighbor_avg < _PEAK_PROMINENCE:
+                            continue  # not prominent enough, likely leakage
+                        
                         bar_h_px  = int(h_norm * bar_area)
                         if bar_h_px < 1:
                             continue
@@ -10793,10 +10824,11 @@ class ControlBar(QFrame):
                         # Color: accent hue with saturation proportional to amplitude
                         # Higher amplitude = higher saturation (more vivid)
                         # Lower amplitude = lower saturation (more muted/gray)
-                        note_sat = acc_s * (0.2 + 0.8 * h_norm)  # 20%-100% of accent saturation
-                        note_val = acc_v if acc_v > 0 else 0.7
+                        # Use direct amplitude-to-saturation mapping for cleaner look
+                        note_sat = acc_s * h_norm  # saturation directly proportional to amplitude
+                        note_val = acc_v if acc_v > 0 else 0.8
                         bar_col = QColor()
-                        bar_col.setHsvF(acc_h, note_sat, note_val)
+                        bar_col.setHsvF(acc_h, max(0.1, note_sat), note_val)
 
                         p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
 
