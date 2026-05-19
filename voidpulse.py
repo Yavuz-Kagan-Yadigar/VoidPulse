@@ -10794,7 +10794,7 @@ class ControlBar(QFrame):
                     p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
 
                     # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    _AMP_THRESH = 0.05  # Lower threshold to show more notes
+                    _AMP_THRESH = 0.15  # Threshold for note detection
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
@@ -10811,18 +10811,21 @@ class ControlBar(QFrame):
                         if h_norm < _AMP_THRESH:
                             continue
                         
-                        bar_h_px  = int(h_norm * bar_area)
+                        # Rescale magnitude for better visual differentiation (0.15-1.0 -> 0.0-1.0)
+                        rescaled_mag = min(1.0, (h_norm - _AMP_THRESH) / (1.0 - _AMP_THRESH))
+                        
+                        bar_h_px  = int(rescaled_mag * bar_area)
                         if bar_h_px < 1:
                             continue
 
                         x0 = ni * bar_total_w + gap * 0.5
                         y0 = label_area + (bar_area - bar_h_px)
 
-                        # Color: accent hue with saturation proportional to amplitude
+                        # Color: accent hue with saturation proportional to rescaled amplitude
                         # Higher amplitude = higher saturation (more vivid)
                         # Lower amplitude = lower saturation (more muted/gray)
                         # Saturation scales from 0.3 (quiet) to acc_s (loud) for better differentiation
-                        note_sat = 0.3 + (acc_s - 0.3) * h_norm
+                        note_sat = 0.3 + (acc_s - 0.3) * rescaled_mag
                         note_val = acc_v if acc_v > 0 else 0.8
                         bar_col = QColor()
                         bar_col.setHsvF(acc_h, max(0.3, min(acc_s, note_sat)), note_val)
