@@ -217,6 +217,8 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 ═══════════════════════════════════════════════════════════════════
 """
 import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
+if "/usr/lib/python3/dist-packages" not in sys.path:
+    sys.path.insert(0, "/usr/lib/python3/dist-packages")
 import re          as _re
 import html        as _html
 import urllib.request as _urlreq
