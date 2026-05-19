@@ -1,0 +1,40 @@
+name: Build Flatpak and Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'             # v1.0.0, v2.0.0 gibi etiketlerde tetiklenir
+
+jobs:
+  build-flatpak:
+    name: Build Flatpak Bundle
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: "org.voidpulse.VoidPulse.flatpak"
+          manifest-path: "org.voidpulse.VoidPulse.yml"
+          cache-key: "flatpak-builder-${{ github.sha }}"
+          run-tests: false
+          # Bu action otomatik olarak artifact oluşturur (upload-artifact true varsayılan)
+
+      - name: Create GitHub Release and Upload Flatpak
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: org.voidpulse.VoidPulse.flatpak
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
