@@ -9,24 +9,18 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
-  # Audio: PulseAudio emulation + native PipeWire socket (for pipewiresink)
   - --socket=pulseaudio
   - --filesystem=xdg-run/pipewire-0
-  # Network: for lyrics and cover art fetching
   - --share=network
-  # Music files (read-only)
   - --filesystem=xdg-music
   - --filesystem=home:ro
-  # Config directory (write) — ~/.config/voidpulse/config.json
   - --filesystem=xdg-config
-  # MPRIS2 D-Bus
   - --socket=session-bus
   - --own-name=org.mpris.MediaPlayer2.VoidPulse
   - --talk-name=org.gnome.SettingsDaemon.MediaKeys
   - --talk-name=org.freedesktop.login1
 
 modules:
-
   - name: python-deps
     buildsystem: simple
     build-options:
@@ -42,23 +36,46 @@ modules:
   - name: voidpulse
     buildsystem: simple
     build-commands:
+      # appdata.xml dosyasını oluştur
+      - |
+        cat > appdata.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <component type="desktop-application">
+          <id>org.voidpulse.VoidPulse</id>
+          <metadata_license>CC0-1.0</metadata_license>
+          <project_license>GPL-3.0-or-later</project_license>
+          <name>VoidPulse</name>
+          <summary>Touch and OLED friendly advanced music player</summary>
+          <description>
+            <p>Touch and OLED friendly advanced music player</p>
+          </description>
+          <launchable type="desktop-id">org.voidpulse.VoidPulse.desktop</launchable>
+          <releases>
+            <release version="1.4.2" date="2025-03-13"/>
+          </releases>
+          <content_rating type="oars-1.1"/>
+        </component>
+        EOF
+      # voidpulse-launcher script'ini oluştur
+      - |
+        cat > voidpulse-launcher << 'EOF'
+        #!/bin/bash
+        exec python3 /app/lib/voidpulse/voidpulse.py "$@"
+        EOF
+      - chmod +x voidpulse-launcher
+      # Kurulum komutları
       - install -Dm644 voidpulse.py /app/lib/voidpulse/voidpulse.py
       - install -Dm755 voidpulse-launcher /app/bin/voidpulse
       - install -Dm644 org.voidpulse.VoidPulse.desktop /app/share/applications/org.voidpulse.VoidPulse.desktop
       - install -Dm644 org.voidpulse.VoidPulse.svg /app/share/icons/hicolor/scalable/apps/org.voidpulse.VoidPulse.svg
       - install -Dm644 appdata.xml /app/share/metainfo/org.voidpulse.VoidPulse.appdata.xml
-      # NotoMusic fontini standart font dizinine kopyala
       - install -Dm644 NotoMusic-Regular.ttf /app/share/fonts/truetype/NotoMusic/NotoMusic-Regular.ttf
     sources:
       - type: file
         path: voidpulse.py
       - type: file
-        path: voidpulse-launcher
-      - type: file
         path: org.voidpulse.VoidPulse.desktop
       - type: file
         path: org.voidpulse.VoidPulse.svg
-      - type: file
-        path: appdata.xml
       - type: file
         path: NotoMusic-Regular.ttf
