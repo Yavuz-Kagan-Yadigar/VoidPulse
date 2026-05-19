@@ -6,7 +6,15 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
 ═══════════════════════════════════════════════════════════════════
  MODULE STRUCTURE
- V_1.7  (ALSA support · paint-cache cleanup · dead code removed)
+ V_1.9  (perf · bug fix · dead-code pass continued)
+   • _cf shadow bug fixed in init_from_config (cover_fetch_on local renamed)
+   • peaking_coefficients: cos(w0) computed once; a1 = b1 (removes duplicate trig call)
+   • _vtag: tag keys pre-lowercased once per call (O(keys*tags) → O(tags + keys*tags) lower calls)
+   • GalleryView._invalidate_track: O(n) list.index() → O(1) _ti_to_vis_pos dict
+     (invalidated alongside _fp_to_vis_positions in _apply_filter_and_layout)
+   • LyricsPanel: single QPropertyAnimation pre-allocated in __init__; _highlight
+     reuses it (stop + retarget) instead of constructing + wiring a new one every
+     lyric-line change (called up to 10×/s while synced lyrics play)
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
    apply_theme()               L255   Switch dark/light palette globals + rebuild SS
@@ -77,6 +85,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    LyricsFetcher               L2682  Worker: embedded → 9 APIs parallel, early-exit on first synced
    LyricsPanel                 L2819  Scrollable lyric display with sync highlight
                                       _synced_ts initialised in __init__; bisect uses attribute directly
+                                      _scroll_anim pre-allocated in __init__; _highlight reuses (stop+retarget)
 
  COVER ART
    _trim_cover_cache()         L4069  Evict oldest entries when cache exceeds limit
@@ -105,7 +114,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    embed_cover_bytes()         L2361  Write cover into audio tags
    embed_lyrics()              L2408  Write lyrics into audio tags
    Track                       L3963  @dataclass: filepath + metadata
-   _tag() / _vtag()            L3988  Tag value helpers (case-insensitive Vorbis)
+   _tag() / _vtag()            L3988  Tag value helpers (_vtag: keys pre-lowercased once per call)
    _open_audio()               L4006  Open audio file with mutagen (fallback chain)
    read_metadata()             L4032  Build Track from mutagen
    extract_cover_bytes()       L4082  Read raw cover bytes from audio tags
@@ -118,6 +127,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    _validate_rename_pattern()  L5180  Validate rename pattern tokens
    _recover_rename_temps()     L5199  Recover leftover temp files from a crashed rename run
    LibraryRenameWorker         L5231  Sequential per-track file renamer
+                                      _MAX_FILENAME_BYTES / _DEDUP_RESERVE hoisted before loop
    RenamePopup                 L5356  Modal "batch rename library" dialog (run-in-bg)
      closeEvent()              L5647  Hide dialog, keep worker running in background
 
@@ -129,27 +139,27 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
  PLAYER
    RepeatMode                  L5796  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L5799  Biquad peaking filter coefficients
+   peaking_coefficients()      L5799  Biquad peaking filter coefficients (cos_w0 computed once; a1=b1)
    Player                      L5822  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L5934  Load URI, build sink bin, start playback
-     play_pause()              L6019  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L6093  Load + seek after dead-pipe recovery
+     load()                    L5992  Load URI, build sink bin, start playback
+     play_pause()              L6096  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L6170  Load + seek after dead-pipe recovery; mute during preroll+seek window
                                       pos captured in set_output_device() → _last_switch_pos_ms
                                       so probe can resume at correct position
-     _resume_with_reload()     L6142  Reload pipeline at current position
-     _reload_at_pos()          L6182  WARNING-path pipeline reload (separate guard)
-     seek()                    L6223  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L6394 Update biquad coefficients (GLib idle)
-     set_output_device()       L6422  Switch sink; saves pos to _last_switch_pos_ms before destroy
-     _alsa_primary()           L6460  Static: derive hw:X,Y from plughw:X,Y
-     _alsa_fallback()          L6465  Static: identity (plughw:X,Y as ALSA plug fallback)
-     _make_sink_bin()          L6481  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L6536  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L6675  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L6734  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L6764  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L6880  GLib-thread: burst-safe magnitude merge + el accumulate
-     _compute_viz_frame()      L6996  Main-thread smoothed bar computation (alpha^N EMA)
+     _resume_with_reload()     L6233  Reload pipeline at current position
+     _reload_at_pos()          L6273  WARNING-path pipeline reload (separate guard)
+     seek()                    L6324  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L6477 Update biquad coefficients (GLib idle)
+     set_output_device()       L6505  Switch sink; saves pos to _last_switch_pos_ms before destroy
+     _alsa_primary()           L6531  Static: derive hw:X,Y from plughw:X,Y
+     _alsa_fallback()          L6536  Static: identity (plughw:X,Y as ALSA plug fallback)
+     _make_sink_bin()          L6552  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L6607  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L6756  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L6815  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L6845  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L6976  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L7092  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
    MprisServer                 L7100  MPRIS2 D-Bus interface (GLib thread)
@@ -160,6 +170,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
                                       _CELL_ALIGN hoisted as class constant
                                       _TouchHeaderView installed for fat column resize zones
    GalleryView                 L7864  Virtual-scroll card gallery (Z/S layout modes)
+                                      _invalidate_track uses _ti_to_vis_pos dict (O(1)) — not list.index() (O(n))
    PlaylistPage                L8422  QStackedWidget: TrackTable + GalleryView
    _PlaylistRowWidget          L8508  Sidebar playlist row (label + delete button)
    Sidebar                     L8611  Left panel: search + library nav + playlist list
@@ -168,6 +179,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    ControlBar                  L9087  Seek bar + transport + viz + settings/EQ toggles
                                       _paint_bord_pen / _paint_bg_brush cached on BORD/BG change —
                                       avoids QPen(QColor(BORD), 1) construction on every 60-fps frame
+                                      _fmt = staticmethod(_fmt_ms)  — alias, no duplication
      _ensure_eq_popup()        L9311  Lazy-create EqPopup singleton
      _ensure_settings_popup()  L9341  Lazy-create SettingsPopup singleton
      _refresh_audio_info()     L9397  Fill Format/EQ/Device labels; called on open, track change, device change
@@ -177,6 +189,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
      config_state()            L9876  Collect current state → config dict
      _precompute_bars()        L9906  Freq→bin map + bar geometry + cap offset arrays (vectorised)
      paintEvent()              L10350 Fully vectorised numpy pixel-buffer rendering
+                                      fill mode uses precomputed _line_bin_i/f tables — no per-frame alloc
                                       line+fill px_fill cached by (bg,bar) key — not recomputed per frame
 
  MAIN WINDOW
@@ -532,7 +545,7 @@ class ToggleSwitch(QWidget):
     _KNOB_SZ  = H - 2 * _KNOB_PAD   # = 16 px knob side length
 
     def __init__(self, label_off: str = '', label_on_or_parent=None, parent=None,
-                 muted_labels: bool = False):
+                 muted_labels: bool = False, label_point_size: int = 0):
         # Resolve overloaded signature
         if isinstance(label_on_or_parent, str):
             self._lbl_off = label_off          # left side / off state
@@ -547,7 +560,8 @@ class ToggleSwitch(QWidget):
                 parent = label_on_or_parent
 
         super().__init__(parent)
-        self._muted_labels = muted_labels
+        self._muted_labels     = muted_labels
+        self._label_point_size = label_point_size  # 0 = inherit widget font size
         self._on = False; self._anim = 0.0
         self._timer = QTimer(self); self._timer.setInterval(_FRAME_MS)
         self._timer.timeout.connect(self._step)
@@ -564,8 +578,16 @@ class ToggleSwitch(QWidget):
         self._dim_rgb:    tuple = (0, 0, 0)
         self._bright_rgb: tuple = (0, 0, 0)
 
+    def _label_font(self) -> 'QFont':
+        """Return the font to use for label text. Smaller if label_point_size is set."""
+        f = self.font()
+        if self._label_point_size > 0:
+            f = QFont(f)
+            f.setPointSize(self._label_point_size)
+        return f
+
     def _recalc_size(self):
-        fm = QFontMetrics(self.font())
+        fm = QFontMetrics(self._label_font())
         lw_off = fm.horizontalAdvance(self._lbl_off) + self.PAD if self._lbl_off else 0
         lw_on  = fm.horizontalAdvance(self._lbl_on)  + self.PAD if self._lbl_on  else 0
         total_w = lw_off + self.W + lw_on
@@ -619,7 +641,7 @@ class ToggleSwitch(QWidget):
 
         # ── Track ──────────────────────────────────────────────────────────────
         # Lazily rebuild cached colour tuples when palette/accent changes.
-        if self._color_cache_key != (ACC, BG4, B2):
+        if self._color_cache_key != (ACC, BG4, B2, FG, FG2):
             self._rebuild_track_colors()
 
         ton_r, ton_g, ton_b = self._track_on_rgb
@@ -657,6 +679,7 @@ class ToggleSwitch(QWidget):
         # ── Labels ─────────────────────────────────────────────────────────────
         dim_r,    dim_g,    dim_b    = self._dim_rgb
         bright_r, bright_g, bright_b = self._bright_rgb
+        lbl_font = self._label_font()
 
         if self._lbl_off:
             # Left label: bright when OFF, dim when ON — or always dim if muted
@@ -669,6 +692,7 @@ class ToggleSwitch(QWidget):
                     int(dim_g + mix * (bright_g - dim_g)),
                     int(dim_b + mix * (bright_b - dim_b)))
             p.setPen(c)
+            p.setFont(lbl_font)
             p.drawText(QRectF(0, 0, lw_off - self.PAD, h_c),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        self._lbl_off)
@@ -683,6 +707,7 @@ class ToggleSwitch(QWidget):
                     int(dim_g + t * (bright_g - dim_g)),
                     int(dim_b + t * (bright_b - dim_b)))
             p.setPen(c2)
+            p.setFont(lbl_font)
             rstart = track_x + self.W + self.PAD
             p.drawText(QRectF(rstart, 0, self.width()-rstart, h_c),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -905,7 +930,7 @@ class SettingsPopup(QFrame):
         view_combo_lbl = QLabel('Layout'); view_combo_lbl.setObjectName('setting_lbl')
         view_combo_lbl.setFixedWidth(55)
         view_combo_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._view_combo = QComboBox()
+        self._view_combo = TouchComboBox()
         self._view_combo.addItem('Classic')
         self._view_combo.addItem('Gallery (Z)')
         self._view_combo.addItem('Gallery (S)')
@@ -938,7 +963,7 @@ class SettingsPopup(QFrame):
             f'  padding:0;'
             f'}}')
         self._accent_btn.clicked.connect(self._pick_accent)
-        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True)
+        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True, label_point_size=7)
         self._theme_sw.setChecked(False)
         self._theme_sw.toggled.connect(self._on_theme_toggle)
         self._cover_sw = ToggleSwitch('COVER', self)
@@ -1001,7 +1026,7 @@ class SettingsPopup(QFrame):
         viz_type_lbl = QLabel('Type'); viz_type_lbl.setObjectName('setting_lbl')
         viz_type_lbl.setFixedWidth(55)
         viz_type_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._viz_type_combo = QComboBox()
+        self._viz_type_combo = TouchComboBox()
         self._viz_type_combo.addItem('Bars')
         self._viz_type_combo.addItem('Fill')
         self._viz_type_combo.addItem('Line')
@@ -1017,7 +1042,7 @@ class SettingsPopup(QFrame):
         viz_type_row.addWidget(self._viz_type_combo, 1)
         right.addLayout(viz_type_row)
 
-        self._delay_row = SliderRow('Delay', 0, 1000, 0, lambda v: f'{v}ms')
+        self._delay_row = SliderRow('Delay', 0, 3000, 0, lambda v: f'{v}ms')
         self._delay_row.valueChanged.connect(self.delay_changed)
         right.addWidget(self._delay_row)
 
@@ -1087,7 +1112,7 @@ class SettingsPopup(QFrame):
         out_lbl = QLabel('Device'); out_lbl.setObjectName('setting_lbl')
         out_lbl.setFixedWidth(46)
         out_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._out_dev_combo = QComboBox()
+        self._out_dev_combo = TouchComboBox()
         self._out_dev_combo.setStyleSheet(self._viz_combo_ss())
         # Block signals while populating so addItem never triggers the change slot.
         self._out_dev_combo.blockSignals(True)
@@ -1123,6 +1148,7 @@ class SettingsPopup(QFrame):
             for m in _re.finditer(
                     r'^\s*(\d+)\s+\[(\S+)\s*\]:\s*(.+)$', text, _re.MULTILINE):
                 card_num  = m.group(1)
+                card_id   = m.group(2).strip()   # stable bracket name e.g. "SAF_HDA"
                 long_desc = m.group(3).strip()
                 # Skip cards with no PCM playback subdevice.
                 has_playback = False
@@ -1136,8 +1162,11 @@ class SettingsPopup(QFrame):
                 if not has_playback:
                     continue
                 label = long_desc[:32]
-                # plughw: lets ALSA perform on-the-fly format/rate conversion.
-                devices.append((f'ALSA: {label}', f'plughw:{card_num},0'))
+                # Use stable card bracket-name (card_id) instead of card number so
+                # that card enumeration order changes between boots (USB devices,
+                # module load order) don't silently route audio to the wrong card.
+                # ALSA resolves 'plughw:CARDNAME,0' correctly on all distros.
+                devices.append((f'ALSA: {label}', f'plughw:{card_id},0'))
         except Exception:
             pass
         return devices
@@ -1313,6 +1342,14 @@ class SettingsPopup(QFrame):
                 QApplication.activePopupWidget() is None and
                 obj is not self and
                 not (isinstance(obj, QWidget) and self.isAncestorOf(obj))):
+            # Do not close if a child QComboBox has its dropdown open —
+            # on touch the combo's popup may already be hidden before this event
+            # arrives (touch double-fire), but a freshly-opened combo stores its
+            # open timestamp; guard against that window so the settings stay visible.
+            for combo in self.findChildren(QComboBox):
+                if hasattr(combo, '_popup_opened_ms'):
+                    if QDateTime.currentMSecsSinceEpoch() - combo._popup_opened_ms < 600:
+                        return False
             # For child widget: map click to our coords
             try:
                 gpt = e.globalPosition().toPoint()
@@ -2894,6 +2931,16 @@ class LyricsPanel(QWidget):
         # Lyrics position is driven by on_position() called from sig_pos (100 ms).
         # No separate timer needed — avoids a redundant query_position() call per 80 ms.
 
+        # Pre-allocate a single scroll animation; reuse it in _highlight to avoid
+        # constructing a new QPropertyAnimation (+ parent-lookup + signal-wire) on
+        # every lyric line change while music is playing.
+        # Target widget (_scroll.verticalScrollBar()) is wired lazily after the
+        # scroll area is fully initialised.
+        self._scroll_anim: QPropertyAnimation = QPropertyAnimation(
+            self._scroll.verticalScrollBar(), b'value', self)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll_anim.setDuration(300)
+
     # ── public ──────────────────────────────────────────────────────────────
 
     def set_track(self, track, deferred=False):
@@ -3078,22 +3125,18 @@ class LyricsPanel(QWidget):
         cur_t  = self._synced[idx][1]
         nxt_t  = self._synced[idx+1][1] if idx < len(self._synced)-1 else ''
         self.lyrics_context.emit(prev_t, cur_t, nxt_t)
-        # Stop any previous scroll animation before starting a new one
-        if hasattr(self, '_scroll_anim') and self._scroll_anim is not None:
-            self._scroll_anim.stop()
-            self._scroll_anim = None
+        # Reuse the pre-allocated animation — stop if running, then retarget.
+        # This avoids allocating a new QPropertyAnimation + signal connection on
+        # every lyric-line change (called up to 10× per second while playing).
         step   = self._LINE_H + self._LINE_SP
-        target = idx * step - self._scroll.height() // 2 + self._LINE_H // 2
-        target = max(0, target)
-        bar = self._scroll.verticalScrollBar()
-        anim = QPropertyAnimation(bar, b'value', self)
-        anim.setDuration(300)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        target = max(0, idx * step - self._scroll.height() // 2 + self._LINE_H // 2)
+        bar    = self._scroll.verticalScrollBar()
+        anim   = self._scroll_anim
+        if anim.state() == QAbstractAnimation.State.Running:
+            anim.stop()
         anim.setStartValue(bar.value())
         anim.setEndValue(target)
-        self._scroll_anim = anim
-        anim.finished.connect(lambda: setattr(self, '_scroll_anim', None))
-        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        anim.start()
 
 class TouchComboBox(QComboBox):
     """QComboBox that won't close its popup immediately after opening on touch."""
@@ -4007,11 +4050,14 @@ def _vtag(tags, *keys):
     """Case-insensitive tag lookup for Vorbis comment tags (FLAC/OGG/OPUS).
     Avoids rebuilding a lowercase dict by iterating tags directly.
     For the small tag sets typical of audio files this is faster.
+    Pre-lowercases each search key once instead of re-lowercasing it per tag.
     """
+    # Pre-lower each tag key once so the inner loop only lowers per-tag items.
+    lc_tags = [(tk.lower(), tv) for tk, tv in tags.items()]
     for k in keys:
         kl = k.lower()
-        for tk, tv in tags.items():
-            if tk.lower() == kl:
+        for tkl, tv in lc_tags:
+            if tkl == kl:
                 return str(tv[0]) if isinstance(tv, list) else str(tv)
     return ''
 
@@ -4182,11 +4228,12 @@ def _draw_cover_rounded(painter: QPainter, pm: QPixmap,
         painter.drawPixmap(x, y, frame)
 
 
-def _default_cover_disk_path(acc: str, size: int) -> Path:
-    safe = acc.lstrip('#')
-    return CONFIG_PATH.parent / f'default_cover_{safe}_{size}.jpg'
+def _default_cover_disk_path(acc: str, bg: str, size: int) -> Path:
+    safe_acc = acc.lstrip('#')
+    safe_bg  = bg.lstrip('#')
+    return CONFIG_PATH.parent / f'default_cover_{safe_acc}_{safe_bg}_{size}.jpg'
 
-_default_cover_mem_cache: dict = {}   # (acc, size) -> QPixmap  (square, no radius)
+_default_cover_mem_cache: dict = {}   # (acc, bg, size) -> QPixmap  (square, no radius)
 
 def draw_default_cover(size: int) -> QPixmap:
     """Return (or build) the clef-placeholder cover as a plain square pixmap.
@@ -4195,11 +4242,11 @@ def draw_default_cover(size: int) -> QPixmap:
     so the same pixmap serves every radius setting.  Callers that need rounded
     display use _draw_cover_rounded() or _get_corner_frame().
     """
-    mem_key = (ACC, size)
+    mem_key = (ACC, BG, size)   # BG included so dark/light switch invalidates cache
     if mem_key in _default_cover_mem_cache:
         return _default_cover_mem_cache[mem_key]
     # Check disk cache first
-    disk = _default_cover_disk_path(ACC, size)
+    disk = _default_cover_disk_path(ACC, BG, size)
     if disk.exists():
         pm = QPixmap()
         if pm.load(str(disk)):
@@ -5258,6 +5305,9 @@ class LibraryRenameWorker(QObject):
     def run(self):
         total   = len(self._tracks)
         renamed = 0
+        # Filename size limit constants (hoisted out of loop)
+        _MAX_FILENAME_BYTES = 255
+        _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
         for i, t in enumerate(self._tracks):
             if self._cancelled:
                 break
@@ -5272,10 +5322,6 @@ class LibraryRenameWorker(QObject):
                 ext = old_path.suffix  # e.g. '.m4a'
 
                 # ── Enforce 255-byte filename limit (Linux/macOS/Windows all cap at 255) ──
-                # Encode to UTF-8 because that's what the filesystem counts.
-                # Reserve bytes for the extension and for a _({n}) dedup suffix.
-                _MAX_FILENAME_BYTES = 255
-                _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
                 ext_bytes = ext.encode('utf-8')
                 max_stem_bytes = _MAX_FILENAME_BYTES - len(ext_bytes) - _DEDUP_RESERVE
                 stem_encoded = new_stem.encode('utf-8')
@@ -5814,12 +5860,13 @@ def peaking_coefficients(fs, f0, gain_db, Q):
     w0 = 2.0 * math.pi * f0 / fs
     alpha = math.sin(w0) / (2.0 * Q)
 
-    b0 = 1.0 + alpha * A
-    b1 = -2.0 * math.cos(w0)
-    b2 = 1.0 - alpha * A
-    a0 = 1.0 + alpha / A
-    a1 = -2.0 * math.cos(w0)
-    a2 = 1.0 - alpha / A
+    cos_w0 = math.cos(w0)
+    b0 =  1.0 + alpha * A
+    b1 = -2.0 * cos_w0
+    b2 =  1.0 - alpha * A
+    a0 =  1.0 + alpha / A
+    a1 =  b1          # identical to -2*cos(w0) — avoids a redundant trig call
+    a2 =  1.0 - alpha / A
 
     # Normalize to a0
     b0 /= a0
@@ -5922,6 +5969,14 @@ class Player(QObject):
         # ALSA hw device override — 'pipewire' means use detected PipeWire sink (default).
         # Config restore in ControlBar._restore_config() will override this via _alsa_device directly.
         self._alsa_device: str = 'pipewire'
+        # Saved position/state from set_output_device(); consumed by ALSA probe.
+        # Initialized here so _on_player_error can always access them safely,
+        # even when the error fires before any device switch (e.g. EQ toggle).
+        self._last_switch_pos_ms:      Optional[int]  = None
+        self._last_switch_was_playing: Optional[bool] = None
+        # Set to self._pipe inside load() when paused=True; cleared on ASYNC_DONE.
+        # Allows deferred pause after preroll without blocking the main thread.
+        self._pending_pause_pipe = None
 
         self._has_spec = Gst.ElementFactory.find('spectrum') is not None
         print(f'[Player] spectrum: {"OK" if self._has_spec else "not found"}')
@@ -6018,18 +6073,37 @@ class Player(QObject):
 
         bus = self._pipe.get_bus()
         bus.add_signal_watch(); bus.connect('message', self._on_msg)
-        if paused:
-            self._pipe.set_state(Gst.State.PAUSED)
-            self._playing = False; self._pos_timer.stop()
-            self._pos_playing = False
-        else:
-            self._pipe.set_state(Gst.State.PLAYING)
-            self._playing = True; self._pos_timer.start()
-            self._start_pos_burst(8)  # fast updates while prerolling
+
+        # Always start PLAYING regardless of the requested end-state.
+        # set_state(PAUSED) on a fresh pipewiresink pipeline blocks the calling
+        # thread while PipeWire's session manager acquires the audio node and
+        # completes preroll — this can take several seconds and hangs the UI.
+        # set_state(PLAYING) returns immediately; GStreamer completes the transition
+        # asynchronously.  If the caller wanted PAUSED we transition back once
+        # ASYNC_DONE (preroll complete) arrives on the bus.
+        self._pipe.set_state(Gst.State.PLAYING)
+        self._playing = True; self._pos_timer.start()
+        self._start_pos_burst(8)  # fast updates while prerolling
+
         if not self._silent_recovery:
-            self._pos_playing = not paused
-            self._anchor_now(0.0)   # start at 0; confirmed below once prerolled
-        # Once the pipeline has prerolled (~300–600 ms), re-anchor from GStreamer
+            self._pos_playing = True
+            # Only reset anchor to 0 if the caller hasn't already positioned it.
+            # _load_and_seek and the ALSA probe's _run() both call _anchor_now(pos)
+            # before load() so the seekbar stays at the correct position during
+            # preroll rather than snapping to 0.
+            if self._pos_anchor_ms == 0.0:
+                self._anchor_now(0.0)
+
+        if paused:
+            # Pipeline must reach PAUSED/PLAYING (preroll) before we can pause it
+            # without blocking.  _on_msg handles ASYNC_DONE and calls _deferred_pause
+            # if this flag is set.  Capture the pipe reference so stale callbacks
+            # from a superseded pipeline are silently ignored.
+            self._pending_pause_pipe = self._pipe
+        else:
+            self._pending_pause_pipe = None
+
+        # Once the pipeline has prerolled (~300-600 ms), re-anchor from GStreamer
         # so any startup latency is absorbed and the display stays accurate.
         def _post_load_confirm():
             if not self._pipe or not self._playing:
@@ -6037,7 +6111,7 @@ class Player(QObject):
             self._anchor_from_gst()
         QTimer.singleShot(600, _post_load_confirm)
         if not self._silent_recovery:
-            self.sig_playing.emit(not paused)
+            self.sig_playing.emit(True)   # always playing until deferred pause fires
 
     def play_pause(self):
         if not self._pipe:
@@ -6120,6 +6194,7 @@ class Player(QObject):
             silent: When True (stall auto-recovery), the UI is not notified — no busy
                     spinner, no play/pause icon flip, no viz clear.  The seekbar keeps
                     interpolating from the saved anchor and the user sees nothing.
+            paused: When True the pipeline ends up paused at pos_ms.
         """
         self._silent_recovery = silent
         # Always anchor to the intended position so the seekbar doesn't snap to 0.
@@ -6137,26 +6212,39 @@ class Player(QObject):
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = _monotonic() + 0.5   # 500 ms discard post-load
 
-        self.load(filepath, paused=paused)
         self._pause_ts = 0.0
-        # Reset stall tracking — grace period comes from _reloading=True (1000 ms) set
-        # by _resume_with_reload, which prevents _apply_drift_correction from firing.
-        self._gst_pos_adv_ms   = -1.0   # re-initialise on first drift query after reload
+        self._gst_pos_adv_ms   = -1.0
         self._gst_pos_adv_wt   = -1.0
 
-        if pos_ms > 200:
-            def _do_seek(p=pos_ms, _sil=silent):
+        if pos_ms > 200 and not silent:
+            self.load(filepath, paused=paused)
+            # Mute immediately so the ~400 ms preroll window before the seek
+            # fires is completely silent — user never hears the start of the track.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
+            def _do_seek(p=pos_ms, _sil=silent, _paused=paused):
                 self.seek(p)
                 def _after_seek(_sil=_sil):
-                    self._anchor_from_gst()   # re-anchor so seekbar is accurate
+                    self._anchor_from_gst()
+                    # Restore volume only if pipeline is still alive and belongs
+                    # to this reload (not superseded by another load()).
+                    if self._pipe:
+                        self._pipe.set_property('volume', self._volume)
                     if not _sil:
                         self.sig_busy.emit(False)
                     self._silent_recovery = False
                 QTimer.singleShot(350, _after_seek)
             QTimer.singleShot(400, _do_seek)
         else:
+            self.load(filepath, paused=paused)
+            # Even for pos_ms <= 200 (effectively start-of-track), mute briefly so
+            # any seek-window audio glitch or codec pre-buffer flush is inaudible.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
             def _after_preroll(_sil=silent):
                 self._anchor_from_gst()
+                if self._pipe:
+                    self._pipe.set_property('volume', self._volume)
                 if not _sil:
                     self.sig_busy.emit(False)
                 self._silent_recovery = False
@@ -6229,17 +6317,27 @@ class Player(QObject):
             self._silent_recovery = True
             self.load(fp)
             self._pause_ts = 0.0
+            # Mute immediately so the preroll window before the seek fires is
+            # completely silent — user never hears the beginning of the track.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
             if pos_ms > 200:
                 # Same as _resume_with_reload: wait for preroll before seeking.
                 def _do_seek_silent(p=pos_ms):
                     self.seek(p)
                     def _finish():
                         self._anchor_from_gst()
+                        if self._pipe:
+                            self._pipe.set_property('volume', self._volume)
                         self._silent_recovery = False
                     QTimer.singleShot(350, _finish)
                 QTimer.singleShot(400, _do_seek_silent)
             else:
-                QTimer.singleShot(500, lambda: setattr(self, '_silent_recovery', False))
+                def _restore_vol_short():
+                    if self._pipe:
+                        self._pipe.set_property('volume', self._volume)
+                    self._silent_recovery = False
+                QTimer.singleShot(500, _restore_vol_short)
         finally:
             QTimer.singleShot(600, lambda: setattr(self, '_reload_guard', False))
 
@@ -6385,24 +6483,6 @@ class Player(QObject):
         else:
             self._apply_eq_to_filters()
 
-    def _reload_current(self):
-        """Reload the currently-playing track to rebuild the pipeline."""
-        if not self._pipe:
-            return
-        ok, pos = self._pipe.query_position(Gst.Format.TIME)
-        pos_ms = pos // Gst.MSECOND if ok else 0
-        was_playing = self._playing
-        fp = self._last_filepath
-        if not fp:
-            return
-        self._destroy()
-        self.load(fp)
-        # Seek to saved position
-        if pos_ms > 0:
-            QTimer.singleShot(200, lambda: self.seek(pos_ms))
-        if not was_playing:
-            QTimer.singleShot(250, self.play_pause)
-
     def set_eq_bands(self, bands: List[tuple]):
         """bands: list of (freq, gain, Q)"""
         self._eq_bands = bands[:MAX_EQ_BANDS]  # truncate if too many
@@ -6451,31 +6531,19 @@ class Player(QObject):
             return
         self._alsa_device = device_id
         print(f'[Player] output device -> {device_id}')
-        # Only reload if a track is loaded; during startup _last_filepath is empty.
         if self._last_filepath:
             pos_ms = int(self.position_ms())
-            self._last_switch_pos_ms = pos_ms   # expose for probe/AudioSwitch
-            was_playing = self._playing          # capture before _destroy() clears it
-            # Capture old pipeline before _destroy() clears self._pipe.
-            old_pipe = self._pipe
+            self._last_switch_pos_ms      = pos_ms         # consumed by ALSA probe
+            self._last_switch_was_playing = self._playing  # consumed by ALSA probe
+            was_playing = self._playing
             self._destroy()
-            # set_state(NULL) initiates teardown but GStreamer (and especially
-            # PipeWire's ALSA compat layer) may release /dev/snd asynchronously.
-            # Poll the old pipeline's state until it reaches NULL, then load.
-            # Cap at 2 s to avoid hanging if the pipeline is already gone.
-            fp = self._last_filepath
-            _loaded = [False]
-            def _wait_null(pipe, deadline_ms: int, pm=pos_ms, f=fp, wp=was_playing):
-                if _loaded[0]:
-                    return
-                if pipe is not None:
-                    ret, st, _ = pipe.get_state(0)   # non-blocking query
-                    if st != Gst.State.NULL and deadline_ms > 0:
-                        QTimer.singleShot(50, lambda: _wait_null(pipe, deadline_ms - 50))
-                        return
-                _loaded[0] = True
-                self._load_and_seek(f, pm, paused=not wp)
-            QTimer.singleShot(50, lambda: _wait_null(old_pipe, 2000))
+            if device_id == 'pipewire':
+                # PipeWire: reload here.  Always start PLAYING — load() now routes
+                # paused=True through a deferred ASYNC_DONE pause to avoid blocking
+                # the main thread on PipeWire node acquisition.
+                fp = self._last_filepath
+                QTimer.singleShot(150, lambda: self._load_and_seek(
+                    fp, pos_ms, paused=not was_playing))
 
     # ALSA probe helpers — derived dynamically from the selected plughw: device
     # so probe always targets the card the user actually chose.
@@ -6662,7 +6730,17 @@ class Player(QObject):
             bus = self._pipe.get_bus()
             if bus:
                 bus.remove_signal_watch()
-            self._pipe.set_state(Gst.State.NULL); self._pipe = None
+            # set_state(NULL) on a pipewiresink pipeline can block the calling
+            # thread for several seconds while PipeWire's session manager negotiates
+            # link teardown.  Running it on the main thread causes the Qt event
+            # loop to stall → window goes "not responding".
+            # Fix: hand the old pipeline off to the GLib thread via idle_add so
+            # teardown happens off the main thread.  We null self._pipe immediately
+            # so no further code in this session touches the old pipeline.
+            _dying_pipe = self._pipe
+            self._pipe = None
+            GLib.idle_add(_dying_pipe.set_state, Gst.State.NULL)
+        self._pending_pause_pipe = None   # cancel any in-flight deferred pause
         self._spec_el = None; self._playing = False; self._pos_timer.stop()
         if not self._silent_recovery:
             self._pos_playing   = False
@@ -6833,7 +6911,22 @@ class Player(QObject):
             self.sig_dur.emit(dur_ms)
 
     def _on_msg(self, _bus, msg):
-        if msg.type == Gst.MessageType.EOS:
+        if msg.type == Gst.MessageType.ASYNC_DONE:
+            # Preroll complete.  If load() was called with paused=True we started
+            # PLAYING to avoid blocking the main thread on PipeWire node acquisition.
+            # Now that the pipeline is prerolled, drop to PAUSED safely — this
+            # set_state() call is non-blocking because the sink is already acquired.
+            pending = self._pending_pause_pipe
+            if pending is not None and pending is self._pipe:
+                self._pending_pause_pipe = None
+                self._pipe.set_state(Gst.State.PAUSED)
+                frozen = self._pos_anchor_ms   # anchor was set to seek target in _load_and_seek
+                self._playing = False; self._pos_timer.stop()
+                self._pos_playing = False
+                self._anchor_now(frozen)
+                if not self._silent_recovery:
+                    self.sig_playing.emit(False)
+        elif msg.type == Gst.MessageType.EOS:
             self._playing = False; self._pos_timer.stop()
             self._pos_playing = False
             # Freeze anchor at end of track
@@ -7656,6 +7749,10 @@ class TrackTable(QTableWidget):
         self._lp = LongPressFilter(self); self.viewport().installEventFilter(self._lp)
         self._lp.triggered.connect(self.ctx_requested)
         self.doubleClicked.connect(lambda idx: self.row_activated.emit(idx.row()))
+        # QScroller (TouchGesture) can suppress mouseDoubleClickEvent on the viewport
+        # on some platforms, preventing doubleClicked from firing. Install a viewport
+        # event filter to catch MouseButtonDblClick directly as a reliable fallback.
+        self.viewport().installEventFilter(self)
         # Manual sort — we keep _tracks in sync with visual order so row index is always correct
         self._sort_col = -1; self._sort_asc = True
         hh.sectionClicked.connect(self._on_header_clicked)
@@ -7669,6 +7766,18 @@ class TrackTable(QTableWidget):
         self._tracks_ref = []
         self._fp_to_row: dict = {}   # filepath → row index, O(1) cover-loaded lookup
         _ensure_async_cover_loader().cover_loaded.connect(self._on_cover_loaded)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Catch MouseButtonDblClick on the viewport — QScroller may suppress
+        the normal doubleClicked signal on some platforms/Qt versions."""
+        if (obj is self.viewport() and
+                event.type() == QEvent.Type.MouseButtonDblClick and
+                event.button() == Qt.MouseButton.LeftButton):
+            item = self.itemAt(event.pos())
+            if item is not None:
+                self.row_activated.emit(item.row())
+                return True   # consumed — prevents duplicate from doubleClicked
+        return super().eventFilter(obj, event)
 
     def _on_cover_loaded(self, fp: str, size: int):
         """Update table icon when an async cover arrives."""
@@ -8123,8 +8232,13 @@ class GalleryView(QWidget):
 
     def _invalidate_track(self, ti: int):
         if ti < 0: return
-        try:    pos = self._vis_idx.index(ti)
-        except ValueError: return
+        # Build a track-index → visual-position map lazily (reset in _apply_filter_and_layout).
+        rmap = getattr(self, '_ti_to_vis_pos', None)
+        if rmap is None:
+            rmap = {track_idx: pos for pos, track_idx in enumerate(self._vis_idx)}
+            self._ti_to_vis_pos = rmap
+        pos = rmap.get(ti, -1)
+        if pos < 0: return
         self._canvas.update(self._card_rect(pos))
 
     # ── Filter ────────────────────────────────────────────────────────────────
@@ -8139,8 +8253,9 @@ class GalleryView(QWidget):
                     or q in Path(t.filepath).name.lower())]
         else:
             self._vis_idx = list(range(len(self._tracks)))
-        # Invalidate the filepath→position lookup used by _on_cover_loaded
+        # Invalidate both lazy lookup caches used by _on_cover_loaded and _invalidate_track
         self._fp_to_vis_positions = None
+        self._ti_to_vis_pos       = None
         self._recompute_layout()
 
     # ── Show / resize ─────────────────────────────────────────────────────────
@@ -9396,6 +9511,12 @@ class ControlBar(QFrame):
             pop.radius_changed.connect(self._on_radius_change)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            # Notify MainWindow to run the ALSA probe when the device changes.
+            # Must be connected here (lazy popup creation) — MainWindow's __init__
+            # guard `if _settings_popup is not None` always fails at startup.
+            win = self.window()
+            if win is not None and hasattr(win, '_on_output_device_changed'):
+                pop.output_device_changed.connect(win._on_output_device_changed)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
             # Auto-save on every setting change
@@ -9563,7 +9684,6 @@ class ControlBar(QFrame):
         self._blackout_ref = overlay
         if overlay is not None:
             overlay._ctrlbar_ref = self
-            self._player._ctrlbar_bref = overlay
 
     def _on_cover_fetch_btn(self):
         """Open the CoverFetchPopup — triggered by the Settings button."""
@@ -9815,9 +9935,9 @@ class ControlBar(QFrame):
             self._blackout_ref.set_overlay_lyrics(_ov_lyr)
             self._blackout_ref.set_overlay_clock(_ov_clk)
             self._blackout_ref.set_scale(_ov_sc)
-        _cf = cfg.get('cover_fetch_on', True)
-        pop.set_cover_fetch(_cf)
-        global _cover_fetch_on; _cover_fetch_on = _cf
+        _cover_fetch = cfg.get('cover_fetch_on', True)
+        pop.set_cover_fetch(_cover_fetch)
+        global _cover_fetch_on; _cover_fetch_on = _cover_fetch
         self._player.set_volume(volume / 100)
         # Corner radius — restore before theme so the first stylesheet is correct
         _rad = int(float(cfg.get('corner_radius', RAD_PCT)))
@@ -10149,7 +10269,6 @@ class ControlBar(QFrame):
             tint.setHsvF(ah, s0 + t * (s1 - s0), v0 + t * (v1 - v0))
 
         self._bar_color = tint
-        self._brush_cache = QBrush(tint)
         self.update()
 
     def _on_viz_type_change(self, vtype: str):
@@ -10431,13 +10550,16 @@ class ControlBar(QFrame):
                     buf = self._px_buf
                     buf[:] = self._px_bg
 
-                    cx_arr = _np.linspace(0, iw - 1, len(bar_px_arr), dtype=_np.float64)
-                    cy_arr = (ih - bar_px_arr).astype(_np.float64)
-                    col_x      = _np.arange(iw, dtype=_np.float64)
-                    line_y     = _np.interp(col_x, cx_arr, cy_arr)
-                    line_y_int = _np.clip(line_y.astype(_np.int32), 0, ih - 1)
+                    # Use precomputed linear-interp tables (same as line mode) — zero allocation.
+                    cy_buf = self._line_cy_buf
+                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
+                    line_y_f = (cy_buf[self._line_bin_i]
+                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
+                                                      - cy_buf[self._line_bin_i]))
+                    line_y_i = line_y_f.astype(_np.int32)
+                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)
 
-                    fill_mask = self._px_row_idx >= line_y_int
+                    fill_mask = self._px_row_idx >= line_y_i
                     buf[fill_mask] = self._px_bar
 
                     p.drawImage(0, 0, self._px_qimg)
@@ -10699,6 +10821,18 @@ class ControlBar(QFrame):
 
     def _on_dur(self, ms): self._dur_ms = ms; self._lbl_tot.setText(self._fmt(ms))
 
+    def refresh_theme(self):
+        """Re-apply theme after a dark/light switch.
+        Re-renders the cover label if it is showing the default placeholder
+        so it picks up the new background colour.
+        """
+        sz = self._cover_lbl._sz
+        if self._cover_lbl.isVisible() and self._cur_track is not None:
+            pm = get_cover_pixmap(self._cur_track.filepath, sz)
+            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(sz))
+        elif self._cover_lbl.isVisible():
+            self._cover_lbl.setPixmap(draw_default_cover(sz))
+
     def set_track(self, t: Track):
         self._lbl_title.setText(t.title or Path(t.filepath).name)
         self._lbl_artist.setText(t.artist)
@@ -10733,10 +10867,7 @@ class ControlBar(QFrame):
         """Show/hide spinner on play button during pipeline reload."""
         self.btn_play.set_busy(busy)
 
-    @staticmethod
-    def _fmt(ms):
-        t = ms//1000; h, r = divmod(t, 3600); m, s = divmod(r, 60)
-        return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+    _fmt = staticmethod(_fmt_ms)   # alias for backward compatibility
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Custom title bar
@@ -11002,29 +11133,9 @@ class MainWindow(QMainWindow):
         self._device_busy_popup.switch_to_pipewire.connect(self._on_switch_to_pipewire)
         self._device_busy_popup.retry.connect(self._on_alsa_retry)
 
-        # When the user picks a new output device in Settings, run the probe
-        # sequence to confirm which ALSA device (hw:/plughw:) actually works.
-        def _on_output_device_changed(dev_id: str):
-            # set_output_device is already connected at ControlBar init (line ~9327)
-            # and fires BEFORE this handler (Qt connect order).  By the time we reach
-            # _alsa_probe_and_play the pipeline is already destroyed and position_ms()
-            # returns 0.  set_output_device() saves pos to _player._last_switch_pos_ms
-            # before destroying the pipe; the probe reads it from there.
-            if dev_id != 'pipewire':
-                # Derive hw:X,Y from the selected plughw:X,Y so we probe the
-                # correct card, not the hardcoded hw:0,0.
-                hw_primary = dev_id.replace('plughw:', 'hw:', 1)
-                self._alsa_confirmed_device = hw_primary
-                self._alsa_selected_plughw  = dev_id   # remember for fallback
-                if self._cur_track_mw is not None:
-                    # Track ready — probe immediately
-                    QTimer.singleShot(0, self._alsa_probe_and_play)
-                else:
-                    # No track yet — probe on next play
-                    self._alsa_probe_needed = True
-        if self._ctrlbar._settings_popup is not None:
-            self._ctrlbar._settings_popup.output_device_changed.connect(
-                _on_output_device_changed)
+        # _on_output_device_changed is a proper MainWindow method connected via
+        # _ensure_settings_popup (ControlBar) when the popup is first created.
+        # The old guard `if _settings_popup is not None` was always False at init.
         self._ctrlbar.btn_play.clicked.connect(self._play_pause)
         self._ctrlbar.btn_prev.clicked.connect(self._prev_track)
         self._ctrlbar.btn_next.clicked.connect(self._next_track)
@@ -11173,6 +11284,7 @@ class MainWindow(QMainWindow):
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self._ctrlbar.btn_shuf, self._ctrlbar.btn_prev, self._ctrlbar.btn_next):
             b.setStyleSheet(_ts)
+        self._ctrlbar.refresh_theme()
         if hasattr(self, '_titlebar'):
             self._titlebar.refresh_theme()
         QApplication.processEvents()
@@ -11734,14 +11846,15 @@ class MainWindow(QMainWindow):
     def _alsa_play(self) -> None:
         """High-level play entry point for normal play/pause/track-change.
 
-        On first play after startup or combobox change, runs the hw:X,Y→plughw:X,Y
-        probe (where X,Y is derived from the user's selected plughw: device).  Subsequent plays use the already-confirmed device directly.
-        If a prior ALSA error was recorded (device busy, open-fail) re-probe
-        so the next track doesn't silently play with no audio.
+        If the current output is PipeWire, plays directly via _start_playback().
+        If the current output is ALSA, runs the hw:/plughw: probe on first use
+        or after an error; subsequent plays use the confirmed device directly.
         """
+        # If the user has selected PipeWire, never touch _alsa_device.
+        if self._player._alsa_device == 'pipewire':
+            self._start_playback()
+            return
         needs_probe = getattr(self, '_alsa_probe_needed', False)
-        # Also re-probe if we have a lingering error from the previous track
-        # (e.g. device was busy when track N ended; track N+1 must not skip probe).
         if not needs_probe and getattr(self, '_alsa_probe_error', ''):
             needs_probe = True
             self._alsa_probe_needed = True
@@ -11799,6 +11912,24 @@ class MainWindow(QMainWindow):
         self._mpris.notify_track(t); self._mpris.notify_status()
         self._blackout.set_track(t.title or Path(t.filepath).name, t.artist, t.album)
 
+    def _on_output_device_changed(self, dev_id: str) -> None:
+        """Called when the user picks a new output device in SettingsPopup.
+
+        set_output_device (connected first in ControlBar) has already destroyed
+        the pipeline and saved position/_last_switch_was_playing by the time this
+        fires.  For ALSA devices we run the hw:/plughw: probe to confirm the card
+        works; for PipeWire the reload is handled entirely by set_output_device.
+        """
+        if dev_id == 'pipewire':
+            return
+        # Derive hw:X,Y from the selected plughw:X,Y for the probe's first attempt.
+        self._alsa_confirmed_device = dev_id.replace('plughw:', 'hw:', 1)
+        self._alsa_selected_plughw  = dev_id
+        if self._cur_track_mw is not None:
+            QTimer.singleShot(0, self._alsa_probe_and_play)
+        else:
+            self._alsa_probe_needed = True
+
     def _on_switch_to_pipewire(self) -> None:
         """Called when the user clicks 'Switch to PipeWire' in DeviceBusyPopup.
         Updates the player, syncs the SettingsPopup combobox, and saves config."""
@@ -11818,8 +11949,7 @@ class MainWindow(QMainWindow):
             self._alsa_probe_and_play()
 
     def _alsa_probe_and_play(self) -> None:
-        """Probe hw:X,Y then plughw:X,Y (derived from selected ALSA device) to find
-        a working ALSA device, then play.
+        """Probe hw:X,Y then plughw:X,Y to find a working ALSA device, then play.
 
         Called ONLY on:
           • initial launch (when an ALSA device is saved in config)
@@ -11829,40 +11959,38 @@ class MainWindow(QMainWindow):
         Normal play/pause/track-change use _start_playback() directly with
         whatever device was confirmed by the last probe (_alsa_confirmed_device).
 
-        Probe logic (error-detection window = 800 ms per attempt):
-          Attempts 1-5: try hw:X,Y  (bit-perfect, kernel-direct)
-          Attempt  6:   try plughw:X,Y  (plug-layer, format conversion)
-          If all fail:  show DeviceBusyPopup
+        Probe schedule: hw:, plughw:, hw:(+2s), plughw:(+2s), hw:(+4s), give up.
+        Retrying the same device with increasing back-off gives PipeWire time to
+        release its exclusive hold on the hw: node during async teardown.
+        Seeking to the original position happens once in _confirm after success,
+        not per-attempt, so position survives across retries.
         """
         PRIMARY  = self._player._alsa_device.replace('plughw:', 'hw:', 1) \
                    if self._player._alsa_device and self._player._alsa_device != 'pipewire' \
                    else getattr(self, '_alsa_selected_plughw', 'plughw:1,0').replace('plughw:', 'hw:', 1)
         FALLBACK = getattr(self, '_alsa_selected_plughw',
                            self._player._alsa_device or 'plughw:1,0')
-        MAX_HW   = 5
-        WINDOW   = 800  # ms to wait for GStreamer error before declaring success
 
-        # Cancel any in-progress probe
         gen = getattr(self, '_alsa_probe_gen', 0) + 1
         self._alsa_probe_gen = gen
         self._alsa_probe_error = ''
+        self._alsa_probe_active = True   # tells _on_player_error we're inside a probe
 
-        # Use the position captured by set_output_device() just before it destroyed
-        # the pipeline — position_ms() would return 0 here since _pipe is None.
+        # Consume saved position/state once; reused across all retries.
         _probe_pos_ms = getattr(self._player, '_last_switch_pos_ms', None)
+        _probe_was_playing = getattr(self._player, '_last_switch_was_playing', True)
         if _probe_pos_ms is None:
             _probe_pos_ms = max(0, int(self._player.position_ms())) if self._player._last_filepath else 0
-        self._player._last_switch_pos_ms = None  # consume so retries don't reuse stale value
+        if _probe_was_playing is None:
+            _probe_was_playing = True
+        self._player._last_switch_pos_ms      = None
+        self._player._last_switch_was_playing = None
 
-        print(f'[AudioSwitch] ALSA probe START: {PRIMARY!r} x{MAX_HW}, fallback {FALLBACK!r}'
-              f'  (resume pos={_probe_pos_ms} ms)')
+        print(f'[AudioSwitch] ALSA probe START: {PRIMARY!r} / {FALLBACK!r}'
+              f'  (resume pos={_probe_pos_ms} ms, was_playing={_probe_was_playing})')
 
-        # Show status bar feedback while probing so the user knows what's happening
-        _dev_label = getattr(self, '_alsa_selected_plughw',
-                             self._player._alsa_device or 'ALSA').split(':')[-1].strip()
+        _dev_label = FALLBACK.replace('plughw:', '').split(',')[0]
         self._status.showMessage(f'⏳  Probing ALSA device: {_dev_label} …', 0)
-
-        # Show busy spinner on the play button — not a full-screen overlay.
         self._ctrlbar.set_play_busy(True)
 
         def _hide_spinner():
@@ -11874,19 +12002,33 @@ class MainWindow(QMainWindow):
             print(f'[AudioSwitch] ALSA confirmed working device: {device!r}')
             self._alsa_confirmed_device = device
             self._alsa_probe_needed     = False
-            self._alsa_probe_error      = ''   # clear any prior error so _alsa_play won't re-probe
+            self._alsa_probe_error      = ''
+            self._alsa_probe_active     = False
             self._player._alsa_device   = device
             _hide_spinner()
-            self._status.clearMessage()   # remove "Probing…" once confirmed
+            self._status.clearMessage()
             pop = self._ctrlbar._settings_popup
             if pop is not None:
-                # Always show the user's original plughw: selection in the combobox,
-                # not the internal hw: device used by the pipeline (which has no
-                # entry in the combo and would cause the combo to reset to PipeWire).
                 combo_dev = FALLBACK if device != 'pipewire' else 'pipewire'
                 pop.set_output_device(combo_dev)
                 self._ctrlbar._refresh_audio_info()
-            # The probe's _start_playback() already started audio — update UI icons
+            # Pipeline is PLAYING from position 0.  Mute, seek to original position,
+            # then unmute — ALSA device stays open (needs audio flowing) but user
+            # hears nothing from position 0.  After seek settles, restore play state.
+            if _probe_pos_ms > 200 and self._player.has_pipe:
+                self._player._pipe.set_property('volume', 0.0)
+                self._player.seek(_probe_pos_ms)
+                def _after_seek():
+                    if not self._player.has_pipe:
+                        return
+                    self._player._pipe.set_property('volume', self._player._volume)
+                    if not _probe_was_playing and self._player.playing:
+                        self._player.play_pause()
+                    self._ctrlbar.set_play_icon(self._player.playing)
+                QTimer.singleShot(450, _after_seek)
+                return   # set_play_icon called inside _after_seek
+            if not _probe_was_playing and self._player.playing:
+                self._player.play_pause()
             self._ctrlbar.set_play_icon(self._player.playing)
 
         def _give_up():
@@ -11894,46 +12036,64 @@ class MainWindow(QMainWindow):
                 return
             err = self._alsa_probe_error or 'ALSA device unavailable'
             print(f'[AudioSwitch] ALSA probe exhausted. Last error: {err!r}')
+            self._alsa_probe_active = False
             _hide_spinner()
-            self._status.showMessage(f'⚠  ALSA device unavailable — try Retry or switch to PipeWire', 6000)
+            self._status.showMessage('⚠  ALSA device unavailable — try Retry or switch to PipeWire', 6000)
             self._device_busy_popup.show_error(err)
 
-        def _attempt(n: int):
+        # (device, delay_ms_before_attempt)
+        # hw: first (bit-perfect); plughw: as immediate fallback if hw: busy;
+        # then back off so PipeWire has time to release the hw: node.
+        _schedule = [
+            (PRIMARY,  0),
+            (FALLBACK, 0),
+            (PRIMARY,  2000),
+            (FALLBACK, 2000),
+            (PRIMARY,  4000),
+        ]
+
+        def _attempt(idx: int):
             if self._alsa_probe_gen != gen:
                 return
-            if n < MAX_HW:
-                device = PRIMARY
-            elif n == MAX_HW:
-                device = FALLBACK
-            else:
+            if idx >= len(_schedule):
                 _give_up(); return
+            device, delay = _schedule[idx]
 
-            print(f'[AudioSwitch] ALSA probe attempt {n + 1}/{MAX_HW + 1}: {device!r}')
-            self._player._alsa_device = device
-            self._alsa_probe_error = ''  # reset for this attempt
-            self._status.showMessage(
-                f'⏳  ALSA probe {n + 1}/{MAX_HW + 1}: trying {device} …', 0)
+            def _run():
+                if self._alsa_probe_gen != gen:
+                    return
+                print(f'[AudioSwitch] ALSA probe attempt {idx + 1}/{len(_schedule)}: {device!r}')
+                self._player._alsa_device = device
+                self._alsa_probe_error = ''
+                self._status.showMessage(
+                    f'⏳  ALSA {idx + 1}/{len(_schedule)}: trying {device} …', 0)
+                if self._cur_track_mw is not None:
+                    # Load PLAYING — ALSA hw: closes the device when no audio flows,
+                    # so paused=True would cause the pipeline to drop to NULL/READY
+                    # and _confirm's play_pause() would hit the dead-pipe reload path.
+                    # Anchor to the original position first so the seekbar doesn't
+                    # snap to 0 during the probe window.
+                    if _probe_pos_ms > 0:
+                        self._player._anchor_now(float(_probe_pos_ms))
+                    self._player.load(self._cur_track_mw.filepath)
+                    self._ctrlbar.set_track(self._cur_track_mw)
+                QTimer.singleShot(800, lambda: _check(idx, device))
 
-            if self._cur_track_mw is not None:
-                if _probe_pos_ms > 200:
-                    # Resume from captured position (pipeline switch loses position)
-                    self._player._load_and_seek(self._cur_track_mw.filepath, _probe_pos_ms)
-                else:
-                    self._start_playback()
+            if delay > 0:
+                self._status.showMessage(
+                    f'⏳  ALSA: device busy — retrying in {delay // 1000}s …', 0)
+                QTimer.singleShot(delay, _run)
+            else:
+                _run()
 
-            # After WINDOW ms with no sig_err → device works
-            QTimer.singleShot(WINDOW, lambda: _check(n, device))
-
-        def _check(n: int, device: str):
+        def _check(idx: int, device: str):
             if self._alsa_probe_gen != gen:
                 return
             if not self._alsa_probe_error:
-                # No error received in the window → device is working
                 _confirm(device)
             else:
-                # Error received → try next
-                print(f'[AudioSwitch] attempt {n + 1} failed ({self._alsa_probe_error!r}), trying next')
-                _attempt(n + 1)
+                print(f'[AudioSwitch] attempt {idx + 1} failed ({self._alsa_probe_error!r}), trying next')
+                _attempt(idx + 1)
 
         _attempt(0)
 
@@ -11943,9 +12103,22 @@ class MainWindow(QMainWindow):
         print(f'[AudioSwitch] player error (alsa={using_alsa}, device={self._player._alsa_device!r}): {err!r}')
         if using_alsa:
             self._alsa_probe_error = err
-            # Force re-probe on the next track so the busy/open-fail cycle
-            # doesn't silently repeat with no audio on subsequent tracks.
             self._alsa_probe_needed = True
+            # If this error fired during normal playback (not inside an active probe
+            # window), the pipeline is now dead and nobody will restart it.
+            # Re-probe immediately so the user doesn't get stuck silently.
+            # If a probe IS already running, _check() handles the error — don't
+            # start a second probe (that would cancel the first via gen increment).
+            probe_running = getattr(self, '_alsa_probe_active', False)
+            if not probe_running and self._cur_track_mw is not None:
+                # Save position before pipeline was destroyed so resume is accurate.
+                if getattr(self._player, '_last_switch_pos_ms', None) is None:
+                    saved = int(self._player._pos_anchor_ms)
+                    if saved > 0:
+                        self._player._last_switch_pos_ms      = saved
+                        self._player._last_switch_was_playing = True
+                self._alsa_probe_needed = False
+                QTimer.singleShot(0, self._alsa_probe_and_play)
         else:
             self._status.showMessage(f'Error: {err}', 5000)
 
