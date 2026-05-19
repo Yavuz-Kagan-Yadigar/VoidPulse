@@ -5,155 +5,222 @@ Wayland · GNOME/KDE Integration · PipeWire · GStreamer spectrum viz
 MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
 ═══════════════════════════════════════════════════════════════════
- MODULE STRUCTURE  (always update line numbers and version number without a promt)
- V_1.0
+ MODULE STRUCTURE
+ V_1.9  (perf · bug fix · dead-code pass continued)
+   • _cf shadow bug fixed in init_from_config (cover_fetch_on local renamed)
+   • peaking_coefficients: cos(w0) computed once; a1 = b1 (removes duplicate trig call)
+   • _vtag: tag keys pre-lowercased once per call (O(keys*tags) → O(tags + keys*tags) lower calls)
+   • GalleryView._invalidate_track: O(n) list.index() → O(1) _ti_to_vis_pos dict
+     (invalidated alongside _fp_to_vis_positions in _apply_filter_and_layout)
+   • LyricsPanel: single QPropertyAnimation pre-allocated in __init__; _highlight
+     reuses it (stop + retarget) instead of constructing + wiring a new one every
+     lyric-line change (called up to 10×/s while synced lyrics play)
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
-   apply_theme()               L212   Switch dark/light palette globals + rebuild SS
-   _apply_app_palette()        L226   Sync QPalette with current globals
-   make_acch()                 L246   Derive highlight colour from accent
-   make_stylesheet()           L275   Build global QSS string
+   apply_theme()               L255   Switch dark/light palette globals + rebuild SS
+   _apply_app_palette()        L269   Sync QPalette with current globals
+   make_acch()                 L289   Derive highlight colour from accent
+   make_stylesheet()           L329   Build global QSS string
 
  CONSTANTS & GLOBALS
    SUPPORTED_EXT, CONFIG_PATH, VIZ_BANDS, GST_BANDS, EQ_*, RAD …
+   _MB_BAD_SEC / _MB_GOOD_PRI  L2201  Shared MusicBrainz release-type filter sets (frozenset)
+
+ HELPERS
+   _apply_scroller_properties() L2519 Kinetic-scroll config (touch=True adds tight drag metrics)
+   _np_to_qpolygonf()          L3451  Vectorised numpy arrays → QPolygonF (no per-point float boxing)
+   _fmt_ms()                   L3461  ms integer → "M:SS" / "H:MM:SS" string
 
  WIDGETS
-   ToggleSwitch                L424   Animated two-state toggle (single/two-label)
-   JumpSlider                  L566   QSlider that jumps to click/touch position
-   SliderRow                   L604   Label + JumpSlider + value label row
-   SettingsPopup               L636   Settings panel popup (child widget, Wayland-safe)
-   TagEditDialog               L1049  Modal tag editor with cover management
-     _pick_cover_file()        L1149  Open file dialog → set cover bytes
-     _search_cover_online()    L1165  Background cover search → update preview
-     _fetch_tags_online()      L1210  Background tag lookup → fill empty fields
-     _fetch_lyrics_online()    L1246  Force-fetch lyrics (all APIs, synced priority) → embed
-   EQSliderCell                L1356  Table cell widget for a single EQ parameter
-   TouchComboBox               L2392  QComboBox immune to touch double-fire close
-   EqPopup                     L2411  Parametric EQ popup + preset management
-   EQGraph                     L2760  Frequency response curve widget
-   BlackoutOverlay             L2869  Full-screen OLED burn-in protection overlay
-   SeekSlider                  L6426  Touch-aware seek slider
-   LongPressFilter             L6538  Event filter: long-press → context menu
-   RepeatButton                L7760  Tri-state repeat cycle button
-   _FullscreenBtn              L7801  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L7849  Play/pause button with spinning reload indicator
-   TitleBarButton              L9218  Frameless window-control button
-   TitleBarCloseButton         L9243  Close variant (red hover)
-   BlackTitleBar               L9247  Custom frameless titlebar
-   _SpinningOverlay            L10567 Semi-transparent blocking overlay with spinner
+   ToggleSwitch                L508   Animated two-state toggle (single/two-label)
+                                      _rebuild_track_colors() L583  Lazy-cached HSV + label colours
+                                      (invalidated on ACC/BG4/B2/FG/FG2 change; dim/bright rgb
+                                      cached here — no QColor alloc per frame in paintEvent)
+   JumpSlider                  L683   QSlider that jumps to click/touch position
+   SliderRow                   L735   Label + JumpSlider + value label row
+   SettingsPopup               L767   Settings panel popup (child widget, Wayland-safe)
+     _viz_combo_ss()           L1283  Static: viz-type QComboBox stylesheet (shared init+refresh)
+     refresh_theme()           L1292  Re-apply palette-baked inline stylesheets
+   DeviceBusyPopup             L1352  ALSA error popup (styled like other popups, centred)
+     show_error()              L1457  Set title/detail, reposition, start auto-dismiss timer
+   _ModalOverlay               L1508  Semi-transparent modal backdrop (Wayland-safe outside-click)
+     show_for()                L1598  Static factory: wrap any popup in an overlay
+   TagEditDialog               L1622  Modal tag editor; closes on deactivation (Wayland-safe)
+     changeEvent()             L1720  Reject on ActivationChange (Wayland outside-click close)
+     _pick_cover_file()        L1745  Open file dialog → set cover bytes
+     _search_cover_online()    L1761  Background cover search → update preview
+     _fetch_tags_online()      L1807  Background tag lookup → fill empty fields
+     _fetch_lyrics_online()    L1844  Force-fetch lyrics (all APIs, synced priority) → embed
+   LyricsEditDialog            L1983  Plain/LRC lyrics editor dialog
+   EQSliderCell                L2032  Table cell widget for a single EQ parameter
+   TouchComboBox               L3086  QComboBox immune to touch double-fire close
+   EqPopup                     L3105  Parametric EQ popup + preset management
+   EQGraph                     L3466  Frequency response curve widget (uses _np_to_qpolygonf)
+   BlackoutOverlay             L3567  Full-screen OLED burn-in protection overlay
+                                      (line/line+fill paths vectorised via numpy + _np_to_qpolygonf)
+   SeekSlider                  L7371  Touch-aware seek slider
+   LongPressFilter             L7477  Event filter: long-press → context menu
+   _TouchHeaderView            L7531  QHeaderView subclass: 28px touch grab zone on column dividers
+   RepeatButton                L8893  Tri-state repeat cycle button
+   _FullscreenBtn              L8934  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L8982  Play/pause button with spinning reload indicator
+   _RoundedCoverLabel          L9048  Rounded cover art label widget
+   TitleBarButton              L10739 Frameless window-control button
+   TitleBarCloseButton         L10764 Close variant (red hover)
+   BlackTitleBar               L10768 Custom frameless titlebar
+   _SpinningOverlay            L12393 Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L1762  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L1773  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L1814  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L1838  LrcLib API sources
-   _src_lyrics_ovh()           L1872  Lyrics.ovh fallback source
-   ClickableLyricLine          L1966  QLabel that emits clicked(ms)
-   LyricsFetcher               L1979  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2116  Scrollable lyric display with sync highlight (touch scroll enabled)
+   _lrc_parse()                L2457  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L2468  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L2509  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L2541  LrcLib API sources
+   _src_lyrics_ovh()           L2575  Lyrics.ovh fallback source
+   _src_chartlyrics()          L2584  ChartLyrics fallback source
+   _src_genius_search()        L2596  Genius fallback source
+   _src_azlyrics()             L2622  AZLyrics fallback source
+   _src_songlyrics()           L2638  SongLyrics fallback source
+   _src_letras()               L2653  Letras fallback source
+   ClickableLyricLine          L2669  QLabel that emits clicked(ms)
+   LyricsFetcher               L2682  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2819  Scrollable lyric display with sync highlight
+                                      _synced_ts initialised in __init__; bisect uses attribute directly
+                                      _scroll_anim pre-allocated in __init__; _highlight reuses (stop+retarget)
 
  COVER ART
-   _trim_cover_cache()         L3336  Evict oldest entries when cache exceeds limit
-   _rounded_pixmap()           L3374  Scale + crop + round-corner mask
-   draw_default_cover()        L3398  Render clef placeholder pixmap
-   _cover_disk_key()           L3445  SHA1 hash for disk cache filename
-   get_cover_pixmap()          L3453  Non-blocking async cover lookup (paint path)
-   get_cover_pixmap_sync()     L3471  Blocking cover lookup (worker threads)
-   _CoverTask                  L3506  QRunnable for one cover load
-   AsyncCoverLoader            L3547  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L3639 Module singleton factory
-   _clear_cover_disk_cache()   L3645  Wipe disk + memory cover caches
-   _BaseFetchPopup             L3654  Shared base class for fetch popups (supports multiple concurrent workers)
-     closeEvent()              L3967  Hide dialog, keep worker running in background
-     _emit_status_update()     L4018  Show each fetch instance progress as permanent widget on status bar left
-   LibraryCoverFetchWorker     L4076  Sequential per-track cover fetcher
-   CoverFetchPopup             L4118  Modal "fetch covers for library" dialog (multiple concurrent supported)
+   _trim_cover_cache()         L4069  Evict oldest entries when cache exceeds limit
+   _square_pixmap()            L4107  Scale + crop to exact square (no radius)
+   _get_corner_frame()         L4130  Build cached corner-frame overlay pixmap
+   _draw_cover_rounded()       L4157  Draw square cover + corner-frame overlay
+   draw_default_cover()        L4179  Render clef placeholder pixmap (square, no radius)
+   _cover_disk_key()           L4229  Filename-based disk cache key (<stem>_<size>)
+   _cover_disk_is_stale()      L4248  mtime sidecar check for re-tagging detection
+   _cover_disk_write_mtime()   L4266  Write mtime sidecar for stale-check
+   get_cover_pixmap()          L4274  Non-blocking async cover lookup (paint path)
+   _CoverTask                  L4295  QRunnable for one cover load
+   AsyncCoverLoader            L4337  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L4425 Module singleton factory
+   _BaseFetchPopup             L4431  Shared base class for fetch popups (multiple concurrent workers)
+     closeEvent()              L4744  Hide dialog, keep worker running in background
+   LibraryCoverFetchWorker     L4851  Sequential per-track cover fetcher
+   CoverFetchPopup             L4893  Modal "fetch covers for library" dialog
 
  TAGS / METADATA
-   fetch_cover_online()        L1502  Try iTunes/Deezer/MusicBrainz/LastFM
-   lookup_tags_online()        L1615  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L1644  Write title/artist/album via mutagen
-   embed_cover_bytes()         L1673  Write cover into audio tags
-   embed_lyrics()              L1714  Write lyrics into audio tags
-   _tag() / _vtag()            L3256  Tag value helpers (case-insensitive Vorbis)
-   extract_cover_bytes()       L3349  Read raw cover bytes from audio tags
-   _open_audio()               L3274  Open audio file with mutagen (fallback chain)
-   read_metadata()             L3300  Build Track from mutagen
-   LibraryTagFetchWorker       L4187  Sequential per-track tag fetcher
-   TagFetchPopup               L4233  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L4275  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L4333  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L4365  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L4376  Build new filename stem from pattern + metadata
-   LibraryRenameWorker         L4448  Sequential per-track file renamer
-   RenamePopup                 L4511  Modal "batch rename library" dialog (run-in-bg)
-     closeEvent()              L4802  Hide dialog, keep worker running in background
+   fetch_cover_online()        L2178  Try iTunes/Deezer/MusicBrainz/LastFM
+   _mb_rel_score()             L2204  MusicBrainz release quality scorer
+   _mb_rec_score()             L2216  MusicBrainz recording quality scorer
+   lookup_tags_online()        L2295  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L2324  Write title/artist/album via mutagen
+   embed_cover_bytes()         L2361  Write cover into audio tags
+   embed_lyrics()              L2408  Write lyrics into audio tags
+   Track                       L3963  @dataclass: filepath + metadata
+   _tag() / _vtag()            L3988  Tag value helpers (_vtag: keys pre-lowercased once per call)
+   _open_audio()               L4006  Open audio file with mutagen (fallback chain)
+   read_metadata()             L4032  Build Track from mutagen
+   extract_cover_bytes()       L4082  Read raw cover bytes from audio tags
+   LibraryTagFetchWorker       L4963  Sequential per-track tag fetcher
+   TagFetchPopup               L5009  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L5051  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L5109  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L5141  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L5152  Build new filename stem from pattern + metadata
+   _validate_rename_pattern()  L5180  Validate rename pattern tokens
+   _recover_rename_temps()     L5199  Recover leftover temp files from a crashed rename run
+   LibraryRenameWorker         L5231  Sequential per-track file renamer
+                                      _MAX_FILENAME_BYTES / _DEDUP_RESERVE hoisted before loop
+   RenamePopup                 L5356  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L5647  Hide dialog, keep worker running in background
 
  LIBRARY
-   Track                       L3231  @dataclass: filepath + metadata
-   scan_folder()               L4864  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L4879  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L4901  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L4919  Non-blocking playlist loader for config restore
+   scan_folder()               L5709  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L5724  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L5746  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L5764  Non-blocking playlist loader for config restore
 
  PLAYER
-   RepeatMode                  L4951  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L4954  Biquad peaking filter coefficients
-   Player                      L4977  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L5097  Load URI, build sink bin, start playback
-     play_pause()              L5144  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L5218  Load + seek after dead-pipe recovery
-     _resume_with_reload()     L5267  Reload pipeline at current position
-     _reload_at_pos()          L5307  WARNING-path pipeline reload (separate guard)
-     seek()                    L5348  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L5515 Update biquad coefficients (GLib idle)
-     _make_sink_bin()          L5543  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L5617  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L5751  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L5810  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L5840  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L5950  GLib-thread: burst-safe magnitude merge + el accumulate
-     _compute_viz_frame()      L6066  Main-thread smoothed bar computation (alpha^N EMA)
+   RepeatMode                  L5796  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L5799  Biquad peaking filter coefficients (cos_w0 computed once; a1=b1)
+   Player                      L5822  GStreamer playbin wrapper + EQ + spectrum viz
+     load()                    L5992  Load URI, build sink bin, start playback
+     play_pause()              L6096  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L6170  Load + seek after dead-pipe recovery; mute during preroll+seek window
+                                      pos captured in set_output_device() → _last_switch_pos_ms
+                                      so probe can resume at correct position
+     _resume_with_reload()     L6233  Reload pipeline at current position
+     _reload_at_pos()          L6273  WARNING-path pipeline reload (separate guard)
+     seek()                    L6324  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L6477 Update biquad coefficients (GLib idle)
+     set_output_device()       L6505  Switch sink; saves pos to _last_switch_pos_ms before destroy
+     _alsa_primary()           L6531  Static: derive hw:X,Y from plughw:X,Y
+     _alsa_fallback()          L6536  Static: identity (plughw:X,Y as ALSA plug fallback)
+     _make_sink_bin()          L6552  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L6607  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L6756  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L6815  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L6845  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L6976  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L7092  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
-   MprisServer                 L6155  MPRIS2 D-Bus interface (GLib thread)
+   MprisServer                 L7100  MPRIS2 D-Bus interface (GLib thread)
 
  VIEWS
-   TrackTable                  L6590  QTableWidget with covers + sort + touch scroll
-   GalleryView                 L6864  Virtual-scroll card gallery (Z/S layout modes)
-   PlaylistPage                L7416  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L7498  Sidebar playlist row (label + delete button)
-   Sidebar                     L7562  Left panel: search + library nav + playlist list (touch scroll enabled)
+   TrackTable                  L7594  QTableWidget: covers + sort + touch scroll
+                                      _POPULATE_CHUNK / _GALLERY_CHUNK class constants
+                                      _CELL_ALIGN hoisted as class constant
+                                      _TouchHeaderView installed for fat column resize zones
+   GalleryView                 L7864  Virtual-scroll card gallery (Z/S layout modes)
+                                      _invalidate_track uses _ti_to_vis_pos dict (O(1)) — not list.index() (O(n))
+   PlaylistPage                L8422  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L8508  Sidebar playlist row (label + delete button)
+   Sidebar                     L8611  Left panel: search + library nav + playlist list
 
  CONTROL BAR
-   ControlBar                  L7915  Seek bar + transport + viz + settings/EQ toggles
-     _ensure_eq_popup()        L8125  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L8150  Lazy-create SettingsPopup singleton
-     _reset_idle_timer()       L8231  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L8241  Fire overlay when idle threshold reached
-     init_from_config()        L8487  Apply saved config dict to all sub-widgets
-     config_state()            L8582  Collect current state → config dict
-     _precompute_bars()        L8610  Freq→bin map + bar geometry + cap offset arrays (fully vectorised)
-     paintEvent()              L8926  Fully vectorised numpy pixel-buffer rendering
+   ControlBar                  L9087  Seek bar + transport + viz + settings/EQ toggles
+                                      _paint_bord_pen / _paint_bg_brush cached on BORD/BG change —
+                                      avoids QPen(QColor(BORD), 1) construction on every 60-fps frame
+                                      _fmt = staticmethod(_fmt_ms)  — alias, no duplication
+     _ensure_eq_popup()        L9311  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L9341  Lazy-create SettingsPopup singleton
+     _refresh_audio_info()     L9397  Fill Format/EQ/Device labels; called on open, track change, device change
+     _reset_idle_timer()       L9484  Reset OLED overlay idle countdown
+     _on_idle_timeout()        L9494  Fire overlay when idle threshold reached
+     init_from_config()        L9749  Apply saved config dict to all sub-widgets
+     config_state()            L9876  Collect current state → config dict
+     _precompute_bars()        L9906  Freq→bin map + bar geometry + cap offset arrays (vectorised)
+     paintEvent()              L10350 Fully vectorised numpy pixel-buffer rendering
+                                      fill mode uses precomputed _line_bin_i/f tables — no per-frame alloc
+                                      line+fill px_fill cached by (bg,bar) key — not recomputed per frame
 
  MAIN WINDOW
-   MainWindow                  L9329  QMainWindow: layout, signals, config I/O
-     _build_ui()               L9369  Construct widget tree
-     _connect_signals()        L9446  Wire all cross-widget signals
-     _refresh_all_theme_widgets() L9551 Async theme switch + overlay
-     _edit_tags()              L9734  Tag-edit dialog + mutagen write-back
-     _start_playback()         L10083 Load track + update all UI state
-     _advance()                L10165 Next track (shuffle/repeat logic)
-     _save_config()            L10321 JSON config persistence (skips __open_with__)
-     _load_config()            L10441 JSON config restore
-     _handle_open_with()       L10370 Load file-manager / CLI "Open With" track
-     closeEvent()              L10551 Purge __open_with__ playlist, then save + stop
+   MainWindow                  L10838 QMainWindow: layout, signals, config I/O
+     _build_ui()               L10878 Construct widget tree
+     _connect_signals()        L10958 Wire all cross-widget signals
+     _refresh_all_theme_widgets() L11120 Async theme switch + overlay
+     _edit_tags()              L11284 Tag-edit dialog + mutagen write-back
+     _on_switch_to_pipewire()  L11774 Sync player + combobox when user switches sink
+     _on_alsa_retry()          L11786 Re-attempt playback on same ALSA device
+     _alsa_play()              L11706 High-level play entry: probe-if-needed or direct start
+     _alsa_probe_and_play()    L11792 hw:X,Y × 5 → plughw:X,Y probe with status bar feedback
+                                      Position from _player._last_switch_pos_ms → _load_and_seek
+     _on_output_device_changed() L10979 Triggered on combobox change; sets _alsa_selected_plughw
+     _on_player_error()        L11912 Records ALSA probe error; PipeWire errors → status bar
+     _start_playback()         L11729 Load track + update all UI state
+     _advance()                L11961 Next track (shuffle/repeat logic)
+     _save_config()            L12117 JSON config persistence (skips __open_with__)
+     _handle_open_with()       L12174 Load file-manager / CLI "Open With" track
+     _load_config()            L12245 JSON config restore
+     closeEvent()              L12361 Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L10674
+   main()                      L12484
 ═══════════════════════════════════════════════════════════════════
 """
 import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
+import re          as _re
+import html        as _html
+import urllib.request as _urlreq
+import urllib.parse   as _urlparse
 import concurrent.futures as _cf
 from time import monotonic as _monotonic
 
@@ -306,7 +373,7 @@ def make_stylesheet(acc: str = None, acch: str = None) -> str:
 * {{ outline: none; }}
 QWidget     {{ background:{BG};  color:{FG};  font-size:13px; }}
 QMainWindow {{ background:{BG}; }}
-QDialog     {{ background:{BG}; border-radius:{r_gen}px; }}
+QDialog     {{ background:{BG}; border-radius:{r_gen}px; border:3px solid {ACC}; }}
 QWidget#sidebar {{ background:{BG2}; border-right:1px solid {BORD}; }}
 
 QPushButton {{
@@ -345,7 +412,7 @@ QPushButton#icon_btn:pressed {{ background:{BG4}; }}
 
 QSlider {{ background: transparent; }}
 QSlider::groove:horizontal {{ background:{B2}; height:4px; border-radius:{r_grv}px; }}
-QSlider::sub-page:horizontal {{ background:{acc}; border-radius:{r_grv}px; }}
+QSlider::sub-page:horizontal {{ background:{acc}; border-radius:{r_grv}px 0 0 {r_grv}px; }}
 QSlider::handle:horizontal {{
     background:{BG4}; border:2px solid {acc};
     width:14px; height:14px; border-radius:{r_slh}px; margin:-5px 0;
@@ -426,11 +493,11 @@ QScrollBar::handle:hover {{ background:{acc}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; width:0; }}
 QScrollBar::add-page,  QScrollBar::sub-page {{ background:none; }}
 
-QSplitter::handle {{ background:{BORD}; }}
-QSplitter::handle:horizontal {{ width:1px; }}
-QSplitter::handle:vertical   {{ height:1px; }}
+QSplitter::handle {{ background:transparent; }}
+QSplitter::handle:horizontal {{ width:16px; border-left:1px solid {BORD}; border-right:1px solid {BORD}; background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 transparent, stop:0.4999 transparent, stop:0.5 {BORD}, stop:0.5001 {BORD}, stop:0.5002 transparent, stop:1 transparent); }}
+QSplitter::handle:vertical   {{ height:16px; border-top:1px solid {BORD}; border-bottom:1px solid {BORD}; background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 transparent, stop:0.4999 transparent, stop:0.5 {BORD}, stop:0.5001 {BORD}, stop:0.5002 transparent, stop:1 transparent); }}
 
-QMenu {{ background:{BG3}; border:1px solid {B2}; border-radius:{r_gen}px; padding:4px 0; }}
+QMenu {{ background:{BG3}; border:2px solid {ACC}; border-radius:{r_gen}px; padding:4px 0; }}
 QMenu::item {{ padding:9px 22px; color:{FG}; }}
 QMenu::item:selected {{ background:{SEL}; color:{acc}; }}
 QMenu::separator {{ height:1px; background:{BORD}; margin:4px 0; }}
@@ -474,9 +541,11 @@ class ToggleSwitch(QWidget):
     toggled = pyqtSignal(bool)
     W, H, R = 42, 22, 11
     PAD = 6   # gap between label and switch track
+    _KNOB_PAD = 3                    # inset on every side (constant for all instances)
+    _KNOB_SZ  = H - 2 * _KNOB_PAD   # = 16 px knob side length
 
     def __init__(self, label_off: str = '', label_on_or_parent=None, parent=None,
-                 muted_labels: bool = False):
+                 muted_labels: bool = False, label_point_size: int = 0):
         # Resolve overloaded signature
         if isinstance(label_on_or_parent, str):
             self._lbl_off = label_off          # left side / off state
@@ -491,15 +560,34 @@ class ToggleSwitch(QWidget):
                 parent = label_on_or_parent
 
         super().__init__(parent)
-        self._muted_labels = muted_labels
+        self._muted_labels     = muted_labels
+        self._label_point_size = label_point_size  # 0 = inherit widget font size
         self._on = False; self._anim = 0.0
         self._timer = QTimer(self); self._timer.setInterval(_FRAME_MS)
         self._timer.timeout.connect(self._step)
         self._recalc_size()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Cached palette-derived colors — rebuilt by _rebuild_track_colors().
+        # Keyed by (ACC, BG4, B2, FG, FG2) so any palette/accent change invalidates them.
+        self._color_cache_key: tuple = ()
+        self._track_on_rgb: tuple = (0, 0, 0)
+        self._border_on_rgb: tuple = (0, 0, 0)
+        self._off_rgb: tuple = (0, 0, 0)
+        self._boff_rgb: tuple = (0, 0, 0)
+        # Label colours (dim = FG2, bright = FG) — cached alongside track colours
+        self._dim_rgb:    tuple = (0, 0, 0)
+        self._bright_rgb: tuple = (0, 0, 0)
+
+    def _label_font(self) -> 'QFont':
+        """Return the font to use for label text. Smaller if label_point_size is set."""
+        f = self.font()
+        if self._label_point_size > 0:
+            f = QFont(f)
+            f.setPointSize(self._label_point_size)
+        return f
 
     def _recalc_size(self):
-        fm = QFontMetrics(self.font())
+        fm = QFontMetrics(self._label_font())
         lw_off = fm.horizontalAdvance(self._lbl_off) + self.PAD if self._lbl_off else 0
         lw_on  = fm.horizontalAdvance(self._lbl_on)  + self.PAD if self._lbl_on  else 0
         total_w = lw_off + self.W + lw_on
@@ -516,9 +604,6 @@ class ToggleSwitch(QWidget):
     def setChecked(self, on: bool):
         self._on = on; self._anim = 1.0 if on else 0.0; self.update()
 
-    def setCheckedSignal(self, on: bool):
-        self.setChecked(on); self.toggled.emit(on)
-
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._on = not self._on; self._timer.start(); self.toggled.emit(self._on)
@@ -529,6 +614,25 @@ class ToggleSwitch(QWidget):
         else: self._anim += delta if self._on else -delta
         self.update()
 
+    def _rebuild_track_colors(self):
+        """Recompute and cache HSV-derived track/border colours and label colours.
+        Called lazily in paintEvent when the palette key has changed."""
+        _acc = QColor(ACC)
+        ah, as_, av, _ = _acc.getHsvF()
+        ton = QColor(); ton.setHsvF(ah, as_ * 0.55, av * 0.38)
+        bon = QColor(); bon.setHsvF(ah, as_ * 0.65, av * 0.55)
+        _off  = QColor(BG4)
+        _boff = QColor(B2)
+        _dim    = QColor(FG2)
+        _bright = QColor(FG)
+        self._track_on_rgb  = (ton.red(),  ton.green(),  ton.blue())
+        self._border_on_rgb = (bon.red(),  bon.green(),  bon.blue())
+        self._off_rgb  = (_off.red(),  _off.green(),  _off.blue())
+        self._boff_rgb = (_boff.red(), _boff.green(), _boff.blue())
+        self._dim_rgb    = (_dim.red(),    _dim.green(),    _dim.blue())
+        self._bright_rgb = (_bright.red(), _bright.green(), _bright.blue())
+        self._color_cache_key = (ACC, BG4, B2, FG, FG2)
+
     def paintEvent(self, _):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         t = self._anim
@@ -536,35 +640,36 @@ class ToggleSwitch(QWidget):
         lw_off = self._lw_off
 
         # ── Track ──────────────────────────────────────────────────────────────
-        _acc = QColor(ACC)
-        ah, as_, av, _ = _acc.getHsvF()
-        _track_on = QColor(); _track_on.setHsvF(ah, as_*0.55, av*0.38)
-        _border_on = QColor(); _border_on.setHsvF(ah, as_*0.65, av*0.55)
-        _off  = QColor(BG4)   # adapts to theme
-        _boff = QColor(B2)    # adapts to theme
+        # Lazily rebuild cached colour tuples when palette/accent changes.
+        if self._color_cache_key != (ACC, BG4, B2, FG, FG2):
+            self._rebuild_track_colors()
+
+        ton_r, ton_g, ton_b = self._track_on_rgb
+        bon_r, bon_g, bon_b = self._border_on_rgb
+        off_r, off_g, off_b = self._off_rgb
+        boff_r, boff_g, boff_b = self._boff_rgb
+
         if self._muted_labels:
-            # Always use neutral grey track regardless of state
-            tc = _off
-            bc = _boff
+            tc = QColor(off_r, off_g, off_b)
+            bc = QColor(boff_r, boff_g, boff_b)
         else:
             tc = QColor(
-                int(_off.red()   + t*(_track_on.red()   - _off.red())),
-                int(_off.green() + t*(_track_on.green() - _off.green())),
-                int(_off.blue()  + t*(_track_on.blue()  - _off.blue())))
+                int(off_r  + t * (ton_r  - off_r)),
+                int(off_g  + t * (ton_g  - off_g)),
+                int(off_b  + t * (ton_b  - off_b)))
             bc = QColor(
-                int(_boff.red()   + t*(_border_on.red()   - _boff.red())),
-                int(_boff.green() + t*(_border_on.green() - _boff.green())),
-                int(_boff.blue()  + t*(_border_on.blue()  - _boff.blue())))
+                int(boff_r + t * (bon_r  - boff_r)),
+                int(boff_g + t * (bon_g  - boff_g)),
+                int(boff_b + t * (bon_b  - boff_b)))
         track_x  = lw_off
         track_r  = _r(self.R)   # 0 = boxy, self.R = H//2 (full pill)
         p.setPen(QPen(bc, 1.5)); p.setBrush(QBrush(tc))
         p.drawRoundedRect(QRectF(track_x, (h_c-self.H)/2, self.W, self.H), track_r, track_r)
 
         # ── Knob ───────────────────────────────────────────────────────────────
-        _KNOB_PAD = 3                                    # inset on every side
-        knob_sz   = self.H - 2 * _KNOB_PAD              # smaller than track height
-        kx = track_x + _KNOB_PAD + t * (self.W - 2 * _KNOB_PAD - knob_sz)
-        ky = (h_c - self.H) / 2 + _KNOB_PAD
+        knob_sz   = self._KNOB_SZ
+        kx = track_x + self._KNOB_PAD + t * (self.W - 2 * self._KNOB_PAD - knob_sz)
+        ky = (h_c - self.H) / 2 + self._KNOB_PAD
         knob_r   = _r(knob_sz // 2)
         p.setPen(Qt.PenStyle.NoPen)
         knob_color = FG2 if self._muted_labels else (ACCH if self._on else FG2)
@@ -572,20 +677,22 @@ class ToggleSwitch(QWidget):
         p.drawRoundedRect(QRectF(kx, ky, knob_sz, knob_sz), knob_r, knob_r)
 
         # ── Labels ─────────────────────────────────────────────────────────────
-        DIM  = QColor(FG2)
-        BRIGHT = QColor(FG)
+        dim_r,    dim_g,    dim_b    = self._dim_rgb
+        bright_r, bright_g, bright_b = self._bright_rgb
+        lbl_font = self._label_font()
 
         if self._lbl_off:
             # Left label: bright when OFF, dim when ON — or always dim if muted
             if self._muted_labels:
-                c = DIM
+                c = QColor(dim_r, dim_g, dim_b)
             else:
                 mix = 1.0 - t   # 1=off, 0=on
                 c = QColor(
-                    int(DIM.red()   + mix*(BRIGHT.red()   - DIM.red())),
-                    int(DIM.green() + mix*(BRIGHT.green() - DIM.green())),
-                    int(DIM.blue()  + mix*(BRIGHT.blue()  - DIM.blue())))
+                    int(dim_r + mix * (bright_r - dim_r)),
+                    int(dim_g + mix * (bright_g - dim_g)),
+                    int(dim_b + mix * (bright_b - dim_b)))
             p.setPen(c)
+            p.setFont(lbl_font)
             p.drawText(QRectF(0, 0, lw_off - self.PAD, h_c),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        self._lbl_off)
@@ -593,13 +700,14 @@ class ToggleSwitch(QWidget):
         if self._lbl_on:
             # Right label: bright when ON, dim when OFF — or always dim if muted
             if self._muted_labels:
-                c2 = DIM
+                c2 = QColor(dim_r, dim_g, dim_b)
             else:
                 c2 = QColor(
-                    int(DIM.red()   + t*(BRIGHT.red()   - DIM.red())),
-                    int(DIM.green() + t*(BRIGHT.green() - DIM.green())),
-                    int(DIM.blue()  + t*(BRIGHT.blue()  - DIM.blue())))
+                    int(dim_r + t * (bright_r - dim_r)),
+                    int(dim_g + t * (bright_g - dim_g)),
+                    int(dim_b + t * (bright_b - dim_b)))
             p.setPen(c2)
+            p.setFont(lbl_font)
             rstart = track_x + self.W + self.PAD
             p.drawText(QRectF(rstart, 0, self.width()-rstart, h_c),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -610,11 +718,20 @@ class ToggleSwitch(QWidget):
 #  Slider row
 # ══════════════════════════════════════════════════════════════════════════════
 class JumpSlider(QSlider):
-    """Slider that jumps immediately to click/touch position."""
+    """Slider that jumps immediately to click/touch position.
+
+    Wheel events are intentionally ignored — the slider only responds to
+    direct mouse press/drag and touch.  This prevents the corners slider (and
+    any other SliderRow) from changing value when the user scrolls over the
+    settings popup.
+    """
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self._touch_active = False
+        # Do not steal keyboard focus on click — avoids spurious value changes
+        # when focus moves between widgets and Qt replays key events.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     def _jump(self, x: float):
         v = QStyle.sliderValueFromPosition(
@@ -628,6 +745,11 @@ class JumpSlider(QSlider):
     def mouseMoveEvent(self, e):
         if e.buttons() & Qt.MouseButton.LeftButton: self._jump(e.position().x())
         super().mouseMoveEvent(e)
+
+    def wheelEvent(self, e):
+        # Ignore scroll-wheel — avoids accidental radius/volume changes when
+        # scrolling over the settings popup.
+        e.ignore()
 
     def event(self, e: QEvent) -> bool:
         t = e.type()
@@ -704,6 +826,7 @@ class SettingsPopup(QFrame):
     gallery_scale_changed = pyqtSignal(int)  # card size px
     viz_type_changed     = pyqtSignal(str)   # 'bars' | 'line'
     radius_changed       = pyqtSignal(int)   # 0..100 corner-radius percentage
+    output_device_changed = pyqtSignal(str)  # 'pipewire' | 'plughw:X,Y'
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -719,15 +842,34 @@ class SettingsPopup(QFrame):
         # Close when user clicks outside the popup
         QApplication.instance().installEventFilter(self)
 
+
+        # ── Outer root: title + two-column body ──────────────────────────────
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 16); root.setSpacing(10)
-        root.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.setContentsMargins(16, 14, 16, 16)
+        root.setSpacing(6)
 
         hdr = QLabel('SETTINGS'); hdr.setObjectName('popup_title')
         hdr.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(hdr)
 
-        def _divider():
+        # Full-width divider below title
+        title_div = QFrame(); title_div.setFixedHeight(1)
+        title_div.setStyleSheet(f'background:{BORD}; margin:0;')
+        root.addWidget(title_div)
+
+        # Two-column body
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.setAlignment(Qt.AlignmentFlag.AlignTop)
+        root.addLayout(columns)
+
+        def _vdivider():
+            d = QFrame()
+            d.setFrameShape(QFrame.Shape.VLine)
+            d.setStyleSheet(f'color:{BORD};')
+            return d
+
+        def _hdivider():
             d = QFrame(); d.setFixedHeight(1)
             d.setStyleSheet(f'background:{BORD}; margin:0;')
             return d
@@ -735,14 +877,20 @@ class SettingsPopup(QFrame):
         def _section(title):
             lbl = QLabel(title)
             lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            lbl.setStyleSheet(f'color:{FG2};font-size:9px;letter-spacing:2px;background:transparent;')
+            lbl.setStyleSheet(
+                f'color:{FG2};font-size:9px;letter-spacing:2px;background:transparent;')
             return lbl
 
-        root.addWidget(_divider())
+        # ── LEFT COLUMN: OVERLAY + VIEW ───────────────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(5)
+        left.setAlignment(Qt.AlignmentFlag.AlignTop)
+        columns.addLayout(left)
 
-        # ── OVERLAY ──────────────────────────────────────────────────────────
-        root.addWidget(_section('OVERLAY'))
-        ov_row = QHBoxLayout(); ov_row.setSpacing(16)
+        # OVERLAY section
+        left.addWidget(_section('OVERLAY'))
+
+        ov_row = QHBoxLayout(); ov_row.setSpacing(10)
         ov_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._ov_viz_sw    = ToggleSwitch('VIZ',    self)
         self._ov_lyrics_sw = ToggleSwitch('LYRICS', self)
@@ -755,33 +903,34 @@ class SettingsPopup(QFrame):
         ov_row.addWidget(self._ov_viz_sw)
         ov_row.addWidget(self._ov_lyrics_sw)
         ov_row.addWidget(self._ov_clock_sw)
-        root.addLayout(ov_row)
+        left.addLayout(ov_row)
+
         self._ov_scale_row = SliderRow('Scale', 50, 200, 100, lambda v: f'{v}%')
         self._ov_scale_row.valueChanged.connect(self.overlay_scale_changed)
-        root.addWidget(self._ov_scale_row)
+        left.addWidget(self._ov_scale_row)
 
-        # Auto-open: toggle + timeout slider
-        auto_row = QHBoxLayout(); auto_row.setSpacing(16)
+        auto_row = QHBoxLayout(); auto_row.setSpacing(10)
         auto_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._ov_auto_sw = ToggleSwitch('Auto Timeout Overlay', self)
         self._ov_auto_sw.setChecked(False)
         self._ov_auto_sw.toggled.connect(self.overlay_auto_open_toggled)
         auto_row.addWidget(self._ov_auto_sw)
-        root.addLayout(auto_row)
+        left.addLayout(auto_row)
+
         self._ov_timeout_row = SliderRow('Timeout', 10, 300, 60, lambda v: f'{v}s')
         self._ov_timeout_row.valueChanged.connect(self.overlay_timeout_changed)
-        root.addWidget(self._ov_timeout_row)
+        left.addWidget(self._ov_timeout_row)
 
-        # ── VIEW ─────────────────────────────────────────────────────────────
-        root.addWidget(_divider())
-        root.addWidget(_section('VIEW'))
+        # VIEW section
+        left.addWidget(_hdivider())
+        left.addWidget(_section('VIEW'))
 
         view_combo_row = QHBoxLayout(); view_combo_row.setSpacing(8)
         view_combo_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         view_combo_lbl = QLabel('Layout'); view_combo_lbl.setObjectName('setting_lbl')
         view_combo_lbl.setFixedWidth(55)
         view_combo_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._view_combo = QComboBox()
+        self._view_combo = TouchComboBox()
         self._view_combo.addItem('Classic')
         self._view_combo.addItem('Gallery (Z)')
         self._view_combo.addItem('Gallery (S)')
@@ -790,105 +939,126 @@ class SettingsPopup(QFrame):
                 self._COMBO_TO_MODE.get(t, 'classic')))
         view_combo_row.addWidget(view_combo_lbl)
         view_combo_row.addWidget(self._view_combo, 1)
-        root.addLayout(view_combo_row)
+        left.addLayout(view_combo_row)
 
         self._list_scale_row = SliderRow('List size', 28, 80, 44, lambda v: f'{v}px')
         self._list_scale_row.valueChanged.connect(self.list_scale_changed)
-        root.addWidget(self._list_scale_row)
+        left.addWidget(self._list_scale_row)
 
         self._gallery_scale_row = SliderRow('Gallery size', 80, 220, 130, lambda v: f'{v}px', step=8)
         self._gallery_scale_row.valueChanged.connect(self.gallery_scale_changed)
-        root.addWidget(self._gallery_scale_row)
+        left.addWidget(self._gallery_scale_row)
 
-        # Accent color swatch + theme switch + cover switch (same row)
-        acc_row = QHBoxLayout(); acc_row.setSpacing(12)
+        # Accent + theme + cover row
+        acc_row = QHBoxLayout(); acc_row.setSpacing(10)
         acc_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._accent_color = ACC
         self._accent_btn = QPushButton()
         self._accent_btn.setObjectName('accent_swatch')
         self._accent_btn.setFixedSize(32, 32)
         self._accent_btn.setStyleSheet(
-            f'QPushButton#accent_swatch {{'
+            f'QPushButton#accent_swatch {{' 
             f'  background:{ACC}; border-radius:{_r(16)}px; border:2px solid #666;'
             f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
             f'  padding:0;'
             f'}}')
         self._accent_btn.clicked.connect(self._pick_accent)
-        # Dark/Light theme switch — muted (both labels grey like LIN/LOG)
-        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True)
-        self._theme_sw.setChecked(False)  # False = DARK
+        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True, label_point_size=7)
+        self._theme_sw.setChecked(False)
         self._theme_sw.toggled.connect(self._on_theme_toggle)
-        # Cover switch
         self._cover_sw = ToggleSwitch('COVER', self)
         self._cover_sw.setChecked(True)
-        self._cover_sw.toggled.connect(self.cover_toggled)
+        self._cover_sw.toggled.connect(self._on_cover_switch_toggle)
         acc_row.addWidget(self._accent_btn)
         acc_row.addWidget(self._theme_sw)
         acc_row.addWidget(self._cover_sw)
-        root.addLayout(acc_row)
+        left.addLayout(acc_row)
 
-        # Corner radius slider (0 = boxy, 100 = pill/round)
         self._radius_row = SliderRow('Corners', 0, 100, RAD_PCT, lambda v: f'{v}%')
         self._radius_row.valueChanged.connect(self.radius_changed)
-        root.addWidget(self._radius_row)
+        left.addWidget(self._radius_row)
 
-        # ── VISUALIZATION ─────────────────────────────────────────────────────
-        root.addWidget(_divider())
-        root.addWidget(_section('VISUALIZATION'))
+        # ── AUDIO INFO (format / EQ / device) ────────────────────────────────
+        # Labels are refreshed via update_audio_info() called from ControlBar.
+        left.addWidget(_hdivider())
+        left.addWidget(_section('AUDIO INFO'))
+
+        def _info_row(label_text):
+            row = QHBoxLayout(); row.setSpacing(4)
+            lbl = QLabel(label_text); lbl.setObjectName('setting_lbl')
+            lbl.setFixedWidth(46)
+            lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            val = QLabel('—'); val.setObjectName('setting_lbl')
+            val.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(lbl); row.addWidget(val, 1)
+            left.addLayout(row)
+            return val
+
+        self._info_fmt  = _info_row('Format')
+        self._info_eq   = _info_row('EQ')
+        self._info_dev  = _info_row('Device')
+
+        # Vertical separator
+        columns.addWidget(_vdivider())
+
+        # ── RIGHT COLUMN: VISUALIZATION + FETCH + VOLUME ─────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(5)
+        right.setAlignment(Qt.AlignmentFlag.AlignTop)
+        columns.addLayout(right)
+
+        # VISUALIZATION section
+        right.addWidget(_section('VISUALIZATION'))
 
         viz_sw_row = QHBoxLayout(); viz_sw_row.setSpacing(16)
         viz_sw_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self._viz_sw = ToggleSwitch('VIZ',     self)
+        self._viz_sw = ToggleSwitch('VIZ', self)
         self._log_sw = ToggleSwitch('LIN', 'LOG', self, muted_labels=True)
         self._viz_sw.setChecked(True); self._log_sw.setChecked(True)
         self._viz_sw.toggled.connect(self.viz_toggled)
         self._log_sw.toggled.connect(self.log_toggled)
         viz_sw_row.addWidget(self._viz_sw); viz_sw_row.addWidget(self._log_sw)
-        root.addLayout(viz_sw_row)
+        right.addLayout(viz_sw_row)
 
         viz_type_row = QHBoxLayout(); viz_type_row.setSpacing(8)
         viz_type_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         viz_type_lbl = QLabel('Type'); viz_type_lbl.setObjectName('setting_lbl')
         viz_type_lbl.setFixedWidth(55)
         viz_type_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._viz_type_combo = QComboBox()
+        self._viz_type_combo = TouchComboBox()
         self._viz_type_combo.addItem('Bars')
         self._viz_type_combo.addItem('Fill')
         self._viz_type_combo.addItem('Line')
         self._viz_type_combo.addItem('Line+Fill')
-        _vt_ss = (f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-                  f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
-                  f'QComboBox:hover {{ border-color:{ACC}; }}'
-                  f'QComboBox::drop-down {{ border:none; width:20px; }}'
-                  f'QComboBox::down-arrow {{ color:{FG2}; }}'
-                  f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-                  f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
-        self._viz_type_combo.setStyleSheet(_vt_ss)
+        self._viz_type_combo.addItem('Fourier Notes')
+        self._viz_type_combo.setStyleSheet(self._viz_combo_ss())
         self._viz_type_combo.currentTextChanged.connect(
             lambda t: self.viz_type_changed.emit(
-                'bars' if t == 'Bars' else
-                'fill' if t == 'Fill' else
-                'line+fill' if t == 'Line+Fill' else
+                'bars'          if t == 'Bars'          else
+                'fill'          if t == 'Fill'          else
+                'line+fill'     if t == 'Line+Fill'     else
+                'fourier_notes' if t == 'Fourier Notes' else
                 'line'))
         viz_type_row.addWidget(viz_type_lbl)
         viz_type_row.addWidget(self._viz_type_combo, 1)
-        root.addLayout(viz_type_row)
+        right.addLayout(viz_type_row)
 
-        self._delay_row = SliderRow('Delay', 0, 1000, 0, lambda v: f'{v}ms')
+        self._delay_row = SliderRow('Delay', 0, 3000, 0, lambda v: f'{v}ms')
         self._delay_row.valueChanged.connect(self.delay_changed)
-        root.addWidget(self._delay_row)
+        right.addWidget(self._delay_row)
 
         self._inertia_row = SliderRow('Inertia', 10, 100, 50, lambda v: f'{v}%')
         self._inertia_row.valueChanged.connect(self.inertia_changed)
-        root.addWidget(self._inertia_row)
+        right.addWidget(self._inertia_row)
 
         self._bright_row = SliderRow('Brightness', 0, 100, 40, lambda v: f'{v}%')
         self._bright_row.valueChanged.connect(self.brightness_changed)
-        root.addWidget(self._bright_row)
+        right.addWidget(self._bright_row)
 
-        # ── FETCH ─────────────────────────────────────────────────────────────
-        root.addWidget(_divider())
-        root.addWidget(_section('FETCH'))
+        # FETCH section
+        right.addWidget(_hdivider())
+        right.addWidget(_section('FETCH'))
 
         self._lyrics_fetch_sw = ToggleSwitch('AUTO LYRICS', self)
         self._lyrics_fetch_sw.setChecked(True)
@@ -896,17 +1066,18 @@ class SettingsPopup(QFrame):
         fetch_sw_row = QHBoxLayout(); fetch_sw_row.setSpacing(16)
         fetch_sw_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         fetch_sw_row.addWidget(self._lyrics_fetch_sw)
-        root.addLayout(fetch_sw_row)
+        right.addLayout(fetch_sw_row)
 
         action_row = QHBoxLayout(); action_row.setSpacing(4)
         self._btn_fetch_covers = QPushButton('Covers')
         self._btn_fetch_lyrics = QPushButton('Lyrics')
         self._btn_fetch_tags   = QPushButton('Tags')
         self._btn_rename       = QPushButton('Rename')
-        for b in (self._btn_fetch_covers, self._btn_fetch_lyrics, self._btn_fetch_tags, self._btn_rename):
+        for b in (self._btn_fetch_covers, self._btn_fetch_lyrics,
+                  self._btn_fetch_tags, self._btn_rename):
             b.setMinimumHeight(28); b.setMaximumHeight(36)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            b.setStyleSheet('font-size:12px;')
+            b.setStyleSheet('font-size:11px; padding:2px 4px;')
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
         self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
@@ -915,13 +1086,13 @@ class SettingsPopup(QFrame):
         action_row.addWidget(self._btn_fetch_lyrics)
         action_row.addWidget(self._btn_fetch_tags)
         action_row.addWidget(self._btn_rename)
-        root.addLayout(action_row)
+        right.addLayout(action_row)
 
-        # ── VOLUME (bottom) ───────────────────────────────────────────────────
-        root.addWidget(_divider())
+        # VOLUME (bottom of right column)
+        right.addWidget(_hdivider())
         vol_row = QHBoxLayout(); vol_row.setSpacing(6)
         vol_lbl = QLabel('Volume'); vol_lbl.setObjectName('setting_lbl')
-        vol_lbl.setFixedWidth(70)
+        vol_lbl.setFixedWidth(55)
         vol_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._vol = JumpSlider(Qt.Orientation.Horizontal)
         self._vol.setRange(0, 100); self._vol.setValue(80); self._vol.setFixedHeight(22)
@@ -933,11 +1104,89 @@ class SettingsPopup(QFrame):
         self._vol.valueChanged.connect(lambda v: (
             self._vol_lbl.setText(f'{v}%'), self.volume_changed.emit(v)))
         vol_row.addWidget(vol_lbl); vol_row.addWidget(self._vol, 1); vol_row.addWidget(self._vol_lbl)
-        root.addLayout(vol_row)
+        right.addLayout(vol_row)
 
-        self.setFixedWidth(310)
-        self.setMaximumHeight(800)
+        # ── AUDIO OUTPUT (bottom of right column) ────────────────────────────
+        right.addWidget(_hdivider())
+        right.addWidget(_section('AUDIO OUTPUT'))
+
+        out_row = QHBoxLayout(); out_row.setSpacing(8)
+        out_lbl = QLabel('Device'); out_lbl.setObjectName('setting_lbl')
+        out_lbl.setFixedWidth(46)
+        out_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._out_dev_combo = TouchComboBox()
+        self._out_dev_combo.setStyleSheet(self._viz_combo_ss())
+        # Block signals while populating so addItem never triggers the change slot.
+        self._out_dev_combo.blockSignals(True)
+        self._out_dev_combo.addItem('PipeWire', userData='pipewire')
+        for _card_name, _card_id in SettingsPopup._probe_alsa_devices():
+            self._out_dev_combo.addItem(_card_name, userData=_card_id)
+        self._out_dev_combo.blockSignals(False)
+        def _on_out_dev_changed(_):
+            dev_id   = self._out_dev_combo.currentData()
+            dev_name = self._out_dev_combo.currentText()
+            print(f'[AudioSwitch] settings combo changed -> {dev_name!r} ({dev_id!r})')
+            self.output_device_changed.emit(dev_id)
+        self._out_dev_combo.currentIndexChanged.connect(_on_out_dev_changed)
+        out_row.addWidget(out_lbl)
+        out_row.addWidget(self._out_dev_combo, 1)   # stretch=1: fills full column width
+        right.addLayout(out_row)
+
+        self.setFixedWidth(600)
         self.adjustSize()
+
+
+    @staticmethod
+    def _probe_alsa_devices() -> list:
+        """Return list of (display_name, device_id) tuples for available ALSA PCM
+        playback devices.  Reads /proc/asound/cards for card names and verifies each
+        card has at least one PCM playback subdevice (pcm<N>p) so MIDI-only or
+        capture-only cards are excluded.  Device IDs use 'plughw:' so ALSA handles
+        format/rate conversion automatically, preventing caps-negotiation failures."""
+        devices = []
+        try:
+            with open('/proc/asound/cards', 'r') as f:
+                text = f.read()
+            for m in _re.finditer(
+                    r'^\s*(\d+)\s+\[(\S+)\s*\]:\s*(.+)$', text, _re.MULTILINE):
+                card_num  = m.group(1)
+                card_id   = m.group(2).strip()   # stable bracket name e.g. "SAF_HDA"
+                long_desc = m.group(3).strip()
+                # Skip cards with no PCM playback subdevice.
+                has_playback = False
+                try:
+                    for entry in os.listdir(f'/proc/asound/card{card_num}'):
+                        if _re.match(r'^pcm\d+p$', entry):
+                            has_playback = True
+                            break
+                except OSError:
+                    pass
+                if not has_playback:
+                    continue
+                label = long_desc[:32]
+                # Use stable card bracket-name (card_id) instead of card number so
+                # that card enumeration order changes between boots (USB devices,
+                # module load order) don't silently route audio to the wrong card.
+                # ALSA resolves 'plughw:CARDNAME,0' correctly on all distros.
+                devices.append((f'ALSA: {label}', f'plughw:{card_id},0'))
+        except Exception:
+            pass
+        return devices
+
+    def output_device(self) -> str:
+        """Return currently selected output device id: 'pipewire' or 'plughw:X,Y'."""
+        return self._out_dev_combo.currentData() or 'pipewire'
+
+    def set_output_device(self, device_id: str):
+        """Set combobox to the given device_id without emitting the signal."""
+        self._out_dev_combo.blockSignals(True)
+        idx = self._out_dev_combo.findData(device_id)
+        if idx >= 0:
+            self._out_dev_combo.setCurrentIndex(idx)
+        else:
+            # Saved device no longer present — stay on PipeWire
+            self._out_dev_combo.setCurrentIndex(0)
+        self._out_dev_combo.blockSignals(False)
 
     def _on_theme_toggle(self, light: bool):
         """Switch between dark (light=False) and light (light=True) themes."""
@@ -950,6 +1199,17 @@ class SettingsPopup(QFrame):
             # Defer work until after the overlay's first paint so it is
             # visible before the (blocking) stylesheet refresh begins.
             QTimer.singleShot(32, lambda: win._refresh_all_theme_widgets(_overlay=overlay))
+        self.repaint()
+
+    def _on_cover_switch_toggle(self, on: bool):
+        """Handle cover switch toggle with loading overlay."""
+        win = self.window()
+        # Always emit so ControlBar thumbnail visibility is updated immediately
+        self.cover_toggled.emit(on)
+        if win and hasattr(win, '_on_cover_toggle_with_overlay'):
+            overlay = _SpinningOverlay(win)
+            overlay.show(); overlay.raise_()
+            QTimer.singleShot(32, lambda: win._on_cover_toggle_with_overlay(on, _overlay=overlay))
         self.repaint()
 
     def _pick_accent(self):
@@ -976,10 +1236,15 @@ class SettingsPopup(QFrame):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        # Fill background
         p.setBrush(QBrush(QColor(BG)))
-        p.setPen(QPen(QColor(B2), 1.0))
-        p.drawRoundedRect(r, 12, 12)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, 11, 11)
+        # Accent border 3px
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(ACC), 3.0))
+        p.drawRoundedRect(r, 11, 11)
         p.end()
 
     def volume(self)     -> int: return self._vol.value()
@@ -1010,12 +1275,14 @@ class SettingsPopup(QFrame):
     def set_log(self, v):    self._log_sw.setChecked(v)
     def viz_type(self)   -> str:
         t = self._viz_type_combo.currentText()
-        return ('bars' if t == 'Bars' else
-                'fill' if t == 'Fill' else
-                'line+fill' if t == 'Line+Fill' else
+        return ('bars'          if t == 'Bars'          else
+                'fill'          if t == 'Fill'          else
+                'line+fill'     if t == 'Line+Fill'     else
+                'fourier_notes' if t == 'Fourier Notes' else
                 'line')
     def set_viz_type(self, v: str):
-        mapping = {'bars': 'Bars', 'fill': 'Fill', 'line': 'Line', 'line+fill': 'Line+Fill'}
+        mapping = {'bars': 'Bars', 'fill': 'Fill', 'line': 'Line', 'line+fill': 'Line+Fill',
+                   'fourier_notes': 'Fourier Notes'}
         self._viz_type_combo.setCurrentText(mapping.get(v, 'Bars'))
     def dark_mode_on(self) -> bool: return not self._theme_sw.isChecked()
     def set_dark_mode(self, dark: bool):
@@ -1036,8 +1303,8 @@ class SettingsPopup(QFrame):
     def set_overlay_timeout(self, v: int): self._ov_timeout_row.setValue(v)
     def lyrics_fetch_on(self) -> bool: return self._lyrics_fetch_sw.isChecked()
     def set_lyrics_fetch(self, v): self._lyrics_fetch_sw.setChecked(v)
-    def cover_fetch_on(self) -> bool: return True   # always enabled; user triggers manually
-    def set_cover_fetch(self, v): pass              # no-op — kept for config compat
+    def cover_fetch_on(self) -> bool: return True   # UI toggle removed; always on
+    def set_cover_fetch(self, v): pass              # config-compat no-op; value ignored
 
     _MODE_TO_COMBO = {'classic': 'Classic', 'gallery_z': 'Gallery (Z)', 'gallery_s': 'Gallery (S)'}
     _COMBO_TO_MODE = {'Classic': 'classic', 'Gallery (Z)': 'gallery_z', 'Gallery (S)': 'gallery_s'}
@@ -1057,16 +1324,20 @@ class SettingsPopup(QFrame):
     def gallery_scale(self) -> int: return self._gallery_scale_row.value()
     def set_gallery_scale(self, v: int): self._gallery_scale_row.setValue(v)
 
+    @staticmethod
+    def _viz_combo_ss() -> str:
+        return (f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+                f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
+                f'QComboBox:hover {{ border-color:{ACC}; }}'
+                f'QComboBox::drop-down {{ border:none; width:20px; }}'
+                f'QComboBox::down-arrow {{ color:{FG2}; }}'
+                f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
+                f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
+
     def refresh_theme(self):
         """Re-apply inline stylesheets that bake palette globals at construction time."""
-        self._viz_type_combo.setStyleSheet(
-            f'QComboBox {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:6px; padding:4px 8px; font-size:12px; }}'
-            f'QComboBox:hover {{ border-color:{ACC}; }}'
-            f'QComboBox::drop-down {{ border:none; width:20px; }}'
-            f'QComboBox::down-arrow {{ color:{FG2}; }}'
-            f'QComboBox QAbstractItemView {{ background:{BG3}; color:{FG};'
-            f' selection-background-color:{SEL}; border:1px solid {B2}; }}')
+        self._viz_type_combo.setStyleSheet(self._viz_combo_ss())
+        self._out_dev_combo.setStyleSheet(self._viz_combo_ss())
 
     def eventFilter(self, obj, e: QEvent) -> bool:
         """Close settings popup on mouse press outside it."""
@@ -1075,6 +1346,14 @@ class SettingsPopup(QFrame):
                 QApplication.activePopupWidget() is None and
                 obj is not self and
                 not (isinstance(obj, QWidget) and self.isAncestorOf(obj))):
+            # Do not close if a child QComboBox has its dropdown open —
+            # on touch the combo's popup may already be hidden before this event
+            # arrives (touch double-fire), but a freshly-opened combo stores its
+            # open timestamp; guard against that window so the settings stay visible.
+            for combo in self.findChildren(QComboBox):
+                if hasattr(combo, '_popup_opened_ms'):
+                    if QDateTime.currentMSecsSinceEpoch() - combo._popup_opened_ms < 600:
+                        return False
             # For child widget: map click to our coords
             try:
                 gpt = e.globalPosition().toPoint()
@@ -1095,13 +1374,24 @@ class SettingsPopup(QFrame):
         if self.parent() is not win:
             self.setParent(win)
             self.setWindowFlags(Qt.WindowType.Widget)  # ensure child
+        # Restore any previously constrained height so adjustSize() gets a clean run
+        self.setMaximumHeight(16777215)
         self.adjustSize()
         btn_in_win = btn.mapTo(win, QPoint(0, 0))
         x = btn_in_win.x() + btn.width()//2 - self.width()//2
-        # Prefer above the button; if not enough room, show below
-        y_above = btn_in_win.y() - self.height() - 6
-        y_below = btn_in_win.y() + btn.height() + 6
-        y = y_above if y_above >= 4 else y_below
+        # Available vertical space above and below the button
+        space_above = btn_in_win.y() - 8
+        space_below = win.height() - (btn_in_win.y() + btn.height()) - 8
+        prefer_above = space_above >= self.height()
+        available = space_above if prefer_above else space_below
+        if self.height() > available:
+            # Constrain height so popup stays within the window; content scrolls
+            self.setMaximumHeight(max(80, available))
+            self.adjustSize()
+        if prefer_above:
+            y = btn_in_win.y() - self.height() - 6
+        else:
+            y = btn_in_win.y() + btn.height() + 6
         # clamp inside window
         x = max(4, min(x, win.width()  - self.width()  - 4))
         y = max(4, min(y, win.height() - self.height() - 4))
@@ -1110,20 +1400,287 @@ class SettingsPopup(QFrame):
         self.raise_()
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Device-busy / error popup
+# ══════════════════════════════════════════════════════════════════════════════
+class DeviceBusyPopup(QFrame):
+    """Popup shown when an ALSA device error occurs (busy, open-failed, etc.).
+
+    Style matches SettingsPopup / EqPopup: BG fill + ACC 3 px rounded border,
+    painted in paintEvent.  Centred inside the parent window (Wayland-safe
+    child widget).  Auto-dismisses after AUTO_DISMISS_MS.
+
+    Signals:
+      switch_to_pipewire — user clicked 'Switch to PipeWire'
+      retry              — user clicked 'Retry'
+    """
+
+    switch_to_pipewire = pyqtSignal()
+    retry              = pyqtSignal()
+
+    AUTO_DISMISS_MS = 10000
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setObjectName('device_busy_popup')
+        # Transparent background: paintEvent draws BG + ACC border like other popups.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAutoFillBackground(False)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._dismiss)
+
+        # ── Layout ────────────────────────────────────────────────────────────
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 16)
+        root.setSpacing(10)
+
+        # Title row (matches popup_title label style used by SettingsPopup / EqPopup)
+        self._title_lbl = QLabel('AUDIO DEVICE ERROR')
+        self._title_lbl.setObjectName('popup_title')
+        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(self._title_lbl)
+
+        # Divider
+        div = QFrame(); div.setFixedHeight(1)
+        div.setStyleSheet(f'background:{BORD}; margin:0;')
+        root.addWidget(div)
+
+        # Detail text (raw GStreamer message)
+        self._detail = QLabel()
+        self._detail.setWordWrap(True)
+        self._detail.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._detail.setStyleSheet(
+            f'color:{FG2}; font-size:11px; background:transparent;')
+        self._detail.setFixedWidth(300)
+        root.addWidget(self._detail)
+
+        # Button row
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        btn_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        def _mk_primary(text):
+            b = QPushButton(text)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f'QPushButton {{ background:{ACC}; color:#fff;'
+                f'  border:none; border-radius:{_r(6)}px;'
+                f'  font-size:11px; font-weight:600; padding:6px 14px; }}'
+                f'QPushButton:hover {{ background:{ACCH}; }}')
+            return b
+
+        def _mk_secondary(text):
+            b = QPushButton(text)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f'QPushButton {{ background:transparent; color:{FG2};'
+                f'  border:1px solid {BORD}; border-radius:{_r(6)}px;'
+                f'  font-size:11px; padding:6px 14px; }}'
+                f'QPushButton:hover {{ color:{FG}; border-color:{FG2}; }}')
+            return b
+
+        self._btn_retry   = _mk_primary('Retry')
+        self._btn_switch  = _mk_secondary('Switch to PipeWire')
+        self._btn_dismiss = _mk_secondary('Dismiss')
+
+        self._btn_retry.clicked.connect(self._on_retry)
+        self._btn_switch.clicked.connect(self._on_switch)
+        self._btn_dismiss.clicked.connect(self._dismiss)
+
+        btn_row.addWidget(self._btn_retry)
+        btn_row.addWidget(self._btn_switch)
+        btn_row.addWidget(self._btn_dismiss)
+        root.addLayout(btn_row)
+
+        self.hide()
+
+    # ── paintEvent: same rounded-rect + ACC border as SettingsPopup / EqPopup ──
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        p.setBrush(QBrush(QColor(BG)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, 11, 11)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(ACC), 3.0))
+        p.drawRoundedRect(r, 11, 11)
+        p.end()
+
+    def show_error(self, gst_error: str) -> None:
+        """Display the popup with the given GStreamer error string and
+        restart the auto-dismiss timer.  Safe to call multiple times."""
+        err_lower = gst_error.lower()
+        if 'busy' in err_lower or 'ebusy' in err_lower:
+            title = 'AUDIO DEVICE BUSY'
+        else:
+            title = 'AUDIO DEVICE ERROR'
+        self._title_lbl.setText(title)
+
+        msg = gst_error.strip()
+        if len(msg) > 140:
+            msg = msg[:137] + '…'
+        self._detail.setText(msg)
+        self.adjustSize()
+        self._reposition()
+        self.show()
+        self.raise_()
+        self._timer.start(self.AUTO_DISMISS_MS)
+
+    def _reposition(self) -> None:
+        """Centre the popup inside the parent widget."""
+        p = self.parent()
+        if p is None:
+            return
+        self.adjustSize()
+        x = max(4, (p.width()  - self.width())  // 2)
+        y = max(4, (p.height() - self.height()) // 2)
+        self.move(x, y)
+
+    def _on_retry(self) -> None:
+        self._dismiss()
+        self.retry.emit()
+
+    def _on_switch(self) -> None:
+        self._dismiss()
+        self.switch_to_pipewire.emit()
+
+    def _dismiss(self) -> None:
+        self._timer.stop()
+        self.hide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.isVisible():
+            self._reposition()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Modal overlay — dark scrim + click-outside-to-close for all dialogs
+# ══════════════════════════════════════════════════════════════════════════════
+class _ModalOverlay(QWidget):
+    """Full-window dark scrim that sits between the main window and a popup.
+
+    • Darkens the entire main window with a semi-transparent black overlay.
+    • A mouse press outside the attached popup closes/hides it.
+    • Works with QDialog (calls reject()) and plain QWidget popups (calls hide()).
+    • Automatically resizes when the parent window resizes.
+
+    For QDialog: use finished signal only (Hide fires spuriously during exec() startup).
+    For QWidget: watch Hide event (EQ, fetch popups, rename going to background).
+    """
+
+    def __init__(self, main_win: QWidget, popup: QWidget):
+        super().__init__(main_win)
+        self._popup = popup
+        self._is_dialog = isinstance(popup, QDialog)
+        self._done = False
+        self.setGeometry(main_win.rect())
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.setAutoFillBackground(False)
+        self.raise_()
+        if self._is_dialog:
+            # finished fires when dialog closes — never during exec() startup
+            popup.finished.connect(self._on_popup_done)
+        else:
+            # plain QWidget: watch Hide so background-dismiss works
+            popup.installEventFilter(self)
+        main_win.installEventFilter(self)
+        # App-level filter catches clicks anywhere on screen
+        QApplication.instance().installEventFilter(self)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 140))
+        p.end()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._dismiss()
+        e.accept()
+
+    def _dismiss(self):
+        if self._is_dialog:
+            self._popup.reject()
+        else:
+            self._popup.hide()
+
+    def eventFilter(self, obj, e):
+        if obj is self.parent() and e.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parent().rect())
+        elif (not self._is_dialog and
+              obj is self._popup and e.type() == QEvent.Type.Hide):
+            self._on_popup_done()
+        elif (e.type() == QEvent.Type.MouseButtonPress and
+              self.isVisible() and
+              obj is not self and
+              not (isinstance(obj, QWidget) and self._popup.isAncestorOf(obj)) and
+              not self._popup.rect().contains(
+                  self._popup.mapFromGlobal(e.globalPosition().toPoint()))):
+            # Do not dismiss if a another dialog is currently active on top of
+            # the popup (e.g. LyricsEditDialog opened from TagEditDialog).
+            # On Wayland child QDialogs become true top-level windows and lose
+            # their Qt parent(), so we cannot walk the parent chain.  Instead,
+            # check whether the application's active window is any QDialog other
+            # than self._popup — if so, that dialog "owns" the click.
+            active = QApplication.activeWindow()
+            if isinstance(active, QDialog) and active is not self._popup:
+                pass  # click is inside a child/sibling dialog — keep popup open
+            else:
+                self._dismiss()
+        return False
+
+    def _on_popup_done(self):
+        if self._done:
+            return
+        self._done = True
+        # Remove all filters first so no further events reach this (about-to-die) overlay.
+        QApplication.instance().removeEventFilter(self)
+        self.parent().removeEventFilter(self)
+        if not self._is_dialog:
+            try:
+                self._popup.removeEventFilter(self)
+            except Exception:
+                pass
+        self.hide()
+        self.deleteLater()
+
+    @staticmethod
+    def show_for(popup: QWidget) -> '_ModalOverlay':
+        """Find the main window, create overlay, centre popup. Caller shows popup."""
+        parent = popup.parent()
+        win = parent
+        while win is not None and not isinstance(win, QMainWindow):
+            win = win.parent()
+        if win is None:
+            win = parent
+        if win is None:
+            return None
+        overlay = _ModalOverlay(win, popup)
+        overlay.show()
+        overlay.raise_()
+        popup.adjustSize()
+        gp = win.mapToGlobal(QPoint(0, 0))
+        cx = gp.x() + (win.width()  - popup.width())  // 2
+        cy = gp.y() + (win.height() - popup.height()) // 2
+        popup.move(cx, cy)
+        popup.raise_()
+        return overlay
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Tag edit dialog
 # ══════════════════════════════════════════════════════════════════════════════
 class TagEditDialog(QDialog):
     """Tag editor with cover art management."""
-    def __init__(self, track: 'Track', locked_paths: set = None, parent=None):
+    def __init__(self, track: 'Track', parent=None):
         super().__init__(parent)
         self.setWindowTitle('Edit Tags')
-        self.setModal(True)
         self.setMinimumWidth(420)
         self._track    = track
-        self._locked   = track.filepath in (locked_paths or set())
         self._cover_action = 'keep'   # 'keep' | 'remove' | 'set'
         self._new_cover_bytes: Optional[bytes] = None
-        self._locked_changed = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -1149,48 +1706,49 @@ class TagEditDialog(QDialog):
                 f' color:{FG2}; font-size:11px;')
         cover_row.addWidget(self._cover_lbl)
 
-        cover_btns = QVBoxLayout(); cover_btns.setSpacing(4)
-        self._btn_cover_file   = QPushButton('Set from File…')
-        self._btn_cover_search = QPushButton('Search Cover…')
-        self._btn_cover_remove = QPushButton('Remove Cover')
-        self._btn_cover_lock   = QPushButton('Locked' if self._locked else 'Unlocked')
-        self._btn_cover_lock.setCheckable(True)
-        self._btn_cover_lock.setChecked(self._locked)
-        self._btn_cover_lock.setToolTip('Locked: auto-fetch will not replace this cover')
+        # ── 2-column × 4-row action button grid ───────────────────────────
         _tag_btn_ss = (
             f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:{_r(9)}px; padding:1px 6px; min-height:0; font-size:11px; }}'
+            f' border-radius:{_r(9)}px; padding:4px 6px; font-size:11px; }}'
             f'QPushButton:hover {{ border-color:{ACC}; }}'
             f'QPushButton:pressed {{ background:{BG4}; }}'
             f'QPushButton:checked {{ color:{ACC}; border-color:{ACC}; }}'
         )
-        for b in (self._btn_cover_file, self._btn_cover_search,
-                  self._btn_cover_remove, self._btn_cover_lock):
-            b.setFixedHeight(18)
-            b.setStyleSheet(_tag_btn_ss)
-            cover_btns.addWidget(b)
-        # Tag fetch button below divider
-        div2 = QFrame(); div2.setFrameShape(QFrame.Shape.HLine)
-        div2.setStyleSheet(f'color:{BORD}; margin:2px 0;')
-        cover_btns.addWidget(div2)
-        self._btn_tag_fetch = QPushButton('Auto-fill Tags…')
-        self._btn_tag_fetch.setFixedHeight(18)
-        self._btn_tag_fetch.setStyleSheet(_tag_btn_ss)
-        cover_btns.addWidget(self._btn_tag_fetch)
-        self._btn_lyrics_fetch = QPushButton('Fetch Lyrics…')
-        self._btn_lyrics_fetch.setFixedHeight(18)
-        self._btn_lyrics_fetch.setStyleSheet(_tag_btn_ss)
-        cover_btns.addWidget(self._btn_lyrics_fetch)
-        cover_btns.addStretch()
-        cover_row.addLayout(cover_btns)
+        self._btn_cover_file   = QPushButton('Set Cover\nfrom File…')
+        self._btn_cover_search = QPushButton('Search\nCover…')
+        self._btn_cover_remove = QPushButton('Remove\nCover')
+        self._btn_tag_fetch    = QPushButton('Auto-fill\nTags…')
+        self._btn_lyrics_fetch = QPushButton('Fetch\nLyrics…')
+        self._btn_lyrics_edit  = QPushButton('Edit\nLyrics…')
+
+        cover_grid = QGridLayout()
+        cover_grid.setSpacing(5)
+        # Row 0
+        cover_grid.addWidget(self._btn_cover_file,   0, 0)
+        cover_grid.addWidget(self._btn_cover_search, 0, 1)
+        # Row 1
+        cover_grid.addWidget(self._btn_cover_remove, 1, 0)
+        cover_grid.addWidget(self._btn_lyrics_edit,   1, 1)
+        # Row 2
+        cover_grid.addWidget(self._btn_tag_fetch,    2, 0)
+        cover_grid.addWidget(self._btn_lyrics_fetch, 2, 1)
+
+        for btn in (self._btn_cover_file, self._btn_cover_search,
+                    self._btn_cover_remove,
+                    self._btn_tag_fetch, self._btn_lyrics_fetch,
+                    self._btn_lyrics_edit):
+            btn.setMinimumHeight(38)
+            btn.setStyleSheet(_tag_btn_ss)
+
+        cover_row.addLayout(cover_grid)
         layout.addLayout(cover_row)
 
         self._btn_cover_file.clicked.connect(self._pick_cover_file)
         self._btn_cover_search.clicked.connect(self._search_cover_online)
         self._btn_cover_remove.clicked.connect(self._remove_cover)
-        self._btn_cover_lock.toggled.connect(self._on_lock_toggled)
         self._btn_tag_fetch.clicked.connect(self._fetch_tags_online)
         self._btn_lyrics_fetch.clicked.connect(self._fetch_lyrics_online)
+        self._btn_lyrics_edit.clicked.connect(self._edit_lyrics)
 
         # Divider
         div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
@@ -1211,6 +1769,31 @@ class TagEditDialog(QDialog):
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
+
+    def changeEvent(self, e):
+        # On Wayland the overlay cannot receive input when a top-level QDialog has
+        # focus, so we close on window deactivation instead.  We guard against
+        # spurious deactivations that happen while a child dialog (file picker,
+        # QMessageBox) is open by checking whether the application's active window
+        # is still this dialog or one of its children.
+        # _child_dialog_open is set True around any exec() call for a child dialog
+        # (e.g. LyricsEditDialog) to suppress the spurious deactivation that fires
+        # when focus returns to this dialog after the child closes.
+        if e.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            if getattr(self, '_child_dialog_open', False):
+                super().changeEvent(e)
+                return
+            active = QApplication.activeWindow()
+            # Keep open if a child dialog (file picker, online search feedback, etc.)
+            # stole focus — active window will be None only momentarily during
+            # transitions, or will be a transient child of this dialog.
+            if active is None or active is self:
+                pass   # transient; don't close
+            elif active.parent() is self:
+                pass   # child dialog opened from here — keep open
+            else:
+                self.reject()
+        super().changeEvent(e)
 
     def _pick_cover_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1246,6 +1829,7 @@ class TagEditDialog(QDialog):
         t.start()
 
         def _poll():
+            if not self.isVisible(): return   # dialog closed while thread was running
             if t.is_alive():
                 QTimer.singleShot(200, _poll)
                 return
@@ -1288,6 +1872,7 @@ class TagEditDialog(QDialog):
         t.start()
 
         def _poll():
+            if not self.isVisible(): return   # dialog closed while thread was running
             if t.is_alive():
                 QTimer.singleShot(200, _poll)
                 return
@@ -1356,10 +1941,9 @@ class TagEditDialog(QDialog):
                         best_plain[0] = p
 
             # Fire all sources in parallel and wait for EVERY future to finish.
-            # This guarantees a synced result found late beats a plain one found
-            # early — unlike the player's LyricsFetcher which short-circuits on
-            # the first synced hit for latency.  Here the user has explicitly
-            # requested a full search, so accuracy takes priority over speed.
+            # Unlike LyricsFetcher (which short-circuits on the first synced hit
+            # for low latency), this path waits for all results so a synced lyric
+            # found late always wins over a plain one found early.
             with _cf.ThreadPoolExecutor(max_workers=len(sources)) as pool:
                 futs = [pool.submit(_run, fn) for _, fn in sources]
                 _cf.wait(futs)
@@ -1371,6 +1955,7 @@ class TagEditDialog(QDialog):
         t.start()
 
         def _poll():
+            if not self.isVisible(): return   # dialog closed while thread was running
             if t.is_alive():
                 QTimer.singleShot(200, _poll)
                 return
@@ -1404,17 +1989,95 @@ class TagEditDialog(QDialog):
         self._cover_lbl.clear()
         self._cover_lbl.setText('Removed')
 
-    def _on_lock_toggled(self, locked: bool):
-        self._locked = locked
-        self._locked_changed = True
-        self._btn_cover_lock.setText('Locked' if locked else 'Unlocked')
+    def _edit_lyrics(self):
+        """Open lyrics editor popup with current embedded lyrics."""
+        synced, plain = _extract_embedded_lyrics(self._track.filepath)
+        # Build editable text: prefer LRC-formatted synced, then plain
+        if synced:
+            current_text = '\n'.join(
+                f'[{ms//60000:02d}:{(ms%60000)/1000:05.2f}]{txt}'
+                for ms, txt in synced)
+        elif plain:
+            current_text = plain
+        else:
+            current_text = ''
+
+        dlg = LyricsEditDialog(current_text, parent=self)
+        self._child_dialog_open = True
+        result = dlg.exec()
+        self._child_dialog_open = False
+        if result == QDialog.DialogCode.Accepted:
+            new_text = dlg.get_lyrics()
+            # Write directly to file: try to parse as LRC first
+            parsed = _lrc_parse(new_text) if new_text.strip() else None
+            if parsed:
+                ok = embed_lyrics(self._track.filepath, parsed, '')
+            else:
+                ok = embed_lyrics(self._track.filepath, None, new_text)
+            if ok:
+                self._btn_lyrics_edit.setText('Saved!')
+                QTimer.singleShot(2000,
+                    lambda: self._btn_lyrics_edit.setText('Edit\nLyrics…'))
+            else:
+                self._btn_lyrics_edit.setText('Save failed')
+                QTimer.singleShot(2000,
+                    lambda: self._btn_lyrics_edit.setText('Edit\nLyrics…'))
 
     def get_tags(self):
         return self._title_edit.text(), self._artist_edit.text(), self._album_edit.text()
 
     def get_cover_result(self):
-        """Returns (action, bytes|None, locked)."""
-        return self._cover_action, self._new_cover_bytes, self._locked
+        """Returns (action, bytes|None)."""
+        return self._cover_action, self._new_cover_bytes
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Lyrics editor dialog
+# ══════════════════════════════════════════════════════════════════════════════
+class LyricsEditDialog(QDialog):
+    """Popup editor for embedded lyrics (plain or LRC-timestamped)."""
+
+    def __init__(self, current_text: str = '', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Edit Lyrics')
+        self.setModal(True)
+        self.setMinimumSize(480, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # Info label
+        info = QLabel(
+            'Edit lyrics below. Timestamped LRC format ([mm:ss.xx]…) is preserved\n'
+            'on save. Leave empty to clear embedded lyrics.')
+        info.setWordWrap(True)
+        info.setStyleSheet(f'color:{FG2}; font-size:11px;')
+        layout.addWidget(info)
+
+        # Text editor
+        self._editor = QPlainTextEdit()
+        self._editor.setPlainText(current_text)
+        self._editor.setStyleSheet(
+            f'QPlainTextEdit {{'
+            f'  background:{BG2}; color:{FG}; border:1px solid {B2};'
+            f'  border-radius:{_r(6)}px;'
+            f'  font-family: monospace; font-size:12px;'
+            f'  padding:6px;'
+            f'}}'
+            f'QPlainTextEdit:focus {{ border-color:{ACC}; }}'
+        )
+        layout.addWidget(self._editor, 1)
+
+        # Buttons
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+    def get_lyrics(self) -> str:
+        return self._editor.toPlainText()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Custom slider cell for EQ table
@@ -1587,27 +2250,31 @@ def fetch_cover_online(artist: str, title: str, album: str, *,
 #  Online tag / metadata lookup
 # ══════════════════════════════════════════════════════════════════════════════
 
+# MusicBrainz release-type filter constants (shared by _mb_rel_score + _lookup_tags_musicbrainz)
+_MB_BAD_SEC  = frozenset({'Live', 'Compilation', 'DJ-mix', 'Mixtape/Street', 'Demo'})
+_MB_GOOD_PRI = frozenset({'Album', 'Single', 'EP'})
+
+def _mb_rel_score(rel):
+    """Score a MusicBrainz release for preference (lower = better)."""
+    rg  = rel.get('release-group') or {}
+    pri = rg.get('primary-type', '')
+    sec = set(rg.get('secondary-types', []))
+    bad  = bool(sec & _MB_BAD_SEC)
+    good = pri in _MB_GOOD_PRI
+    if good and not bad: return 0
+    if good and bad:     return 1
+    if not bad:          return 2
+    return 3
+
+def _mb_rec_score(rec):
+    """Score a MusicBrainz recording by its best release."""
+    scores = [_mb_rel_score(r) for r in rec.get('releases', [])]
+    return min(scores) if scores else 99
+
 def _lookup_tags_musicbrainz(artist: str, title: str) -> dict:
     """Query MusicBrainz for recording metadata. Returns dict with keys:
     title, artist, album, date. All values may be empty strings.
     Prefers studio albums/singles over live/compilation releases."""
-    _BAD_SEC  = {'Live', 'Compilation', 'DJ-mix', 'Mixtape/Street', 'Demo'}
-    _GOOD_PRI = {'Album', 'Single', 'EP'}
-
-    def _rel_score(rel):
-        rg  = rel.get('release-group') or {}
-        pri = rg.get('primary-type', '')
-        sec = set(rg.get('secondary-types', []))
-        bad  = bool(sec & _BAD_SEC)
-        good = pri in _GOOD_PRI
-        if good and not bad: return 0
-        if good and bad:     return 1
-        if not bad:          return 2
-        return 3
-
-    def _rec_score(rec):
-        scores = [_rel_score(r) for r in rec.get('releases', [])]
-        return min(scores) if scores else 99
 
     try:
         q = _urlparse.quote(f'recording:"{title}" AND artist:"{artist}"')
@@ -1617,16 +2284,16 @@ def _lookup_tags_musicbrainz(artist: str, title: str) -> dict:
         recs = d.get('recordings', [])[:5]
         if not recs:
             return {}
-        best = sorted(recs, key=_rec_score)[0]
+        best = sorted(recs, key=_mb_rec_score)[0]
         t    = best.get('title', '').strip()
         art_list = best.get('artist-credit', [])
         art  = art_list[0].get('artist', {}).get('name', '').strip() if art_list else ''
-        rels = sorted(best.get('releases', []), key=_rel_score)
+        rels = sorted(best.get('releases', []), key=_mb_rel_score)
         alb, date = '', ''
         for rel in rels:
             rg  = rel.get('release-group') or {}
             sec = set(rg.get('secondary-types', []))
-            if not (sec & _BAD_SEC):
+            if not (sec & _MB_BAD_SEC):
                 alb  = rel.get('title', '').strip()
                 date = (rel.get('date') or '')[:4]
                 break
@@ -1837,11 +2504,6 @@ def embed_lyrics(fp: str, synced, plain: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Lyrics — fetch, parse, display
 # ══════════════════════════════════════════════════════════════════════════════
-import re          as _re
-import html        as _html
-import urllib.request as _urlreq
-import urllib.parse   as _urlparse
-
 # ── LRC parser ────────────────────────────────────────────────────────────────
 _LRC_LINE_RE = _re.compile(r'\[(\d+):(\d+(?:\.\d+)?)\](.*)')
 
@@ -1907,15 +2569,23 @@ def _get(url, timeout=8, headers=None):
 def _get_json(url, timeout=8, headers=None):
     return json.loads(_get(url, timeout, headers))
 
-def _apply_scroller_properties(widget):
-    """Apply standard kinetic scroll properties to a viewport widget."""
+def _apply_scroller_properties(widget, *, touch: bool = True):
+    """Apply standard kinetic-scroll properties to a viewport widget.
+
+    ``touch=True`` (default) adds the tight DragStartDistance / AcceleratingFlickMaximumTime
+    values that make touch flicks feel immediate.  Pass ``touch=False`` for mouse-only
+    scroll targets (e.g. the EQ band table) where a looser start distance is acceptable.
+    """
+    SM = QScrollerProperties.ScrollMetric
+    OP = QScrollerProperties.OvershootPolicy
     sp = QScrollerProperties()
-    sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,         0.35)
-    sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,            0.8)
-    sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
-                       QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-    sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-                       QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+    sp.setScrollMetric(SM.DecelerationFactor,           0.35)
+    sp.setScrollMetric(SM.MaximumVelocity,              0.8)
+    sp.setScrollMetric(SM.VerticalOvershootPolicy,      OP.OvershootAlwaysOff)
+    sp.setScrollMetric(SM.HorizontalOvershootPolicy,    OP.OvershootAlwaysOff)
+    if touch:
+        sp.setScrollMetric(SM.AcceleratingFlickMaximumTime, 0.15)
+        sp.setScrollMetric(SM.DragStartDistance,            0.005)
     QScroller.scroller(widget).setScrollerProperties(sp)
 
 
@@ -2212,6 +2882,7 @@ class LyricsPanel(QWidget):
         self._player   = player
         self._ctrlbar  = ctrlbar  # for lyrics_fetch_enabled flag
         self._synced   = []
+        self._synced_ts: list | None = None   # sorted timestamp list for bisect; None = not built
         self._plain    = ''
         self._cur_idx  = -1
         self._track    = None
@@ -2250,16 +2921,7 @@ class LyricsPanel(QWidget):
         
         # Enable touch scrolling
         QScroller.grabGesture(self._scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
-        sp = QScrollerProperties()
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,           0.35)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,              0.8)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.15)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance,            0.005)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        QScroller.scroller(self._scroll.viewport()).setScrollerProperties(sp)
+        _apply_scroller_properties(self._scroll.viewport())
 
         self._cont = QWidget()
         self._cont.setStyleSheet('background:transparent;')
@@ -2272,6 +2934,16 @@ class LyricsPanel(QWidget):
         self._lbls: list = []
         # Lyrics position is driven by on_position() called from sig_pos (100 ms).
         # No separate timer needed — avoids a redundant query_position() call per 80 ms.
+
+        # Pre-allocate a single scroll animation; reuse it in _highlight to avoid
+        # constructing a new QPropertyAnimation (+ parent-lookup + signal-wire) on
+        # every lyric line change while music is playing.
+        # Target widget (_scroll.verticalScrollBar()) is wired lazily after the
+        # scroll area is fully initialised.
+        self._scroll_anim: QPropertyAnimation = QPropertyAnimation(
+            self._scroll.verticalScrollBar(), b'value', self)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll_anim.setDuration(300)
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -2444,10 +3116,9 @@ class LyricsPanel(QWidget):
     def _highlight(self, ms: int):
         if not self._synced or not self._lbls: return
         # O(log N) binary search — replaces O(N) linear scan called every 250 ms
-        ts = getattr(self, '_synced_ts', None)
-        if ts is None:
+        if self._synced_ts is None:
             return
-        pos = bisect.bisect_right(ts, ms) - 1
+        pos = bisect.bisect_right(self._synced_ts, ms) - 1
         idx = max(0, pos)
         if idx == self._cur_idx: return
         if 0 <= self._cur_idx < len(self._lbls):
@@ -2458,22 +3129,18 @@ class LyricsPanel(QWidget):
         cur_t  = self._synced[idx][1]
         nxt_t  = self._synced[idx+1][1] if idx < len(self._synced)-1 else ''
         self.lyrics_context.emit(prev_t, cur_t, nxt_t)
-        # Stop any previous scroll animation before starting a new one
-        if hasattr(self, '_scroll_anim') and self._scroll_anim is not None:
-            self._scroll_anim.stop()
-            self._scroll_anim = None
+        # Reuse the pre-allocated animation — stop if running, then retarget.
+        # This avoids allocating a new QPropertyAnimation + signal connection on
+        # every lyric-line change (called up to 10× per second while playing).
         step   = self._LINE_H + self._LINE_SP
-        target = idx * step - self._scroll.height() // 2 + self._LINE_H // 2
-        target = max(0, target)
-        bar = self._scroll.verticalScrollBar()
-        anim = QPropertyAnimation(bar, b'value', self)
-        anim.setDuration(300)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        target = max(0, idx * step - self._scroll.height() // 2 + self._LINE_H // 2)
+        bar    = self._scroll.verticalScrollBar()
+        anim   = self._scroll_anim
+        if anim.state() == QAbstractAnimation.State.Running:
+            anim.stop()
         anim.setStartValue(bar.value())
         anim.setEndValue(target)
-        self._scroll_anim = anim
-        anim.finished.connect(lambda: setattr(self, '_scroll_anim', None))
-        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        anim.start()
 
 class TouchComboBox(QComboBox):
     """QComboBox that won't close its popup immediately after opening on touch."""
@@ -2589,8 +3256,8 @@ class EqPopup(QFrame):
         main.addWidget(table_label)
 
         self._band_table = QTableWidget(0, 3)
-        self._band_table.setHorizontalHeaderLabels(['Frequency', 'Gain', 'Q', ''])
-        # Set column widths: last column fixed 40px, others stretch
+        self._band_table.setHorizontalHeaderLabels(['Frequency', 'Gain', 'Q'])
+        # All three columns stretch equally
         self._band_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._band_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._band_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -2600,7 +3267,7 @@ class EqPopup(QFrame):
         self._band_table.setMinimumHeight(240)
         self._band_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         QScroller.grabGesture(self._band_table.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        _apply_scroller_properties(self._band_table.viewport())
+        _apply_scroller_properties(self._band_table.viewport(), touch=False)
         main.addWidget(self._band_table)
 
         # Add/Remove buttons
@@ -2621,10 +3288,15 @@ class EqPopup(QFrame):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        # Fill background
         p.setBrush(QBrush(QColor(BG)))
-        p.setPen(QPen(QColor(B2), 1.0))
-        p.drawRoundedRect(r, 12, 12)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, 11, 11)
+        # Accent border 3px
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(ACC), 3.0))
+        p.drawRoundedRect(r, 11, 11)
         p.end()
 
     def _on_enable_toggled(self, on):
@@ -2834,6 +3506,22 @@ class EqPopup(QFrame):
         self.show()
         self.raise_()
 
+
+def _np_to_qpolygonf(xs, ys) -> QPolygonF:
+    """Convert two equal-length numpy arrays to a QPolygonF efficiently.
+    Interleaves x/y into a contiguous float64 buffer then builds QPointF list
+    without redundant Python-level float() boxing."""
+    pts = _np.empty(len(xs) * 2, dtype=_np.float64)
+    pts[0::2] = xs
+    pts[1::2] = ys
+    return QPolygonF([QPointF(pts[i], pts[i + 1]) for i in range(0, len(pts), 2)])
+
+
+def _fmt_ms(ms: int) -> str:
+    t = ms // 1000; h, r = divmod(t, 3600); m, s = divmod(r, 60)
+    return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+
+
 class EQGraph(QWidget):
     """Widget to draw frequency response of the current EQ bands."""
     def __init__(self, parent=None):
@@ -2914,7 +3602,7 @@ class EQGraph(QWidget):
         half_h = h / 2.0
         scale  = half_h / EQ_GAIN_MAX_GRAPH
 
-        # Draw each band's curve — PyQt6 drawPolyline requires QPolygonF
+        # Draw each band's curve
         n_bands = len(self._bands)
         for idx in range(n_bands):
             gains = band_gains_np[idx]
@@ -2925,20 +3613,12 @@ class EQGraph(QWidget):
             pen   = QPen(color, 1.5)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            ys = half_h - gains * scale
-            poly = QPolygonF([QPointF(float(xs_np[i]), float(ys[i])) for i in range(len(xs_np))])
-            p.drawPolyline(poly)
+            p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - gains * scale))
 
         # Draw total curve
         total_clipped = _np.clip(total_gains_np, -EQ_GAIN_MAX_GRAPH, EQ_GAIN_MAX_GRAPH)
-        ys_total = half_h - total_clipped * scale
-        poly_total = QPolygonF([QPointF(float(xs_np[i]), float(ys_total[i])) for i in range(len(xs_np))])
         p.setPen(QPen(QColor(FG), 2))
-        p.drawPolyline(poly_total)
-
-def _fmt_ms(ms: int) -> str:
-    t = ms // 1000; h, r = divmod(t, 3600); m, s = divmod(r, 60)
-    return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+        p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - total_clipped * scale))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Blackout overlay
@@ -3138,12 +3818,11 @@ class BlackoutOverlay(QWidget):
         p.end()
 
     # ── container paint (drawn inside the opacity-animated child) ─────────────
-    # We override the container's paintEvent via an event filter
     def _paint_info(self, p: QPainter):
         sc = getattr(self, '_scale', 1.0)
         # Scale everything via a painter transform.  The container widget itself
         # is already sized to base_w*sc × base_h*sc (see _resize_container), so
-        # we simply scale the coordinate system and draw at the original base sizes.
+        # the coordinate system is scaled to draw at the original base sizes.
         if sc != 1.0:
             p.save()
             p.scale(sc, sc)
@@ -3159,6 +3838,12 @@ class BlackoutOverlay(QWidget):
 
         RED  = QColor(ACC)
         GREY = QColor(BG3)
+        # Pre-built alpha variants of ACC — avoids per-frame QColor copy+mutate
+        _acc_a55  = QColor(ACC); _acc_a55.setAlpha(55)
+        _acc_a70  = QColor(ACC); _acc_a70.setAlpha(70)
+        _acc_a90  = QColor(ACC); _acc_a90.setAlpha(90)
+        _acc_a200 = QColor(ACC); _acc_a200.setAlpha(200)
+        _acc_a220 = QColor(ACC); _acc_a220.setAlpha(220)
         CENT = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -3220,8 +3905,7 @@ class BlackoutOverlay(QWidget):
         p.drawText(QRectF(w - 70, BAR_Y - 15, 62, 14),
                    Qt.AlignmentFlag.AlignRight, _fmt_ms(self._dur_ms))
         p.setPen(Qt.PenStyle.NoPen)
-        dark = QColor(ACC); dark.setAlpha(55)
-        p.setBrush(QBrush(dark))
+        p.setBrush(QBrush(_acc_a55))
         p.drawRoundedRect(QRectF(10, BAR_Y, BAR_W, BAR_H), 2, 2)
         if frac > 0:
             p.setBrush(QBrush(RED))
@@ -3233,14 +3917,14 @@ class BlackoutOverlay(QWidget):
             viz_y = BAR_Y + BAR_H
             n_v  = len(vd)
             bw_v = BAR_W / max(1, n_v)
-            bar_col = QColor(ACC); bar_col.setAlpha(200)
+            bar_col = _acc_a200
             # Retrieve viz type from ctrlbar if available
             _vtype = 'bars'
             if self._ctrlbar_ref is not None:
                 _vtype = getattr(self._ctrlbar_ref, '_viz_type', 'bars')
 
             if _vtype == 'fill':
-                fill_col = QColor(ACC); fill_col.setAlpha(90)
+                fill_col = _acc_a90
                 cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
                 cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
                 poly = QPolygonF()
@@ -3254,41 +3938,41 @@ class BlackoutOverlay(QWidget):
                 p.drawPolygon(poly)
                 p.setClipping(False)
             elif _vtype == 'line':
-                cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
-                cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
-                line_col = QColor(ACC); line_col.setAlpha(220)
+                cx_arr = 10.0 + (_np.arange(n_v) + 0.5) * bw_v
+                cy_arr = viz_y + vd.astype(_np.float64) * VIZ_H
+                line_col = _acc_a220
                 pen = QPen(line_col, 1.5, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
-                poly = QPolygonF([QPointF(cx, cy) for cx, cy in zip(cx_list, cy_list)])
-                p.drawPolyline(poly)
+                p.drawPolyline(_np_to_qpolygonf(cx_arr, cy_arr))
                 p.setClipping(False)
             elif _vtype == 'line+fill':
-                cx_list = [10.0 + (i + 0.5) * bw_v for i in range(n_v)]
-                cy_list = [viz_y + float(norm) * VIZ_H for norm in vd]
-                # Fill polygon beneath the line (closes at viz_y = top of viz area)
-                fill_col = QColor(ACC); fill_col.setAlpha(70)
-                poly_fill = QPolygonF()
-                poly_fill.append(QPointF(cx_list[0], viz_y))
-                for cx, cy in zip(cx_list, cy_list):
-                    poly_fill.append(QPointF(cx, cy))
-                poly_fill.append(QPointF(cx_list[-1], viz_y))
+                cx_arr = 10.0 + (_np.arange(n_v) + 0.5) * bw_v
+                cy_arr = viz_y + vd.astype(_np.float64) * VIZ_H
+                # Fill polygon beneath the line
+                fill_col = _acc_a70
+                # Build fill polygon: first point at top-left, data points, last point at top-right
+                fx = _np.empty(n_v + 2, dtype=_np.float64)
+                fy = _np.empty(n_v + 2, dtype=_np.float64)
+                fx[0]  = cx_arr[0];  fy[0]  = viz_y
+                fx[1:-1] = cx_arr;   fy[1:-1] = cy_arr
+                fx[-1] = cx_arr[-1]; fy[-1] = viz_y
+                poly_fill = _np_to_qpolygonf(fx, fy)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(fill_col))
                 p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
                 p.drawPolygon(poly_fill)
                 # Line on top
-                line_col = QColor(ACC); line_col.setAlpha(220)
+                line_col = _acc_a220
                 pen = QPen(line_col, 1.5, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                poly_line = QPolygonF([QPointF(cx, cy) for cx, cy in zip(cx_list, cy_list)])
-                p.drawPolyline(poly_line)
+                p.drawPolyline(_np_to_qpolygonf(cx_arr, cy_arr))
                 p.setClipping(False)
             else:
                 # Bars mode (original)
@@ -3296,13 +3980,19 @@ class BlackoutOverlay(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(bar_col))
                 p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
+                # Round caps on bar tops only when global corner-radius >= 50 %
+                _bar_use_round = RAD_PCT >= 50
                 # Iterate with explicit float() so both ndarray elements and plain
                 # floats are handled safely without triggering ndarray truth-value errors.
                 x = 10.0
                 for norm in vd:
                     h = float(norm) * VIZ_H
                     if h >= 0.01 * VIZ_H:
-                        p.drawRect(QRectF(x, viz_y, bw_draw, h))
+                        if _bar_use_round:
+                            cap_r = min(bw_draw / 2.0, h / 2.0)
+                            p.drawRoundedRect(QRectF(x, viz_y, bw_draw, h), cap_r, cap_r)
+                        else:
+                            p.drawRect(QRectF(x, viz_y, bw_draw, h))
                     x += bw_v
                 p.setClipping(False)
 
@@ -3364,11 +4054,14 @@ def _vtag(tags, *keys):
     """Case-insensitive tag lookup for Vorbis comment tags (FLAC/OGG/OPUS).
     Avoids rebuilding a lowercase dict by iterating tags directly.
     For the small tag sets typical of audio files this is faster.
+    Pre-lowercases each search key once instead of re-lowercasing it per tag.
     """
+    # Pre-lower each tag key once so the inner loop only lowers per-tag items.
+    lc_tags = [(tk.lower(), tv) for tk, tv in tags.items()]
     for k in keys:
         kl = k.lower()
-        for tk, tv in tags.items():
-            if tk.lower() == kl:
+        for tkl, tv in lc_tags:
+            if tkl == kl:
                 return str(tv[0]) if isinstance(tv, list) else str(tv)
     return ''
 
@@ -3430,7 +4123,8 @@ def read_metadata(fp: str) -> Track:
     return tr
 
 # ── Cover art ─────────────────────────────────────────────────────────────────
-_cover_cache: dict = {}   # (fp, size, radius) → QPixmap  (insertion-ordered, Python 3.7+)
+_cover_cache: dict = {}   # (fp, size) → QPixmap (square JPEG, insertion-ordered, Python 3.7+)
+                         # Radius is NOT stored here — applied at draw time via _draw_cover_rounded()
 _COVER_SENTINEL = object()  # distinguishes cache miss from cached None
 _COVER_CACHE_MAX = 8000     # max entries before trimming (each ~10-70 KB on screen)
 
@@ -3472,49 +4166,101 @@ def extract_cover_bytes(fp: str) -> Optional[bytes]:
         pass
     return None
 
-def _rounded_pixmap(pm: QPixmap, size: int, radius: int) -> QPixmap:
-    """Scale pm to size×size with rounded corners."""
+def _square_pixmap(pm: QPixmap, size: int) -> QPixmap:
+    """Scale pm to size×size and centre-crop to an exact square.
+
+    No rounded corners are applied here — the result is a plain opaque JPEG-
+    compatible square.  Corner rounding is done at draw time by
+    _draw_cover_rounded() so we never need transparency in the disk cache and
+    one cached pixmap serves every radius value.
+    """
     pm = pm.scaled(size, size,
                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                    Qt.TransformationMode.SmoothTransformation)
-    # Crop to exact square from centre
     x = (pm.width()  - size) // 2
     y = (pm.height() - size) // 2
-    pm = pm.copy(x, y, size, size)
-    # Apply rounded mask
-    out = QPixmap(size, size); out.fill(Qt.GlobalColor.transparent)
-    p = QPainter(out)
+    return pm.copy(x, y, size, size)
+
+# Pre-cached corner-frame pixmaps: (size, radius, bg_color) → QPixmap
+# Each is a size×size ARGB pixmap that is fully transparent in the rounded-rect
+# interior and bg_color in the four corner areas.  Painting it on top of a
+# square cover produces the rounded-corner illusion with zero transparency in
+# the cover cache files.  Frames are tiny (a few KB each) and keyed by
+# (size, radius, bg_color) — only a handful ever exist at runtime.
+_corner_frame_cache: dict = {}
+
+def _get_corner_frame(size: int, radius: int, bg_color: str) -> QPixmap:
+    """Return (or build + cache) the corner-masking overlay frame.
+
+    The frame is size×size with transparent interior (shows cover below) and
+    bg_color corners.  Composited on top of the square cover to fake rounded
+    corners without any ARGB data in the cover cache.
+    """
+    key = (size, radius, bg_color)
+    pm = _corner_frame_cache.get(key)
+    if pm is not None:
+        return pm
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QBrush(pm)); p.setPen(Qt.PenStyle.NoPen)
+    # 1. Fill everything with bg_color
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(bg_color)))
+    p.drawRect(0, 0, size, size)
+    # 2. Clear (transparent) the rounded-rect interior so the cover shows through
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    p.setBrush(Qt.BrushStyle.SolidPattern)
     p.drawRoundedRect(0, 0, size, size, radius, radius)
     p.end()
-    return out
+    _corner_frame_cache[key] = pm
+    return pm
 
-def _default_cover_disk_path(acc: str, size: int, radius: int) -> Path:
-    safe = acc.lstrip('#')
-    return CONFIG_PATH.parent / f'default_cover_{safe}_{size}_{radius}.jpg'
+def _draw_cover_rounded(painter: QPainter, pm: QPixmap,
+                        x: int, y: int, size: int, radius: int,
+                        bg_color: str) -> None:
+    """Draw *pm* at (x,y) with rounded corners, no transparency in cover cache.
 
-_default_cover_mem_cache: dict = {}   # (acc, size, radius) -> QPixmap
+    Strategy: draw the square cover pixmap, then draw a pre-built corner-frame
+    overlay on top.  The frame is ARGB with transparent interior and bg_color
+    corners — it costs one extra drawPixmap() call but avoids storing ARGB
+    data in the disk/memory cover cache and keeps the cache key radius-free.
+    """
+    painter.drawPixmap(x, y, size, size, pm)
+    if radius > 0:
+        frame = _get_corner_frame(size, radius, bg_color)
+        painter.drawPixmap(x, y, frame)
 
-def draw_default_cover(size: int, radius: int) -> QPixmap:
-    mem_key = (ACC, size, radius)
+
+def _default_cover_disk_path(acc: str, bg: str, size: int) -> Path:
+    safe_acc = acc.lstrip('#')
+    safe_bg  = bg.lstrip('#')
+    return CONFIG_PATH.parent / f'default_cover_{safe_acc}_{safe_bg}_{size}.jpg'
+
+_default_cover_mem_cache: dict = {}   # (acc, bg, size) -> QPixmap  (square, no radius)
+
+def draw_default_cover(size: int) -> QPixmap:
+    """Return (or build) the clef-placeholder cover as a plain square pixmap.
+
+    The default cover is stored without rounded corners — like all covers —
+    so the same pixmap serves every radius setting.  Callers that need rounded
+    display use _draw_cover_rounded() or _get_corner_frame().
+    """
+    mem_key = (ACC, BG, size)   # BG included so dark/light switch invalidates cache
     if mem_key in _default_cover_mem_cache:
         return _default_cover_mem_cache[mem_key]
     # Check disk cache first
-    disk = _default_cover_disk_path(ACC, size, radius)
+    disk = _default_cover_disk_path(ACC, BG, size)
     if disk.exists():
         pm = QPixmap()
         if pm.load(str(disk)):
             _default_cover_mem_cache[mem_key] = pm
             return pm
-    # Render
+    # Render as plain opaque square (no transparency needed)
     pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
+    pm.fill(QColor(BG))
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QBrush(QColor(BG)))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(0, 0, size, size, radius, radius)
     p.setPen(QPen(QColor(ACC), 1))
     font = p.font()
     font.setPixelSize(int(size * 0.67))
@@ -3543,90 +4289,96 @@ try:
 except Exception:
     pass
 
-def _cover_disk_key(fp: str, size: int, radius: int) -> str:
-    """Hash of filepath+mtime to detect stale covers."""
-    try:
-        mtime = str(os.path.getmtime(fp))
-    except Exception:
-        mtime = '0'
-    return hashlib.sha1(f'{fp}:{mtime}:{size}:{radius}'.encode()).hexdigest()
+def _cover_disk_key(fp: str, size: int) -> str:
+    """Persistent filename-based disk cache key: <sanitized_stem>_<size>.
 
-def get_cover_pixmap(fp: str, size: int = 48, radius: int = 4) -> Optional[QPixmap]:
-    """Return cached rounded QPixmap (memory-only, non-blocking).
+    Using the audio filename stem (not a SHA1 hash) means:
+    - The disk key is human-readable and survives process restarts.
+    - Batch rename can update cover filenames by a simple rename on disk.
+    - Stale covers (file replaced with different content) are detected by
+      comparing the embedded-cover mtime via a sidecar .mtime file written
+      alongside the JPEG.  If the audio mtime changed we re-extract.
+
+    The key is sanitized with the same rules as _sanitize_filename_part so
+    characters illegal on Linux/Windows are stripped.
+    """
+    stem = _sanitize_filename_part(Path(fp).stem)
+    # Truncate very long stems to keep filenames under 200 chars
+    if len(stem) > 120:
+        stem = stem[:120]
+    return f'{stem}_{size}'
+
+def _cover_disk_is_stale(fp: str, disk_path: Path) -> bool:
+    """Return True if the cover on disk is older than the audio file's mtime.
+
+    A sidecar file ``<disk_path>.mtime`` holds the mtime string at the time
+    the cover was extracted.  If the audio file has been re-tagged since then
+    the sidecar will differ and we re-extract.  Missing sidecar → stale.
+    """
+    sidecar = Path(str(disk_path) + '.mtime')
+    try:
+        audio_mtime = str(os.path.getmtime(fp))
+    except Exception:
+        return False  # can't stat audio — keep existing cover
+    try:
+        cached_mtime = sidecar.read_text().strip()
+        return cached_mtime != audio_mtime
+    except Exception:
+        return True  # no sidecar → treat as stale
+
+def _cover_disk_write_mtime(fp: str, disk_path: Path) -> None:
+    """Write a sidecar .mtime file next to *disk_path*."""
+    try:
+        audio_mtime = str(os.path.getmtime(fp))
+        Path(str(disk_path) + '.mtime').write_text(audio_mtime)
+    except Exception:
+        pass
+
+def get_cover_pixmap(fp: str, size: int = 48) -> Optional[QPixmap]:
+    """Return cached square QPixmap (memory-only, non-blocking).
+
+    The returned pixmap is a plain square JPEG — no rounded corners baked in.
+    Callers paint the rounded-corner overlay frame themselves via
+    _draw_cover_rounded(), so one pixmap serves all radius values.
 
     Cache hits (non-None) return immediately.
     Cache misses schedule an async loader — caller never blocks on disk/mutagen.
     The async loader writes the QPixmap into _cover_cache and emits cover_loaded
     so the gallery can repaint just the affected cards.
     """
-    key = (fp, size, radius)
+    key = (fp, size)
     cached = _cover_cache.get(key, _COVER_SENTINEL)
     if cached is not _COVER_SENTINEL:
         return cached  # may be a valid QPixmap; None is never stored here
 
     # Schedule async load (deduplicates by key internally)
-    _ensure_async_cover_loader().request(fp, size, radius)
+    _ensure_async_cover_loader().request(fp, size)
     return None
-
-# ── Synchronous cover loader (used outside the paint path) ────────────────────
-def get_cover_pixmap_sync(fp: str, size: int = 48, radius: int = 4) -> Optional[QPixmap]:
-    """Blocking version — only call from worker threads or startup code."""
-    key = (fp, size, radius)
-    if key in _cover_cache:
-        return _cover_cache[key]
-
-    dkey = _cover_disk_key(fp, size, radius)
-    disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
-    if disk_path.exists():
-        pm = QPixmap()
-        if pm.load(str(disk_path)):
-            _cover_cache[key] = pm
-            _trim_cover_cache()
-            return pm
-
-    data = extract_cover_bytes(fp)
-    if data:
-        raw = QPixmap()
-        if raw.loadFromData(data):
-            pm = _rounded_pixmap(raw, size, radius)
-            _cover_cache[key] = pm
-            _trim_cover_cache()
-            try:
-                _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
-                pm.save(str(disk_path), 'JPEG', _COVER_JPEG_QUALITY)
-            except Exception:
-                pass
-            return pm
-
-    if _cover_fetch_on and fp not in _cover_locked_set:
-        return None
-    default = draw_default_cover(size, radius)
-    _cover_cache[key] = default
-    return default
 
 class _CoverTask(QRunnable):
     """One cover-load task. Reads disk/mutagen on a pool thread, posts result
     back to the main thread via a queued signal on the loader QObject."""
-    def __init__(self, loader, fp, size, radius):
+    def __init__(self, loader, fp, size):
         super().__init__()
         self.setAutoDelete(True)
         self._loader = loader
-        self._fp = fp; self._size = size; self._radius = radius
+        self._fp = fp; self._size = size
 
     def run(self):
-        fp, size, radius = self._fp, self._size, self._radius
+        fp, size = self._fp, self._size
         try:
-            dkey = _cover_disk_key(fp, size, radius)
+            dkey = _cover_disk_key(fp, size)
             disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
 
-            # L2: disk cache — already scaled + rounded, just read raw bytes
-            if disk_path.exists():
+            # L2: disk cache — already scaled + square, just read raw bytes
+            # Skip if audio file has been re-tagged since the cover was saved.
+            if disk_path.exists() and not _cover_disk_is_stale(fp, disk_path):
                 try:
                     with open(str(disk_path), 'rb') as f:
                         raw = f.read()
                     if raw:
                         # Post bytes directly — skip scale/crop/encode entirely
-                        self._loader._raw_ready.emit(fp, size, radius, raw, '')
+                        self._loader._raw_ready.emit(fp, size, raw, '')
                         return
                 except Exception:
                     pass  # fall through to full load
@@ -3637,13 +4389,13 @@ class _CoverTask(QRunnable):
                 img = QImage()
                 img.loadFromData(data)
                 if not img.isNull():
-                    self._loader._post_image(fp, size, radius, img, str(disk_path))
+                    self._loader._post_image(fp, size, img, str(disk_path))
                     return
 
             # Nothing found
-            self._loader._post_miss(fp, size, radius)
+            self._loader._post_miss(fp, size)
         except Exception:
-            self._loader._post_miss(fp, size, radius)
+            self._loader._post_miss(fp, size)
 
 class AsyncCoverLoader(QObject):
     """
@@ -3654,9 +4406,9 @@ class AsyncCoverLoader(QObject):
     different threads).
     """
     # emitted on main thread after QPixmap is built
-    cover_loaded = pyqtSignal(str, int, int)   # fp, size, radius
+    cover_loaded = pyqtSignal(str, int)   # fp, size
     # internal signal — worker posts raw bytes, main thread builds QPixmap
-    _raw_ready   = pyqtSignal(str, int, int, bytes, str)   # fp,sz,rad,data,disk_path
+    _raw_ready   = pyqtSignal(str, int, bytes, str)   # fp,sz,data,disk_path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3668,17 +4420,17 @@ class AsyncCoverLoader(QObject):
         # Connect internal signal with queued connection → always runs on main thread
         self._raw_ready.connect(self._on_raw_ready, Qt.ConnectionType.QueuedConnection)
 
-    def request(self, fp: str, size: int, radius: int):
-        key = (fp, size, radius)
+    def request(self, fp: str, size: int):
+        key = (fp, size)
         with self._lock:
             if key in _cover_cache or key in self._in_flight or fp in self._no_embed:
                 return
             self._in_flight.add(key)
-        task = _CoverTask(self, fp, size, radius)
+        task = _CoverTask(self, fp, size)
         self._pool.start(task)
 
     # called from worker thread — emit queued signal to marshal to main thread
-    def _post_image(self, fp, size, radius, img: QImage, disk_path: str):
+    def _post_image(self, fp, size, img: QImage, disk_path: str):
         # Scale + crop on worker thread (QImage pixel ops are thread-safe in Qt6)
         img = img.scaled(size, size,
                          Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -3693,16 +4445,16 @@ class AsyncCoverLoader(QObject):
         buf_io.open(QIODeviceBase.OpenModeFlag.WriteOnly)
         img.save(buf_io, 'JPEG', _COVER_JPEG_QUALITY)
         buf_io.close()
-        self._raw_ready.emit(fp, size, radius, bytes(buf), disk_path or '')
+        self._raw_ready.emit(fp, size, bytes(buf), disk_path or '')
 
-    def _post_miss(self, fp, size, radius):
+    def _post_miss(self, fp, size):
         with self._lock:
             self._no_embed.add(fp)
-            self._in_flight.discard((fp, size, radius))
+            self._in_flight.discard((fp, size))
 
     # ── main thread (called via queued connection) ────────────────────────────
-    def _on_raw_ready(self, fp: str, size: int, radius: int, data: bytes, disk_path: str):
-        key = (fp, size, radius)
+    def _on_raw_ready(self, fp: str, size: int, data: bytes, disk_path: str):
+        key = (fp, size)
         with self._lock:
             self._in_flight.discard(key)
         if not data:
@@ -3710,19 +4462,14 @@ class AsyncCoverLoader(QObject):
                 self._no_embed.add(fp)
             return
         # Decode JPEG back to QPixmap (main thread — safe for QPainter)
-        pm_raw = QPixmap()
-        if not pm_raw.loadFromData(data, 'JPEG') or pm_raw.isNull():
+        pm = QPixmap()
+        if not pm.loadFromData(data, 'JPEG') or pm.isNull():
             with self._lock:
                 self._no_embed.add(fp)
             return
-        # Apply rounded corners
-        out = QPixmap(pm_raw.size()); out.fill(Qt.GlobalColor.transparent)
-        p = QPainter(out)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(pm_raw)); p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(0, 0, pm_raw.width(), pm_raw.height(), radius, radius)
-        p.end()
-        _cover_cache[key] = out
+        # Store the plain square pixmap — no rounded corners baked in.
+        # Corners are applied at draw time via _draw_cover_rounded() / _get_corner_frame().
+        _cover_cache[key] = pm
         _trim_cover_cache()  # evict oldest entries when cache grows large
         # Disk cache: write the already-encoded JPEG bytes directly — no re-encode needed
         if disk_path:
@@ -3730,9 +4477,10 @@ class AsyncCoverLoader(QObject):
                 _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
                 with open(disk_path, 'wb') as f:
                     f.write(data)
+                _cover_disk_write_mtime(fp, Path(disk_path))
             except Exception:
                 pass
-        self.cover_loaded.emit(fp, size, radius)
+        self.cover_loaded.emit(fp, size)
 
 # Module-level singleton — created once, shared by all gallery views
 _async_cover_loader: Optional['AsyncCoverLoader'] = None
@@ -3742,15 +4490,6 @@ def _ensure_async_cover_loader() -> 'AsyncCoverLoader':
     if _async_cover_loader is None:
         _async_cover_loader = AsyncCoverLoader()
     return _async_cover_loader
-
-def _clear_cover_disk_cache():
-    """Wipe disk + memory cover caches."""
-    _cover_cache.clear()
-    try:
-        if _COVER_DISK_DIR.exists():
-            shutil.rmtree(_COVER_DISK_DIR)
-    except Exception:
-        pass
 
 class _BaseFetchPopup(QDialog):
     """Shared base for CoverFetchPopup, TagFetchPopup, LyricsFetchPopup.
@@ -3848,7 +4587,7 @@ class _BaseFetchPopup(QDialog):
         )
         self._log.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         QScroller.grabGesture(self._log.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        _apply_scroller_properties(self._log.viewport())
+        _apply_scroller_properties(self._log.viewport(), touch=False)
         root.addWidget(self._log)
 
         self._result_lbl = QLabel('')
@@ -3904,13 +4643,12 @@ class _BaseFetchPopup(QDialog):
 
         def _check():
             try:
-                import urllib.request as _ur, urllib.parse as _up, json as _js
-                q = _up.quote('Radiohead'); tk = _up.quote('Creep')
+                q = _urlparse.quote('Radiohead'); tk = _urlparse.quote('Creep')
                 url = (f'https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
                        f'&artist={q}&track={tk}&api_key={key}&format=json')
-                req = _ur.Request(url, headers={'User-Agent': 'VoidPulse/2.0'})
-                with _ur.urlopen(req, timeout=6) as r:
-                    d = _js.loads(r.read())
+                req = _urlreq.Request(url, headers={'User-Agent': 'VoidPulse/2.0'})
+                with _urlreq.urlopen(req, timeout=6) as r:
+                    d = json.loads(r.read())
                 result[0] = 'error' not in d and 'track' in d
             except Exception:
                 result[0] = False
@@ -3922,6 +4660,7 @@ class _BaseFetchPopup(QDialog):
             if thr.is_alive():
                 QTimer.singleShot(150, _poll)
                 return
+            if not self.isVisible(): return
             ok = result[0]
             self._set_lfm_border(ok)
             if ok:
@@ -4123,15 +4862,13 @@ class _BaseFetchPopup(QDialog):
         if not (hasattr(self, '_bg_progress') and hasattr(self, '_bg_total')):
             return
         
-        # Determine fetch type label based on popup class
-        if isinstance(self, CoverFetchPopup):
-            type_label = "Covers"
-        elif isinstance(self, TagFetchPopup):
-            type_label = "Tags"
-        elif isinstance(self, LyricsFetchPopup):
-            type_label = "Lyrics"
-        else:
-            type_label = "Fetch"
+        # Determine fetch type label from the already-stored popup type name
+        _TYPE_LABELS = {
+            'CoverFetchPopup':  'Covers',
+            'TagFetchPopup':    'Tags',
+            'LyricsFetchPopup': 'Lyrics',
+        }
+        type_label = _TYPE_LABELS.get(self._popup_type, 'Fetch')
         
         msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
         # Find main window and update status bar
@@ -4249,17 +4986,18 @@ class CoverFetchPopup(_BaseFetchPopup):
             self._log_add(f'FAIL  {name}', False)
             return
         self._log_add(f'OK    {name}', True)
-        for size, radius in [(28, 4), (64, 8)]:
-            key = (fp, size, radius)
+        for size in (28, 64):
+            key = (fp, size)
             raw = QPixmap()
             if raw.loadFromData(data):
-                pm = _rounded_pixmap(raw, size, radius)
+                pm = _square_pixmap(raw, size)
                 _cover_cache[key] = pm
                 try:
-                    dkey = _cover_disk_key(fp, size, radius)
+                    dkey = _cover_disk_key(fp, size)
                     disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
                     _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
                     pm.save(str(disk_path), 'JPEG', _COVER_JPEG_QUALITY)
+                    _cover_disk_write_mtime(fp, disk_path)
                 except Exception:
                     pass
         threading.Thread(target=embed_cover_bytes, args=(fp, data), daemon=True).start()
@@ -4268,13 +5006,13 @@ class CoverFetchPopup(_BaseFetchPopup):
             for r, t in enumerate(tracks):
                 if t.filepath == fp and r < page.table.rowCount():
                     item = page.table.item(r, C_TIT)
-                    pm28 = _cover_cache.get((fp, 28, 4))
+                    pm28 = _cover_cache.get((fp, 28))
                     if item and pm28:
                         item.setIcon(QIcon(pm28))
                     break
         if self._ctrlbar and self._ctrlbar._cur_track:
             if self._ctrlbar._cur_track.filepath == fp:
-                pm64 = _cover_cache.get((fp, 64, 8))
+                pm64 = _cover_cache.get((fp, 64))
                 if pm64 and self._ctrlbar._cover_lbl.isVisible():
                     self._ctrlbar._cover_lbl.setPixmap(pm64)
         self._found += 1
@@ -4489,7 +5227,6 @@ def _build_new_filename(pattern: str, track) -> str:
     have connected it to adjacent tokens are collapsed away so the result stays clean.
     Returns empty string when the pattern is empty.
     """
-    import re as _re2
     stem   = _sanitize_filename_part(Path(track.filepath).stem)
     result = pattern
     result = result.replace('%F', stem)
@@ -4498,7 +5235,7 @@ def _build_new_filename(pattern: str, track) -> str:
     result = result.replace('%C', _sanitize_filename_part(track.album  or ''))
     # Collapse sequences of separator-only characters left by empty placeholders,
     # e.g. " - " adjacent to another " - " or at the start/end of the string.
-    result = _re2.sub(r'[\s\-_\.]{2,}', lambda m: m.group(0)[0], result)
+    result = _re.sub(r'[\s\-_\.]{2,}', lambda m: m.group(0)[0], result)
     result = result.strip(' -_.')
     return result
 
@@ -4572,6 +5309,9 @@ class LibraryRenameWorker(QObject):
     def run(self):
         total   = len(self._tracks)
         renamed = 0
+        # Filename size limit constants (hoisted out of loop)
+        _MAX_FILENAME_BYTES = 255
+        _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
         for i, t in enumerate(self._tracks):
             if self._cancelled:
                 break
@@ -4583,7 +5323,21 @@ class LibraryRenameWorker(QObject):
                     self.track_done.emit(t.filepath, '', False)
                     continue
                 old_path = Path(t.filepath)
-                new_path = old_path.with_name(new_stem + old_path.suffix)
+                ext = old_path.suffix  # e.g. '.m4a'
+
+                # ── Enforce 255-byte filename limit (Linux/macOS/Windows all cap at 255) ──
+                ext_bytes = ext.encode('utf-8')
+                max_stem_bytes = _MAX_FILENAME_BYTES - len(ext_bytes) - _DEDUP_RESERVE
+                stem_encoded = new_stem.encode('utf-8')
+                if len(stem_encoded) > max_stem_bytes:
+                    # Truncate on byte boundary then decode losslessly.
+                    stem_encoded = stem_encoded[:max_stem_bytes]
+                    # Step back until we land on a valid UTF-8 boundary.
+                    while stem_encoded and (stem_encoded[-1] & 0xC0) == 0x80:
+                        stem_encoded = stem_encoded[:-1]
+                    new_stem = stem_encoded.decode('utf-8', errors='ignore').rstrip()
+
+                new_path = old_path.with_name(new_stem + ext)
                 if old_path == new_path:
                     # Nothing to do
                     self.track_done.emit(str(old_path), str(new_path), True)
@@ -4592,9 +5346,17 @@ class LibraryRenameWorker(QObject):
                 # Avoid overwriting existing files — append _(n) suffix
                 counter = 1
                 candidate = new_path
-                while candidate.exists():
-                    candidate = old_path.with_name(f'{new_stem}_({counter}){old_path.suffix}')
+                try:
+                    _exists = candidate.exists()
+                except OSError:
+                    _exists = False  # path too long or inaccessible — treat as free
+                while _exists:
+                    candidate = old_path.with_name(f'{new_stem}_({counter}){ext}')
                     counter += 1
+                    try:
+                        _exists = candidate.exists()
+                    except OSError:
+                        _exists = False
                 # Atomic rename via a temp name in the same directory.
                 # If the process is killed mid-operation the file survives under
                 # its original name or the temp name — never lost or truncated.
@@ -4602,13 +5364,49 @@ class LibraryRenameWorker(QObject):
                 old_path.rename(tmp_path)       # step 1: original → temp
                 tmp_path.rename(candidate)      # step 2: temp → final
                 renamed += 1
+                # ── Rename cover disk-cache files to match new audio filename ──
+                # Cover disk files are named <sanitized_stem>_<size>.jpg so
+                # renaming the audio file means we rename the cover file(s) too.
+                # This keeps the cache persistent across batch rename operations.
+                try:
+                    old_stem = _sanitize_filename_part(old_path.stem)
+                    if len(old_stem) > 120: old_stem = old_stem[:120]
+                    new_stem_san = _sanitize_filename_part(new_stem)
+                    if len(new_stem_san) > 120: new_stem_san = new_stem_san[:120]
+                    if old_stem != new_stem_san and _COVER_DISK_DIR.exists():
+                        for cover_file in _COVER_DISK_DIR.glob(f'{old_stem}_*.jpg'):
+                            # e.g. "old_stem_64.jpg" → "new_stem_64.jpg"
+                            suffix_part = cover_file.stem[len(old_stem):]  # "_64"
+                            new_cover = cover_file.with_name(f'{new_stem_san}{suffix_part}.jpg')
+                            mtime_file = Path(str(cover_file) + '.mtime')
+                            new_mtime  = Path(str(new_cover)  + '.mtime')
+                            try:
+                                cover_file.rename(new_cover)
+                                if mtime_file.exists():
+                                    mtime_file.rename(new_mtime)
+                            except Exception:
+                                pass
+                    # Update in-memory cache keys
+                    old_fp_str = str(old_path)
+                    new_fp_str = str(candidate)
+                    for (fp_key, sz_key) in list(_cover_cache.keys()):
+                        if fp_key == old_fp_str:
+                            pm = _cover_cache.pop((fp_key, sz_key), None)
+                            if pm is not None:
+                                _cover_cache[(new_fp_str, sz_key)] = pm
+                except Exception:
+                    pass
                 self.track_done.emit(str(old_path), str(candidate), True)
             except Exception as exc:
                 # If step 2 failed the file is still safe under tmp_path;
                 # try to restore it to old_path so the library stays intact.
                 tmp_path_maybe = Path(t.filepath).with_name(
                     Path(t.filepath).name + '.__vprename_tmp__')
-                if tmp_path_maybe.exists():
+                try:
+                    _tmp_exists = tmp_path_maybe.exists()
+                except OSError:
+                    _tmp_exists = False
+                if _tmp_exists:
                     try:
                         tmp_path_maybe.rename(Path(t.filepath))
                     except Exception:
@@ -4705,7 +5503,7 @@ class RenamePopup(QDialog):
         )
         self._log.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         QScroller.grabGesture(self._log.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        _apply_scroller_properties(self._log.viewport())
+        _apply_scroller_properties(self._log.viewport(), touch=False)
         root.addWidget(self._log)
 
         self._result_lbl = QLabel('')
@@ -5066,12 +5864,13 @@ def peaking_coefficients(fs, f0, gain_db, Q):
     w0 = 2.0 * math.pi * f0 / fs
     alpha = math.sin(w0) / (2.0 * Q)
 
-    b0 = 1.0 + alpha * A
-    b1 = -2.0 * math.cos(w0)
-    b2 = 1.0 - alpha * A
-    a0 = 1.0 + alpha / A
-    a1 = -2.0 * math.cos(w0)
-    a2 = 1.0 - alpha / A
+    cos_w0 = math.cos(w0)
+    b0 =  1.0 + alpha * A
+    b1 = -2.0 * cos_w0
+    b2 =  1.0 - alpha * A
+    a0 =  1.0 + alpha / A
+    a1 =  b1          # identical to -2*cos(w0) — avoids a redundant trig call
+    a2 =  1.0 - alpha / A
 
     # Normalize to a0
     b0 /= a0
@@ -5120,7 +5919,7 @@ class Player(QObject):
 
         # ── Interpolated position tracking ────────────────────────────────────
         # Instead of asking GStreamer on every tick (which lags after seek/pause),
-        # we maintain a wall-clock anchor: pos = _pos_anchor_ms + elapsed_since_anchor.
+        # a wall-clock anchor is maintained: pos = _pos_anchor_ms + elapsed_since_anchor.
         # The anchor is updated immediately on load/seek/play/pause so position()
         # responds at zero latency.  A periodic drift-correction step queries
         # GStreamer and nudges the anchor to stay accurate over long play sessions.
@@ -5170,7 +5969,18 @@ class Player(QObject):
         self._current_fs = 48000           # default sample rate, will update from track
 
         self._chain, self._out = self._detect_chain()
-        print(f'[Player] chain: "{self._chain or "(none)"}" → {self._out}')
+        print(f'[Player] chain: "{self._chain or "(none)"}" → {self._out}  (pre-config default)')
+        # ALSA hw device override — 'pipewire' means use detected PipeWire sink (default).
+        # Config restore in ControlBar._restore_config() will override this via _alsa_device directly.
+        self._alsa_device: str = 'pipewire'
+        # Saved position/state from set_output_device(); consumed by ALSA probe.
+        # Initialized here so _on_player_error can always access them safely,
+        # even when the error fires before any device switch (e.g. EQ toggle).
+        self._last_switch_pos_ms:      Optional[int]  = None
+        self._last_switch_was_playing: Optional[bool] = None
+        # Set to self._pipe inside load() when paused=True; cleared on ASYNC_DONE.
+        # Allows deferred pause after preroll without blocking the main thread.
+        self._pending_pause_pipe = None
 
         self._has_spec = Gst.ElementFactory.find('spectrum') is not None
         print(f'[Player] spectrum: {"OK" if self._has_spec else "not found"}')
@@ -5203,7 +6013,7 @@ class Player(QObject):
                 continue
         return Player._FALLBACK
 
-    def load(self, filepath: str):
+    def load(self, filepath: str, paused: bool = False):
         self._last_filepath = filepath   # remember for dead-pipe recovery in play_pause
         self._destroy()
         self._spec_serial += 1
@@ -5226,6 +6036,13 @@ class Player(QObject):
             self._eq_filters = eq_filters
             # Apply current EQ settings
             self._apply_eq_to_filters()
+        elif self._alsa_device and self._alsa_device != 'pipewire':
+            # ALSA sink failed to build (device not openable at pipeline-build time).
+            # Emit sig_err so MainWindow._on_player_error triggers the hw→plughw retry.
+            print(f'[Player] ALSA sink build failed for {self._alsa_device!r} — emitting error')
+            self._destroy()
+            self.sig_err.emit(f'ALSA: cannot open device {self._alsa_device!r}')
+            return
 
         # Attach spectrum as audio-filter so it reads the signal BEFORE playbin's
         # volume element.  This means bar heights reflect real acoustic amplitude and
@@ -5260,13 +6077,37 @@ class Player(QObject):
 
         bus = self._pipe.get_bus()
         bus.add_signal_watch(); bus.connect('message', self._on_msg)
+
+        # Always start PLAYING regardless of the requested end-state.
+        # set_state(PAUSED) on a fresh pipewiresink pipeline blocks the calling
+        # thread while PipeWire's session manager acquires the audio node and
+        # completes preroll — this can take several seconds and hangs the UI.
+        # set_state(PLAYING) returns immediately; GStreamer completes the transition
+        # asynchronously.  If the caller wanted PAUSED we transition back once
+        # ASYNC_DONE (preroll complete) arrives on the bus.
         self._pipe.set_state(Gst.State.PLAYING)
         self._playing = True; self._pos_timer.start()
         self._start_pos_burst(8)  # fast updates while prerolling
+
         if not self._silent_recovery:
             self._pos_playing = True
-            self._anchor_now(0.0)   # start at 0; confirmed below once prerolled
-        # Once the pipeline has prerolled (~300–600 ms), re-anchor from GStreamer
+            # Only reset anchor to 0 if the caller hasn't already positioned it.
+            # _load_and_seek and the ALSA probe's _run() both call _anchor_now(pos)
+            # before load() so the seekbar stays at the correct position during
+            # preroll rather than snapping to 0.
+            if self._pos_anchor_ms == 0.0:
+                self._anchor_now(0.0)
+
+        if paused:
+            # Pipeline must reach PAUSED/PLAYING (preroll) before we can pause it
+            # without blocking.  _on_msg handles ASYNC_DONE and calls _deferred_pause
+            # if this flag is set.  Capture the pipe reference so stale callbacks
+            # from a superseded pipeline are silently ignored.
+            self._pending_pause_pipe = self._pipe
+        else:
+            self._pending_pause_pipe = None
+
+        # Once the pipeline has prerolled (~300-600 ms), re-anchor from GStreamer
         # so any startup latency is absorbed and the display stays accurate.
         def _post_load_confirm():
             if not self._pipe or not self._playing:
@@ -5274,7 +6115,7 @@ class Player(QObject):
             self._anchor_from_gst()
         QTimer.singleShot(600, _post_load_confirm)
         if not self._silent_recovery:
-            self.sig_playing.emit(True)
+            self.sig_playing.emit(True)   # always playing until deferred pause fires
 
     def play_pause(self):
         if not self._pipe:
@@ -5350,13 +6191,14 @@ class Player(QObject):
             # The active stall watcher was removed — it caused false reloads on
             # Bluetooth where position query latency mimics a stalled pipeline.
 
-    def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False):
+    def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False, paused: bool = False):
         """Load filepath and seek to pos_ms after preroll. Used for dead-pipe recovery.
 
         Args:
             silent: When True (stall auto-recovery), the UI is not notified — no busy
                     spinner, no play/pause icon flip, no viz clear.  The seekbar keeps
                     interpolating from the saved anchor and the user sees nothing.
+            paused: When True the pipeline ends up paused at pos_ms.
         """
         self._silent_recovery = silent
         # Always anchor to the intended position so the seekbar doesn't snap to 0.
@@ -5374,26 +6216,39 @@ class Player(QObject):
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = _monotonic() + 0.5   # 500 ms discard post-load
 
-        self.load(filepath)
         self._pause_ts = 0.0
-        # Reset stall tracking — grace period comes from _reloading=True (1000 ms) set
-        # by _resume_with_reload, which prevents _apply_drift_correction from firing.
-        self._gst_pos_adv_ms   = -1.0   # re-initialise on first drift query after reload
+        self._gst_pos_adv_ms   = -1.0
         self._gst_pos_adv_wt   = -1.0
 
-        if pos_ms > 200:
-            def _do_seek(p=pos_ms, _sil=silent):
+        if pos_ms > 200 and not silent:
+            self.load(filepath, paused=paused)
+            # Mute immediately so the ~400 ms preroll window before the seek
+            # fires is completely silent — user never hears the start of the track.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
+            def _do_seek(p=pos_ms, _sil=silent, _paused=paused):
                 self.seek(p)
                 def _after_seek(_sil=_sil):
-                    self._anchor_from_gst()   # re-anchor so seekbar is accurate
+                    self._anchor_from_gst()
+                    # Restore volume only if pipeline is still alive and belongs
+                    # to this reload (not superseded by another load()).
+                    if self._pipe:
+                        self._pipe.set_property('volume', self._volume)
                     if not _sil:
                         self.sig_busy.emit(False)
                     self._silent_recovery = False
                 QTimer.singleShot(350, _after_seek)
             QTimer.singleShot(400, _do_seek)
         else:
+            self.load(filepath, paused=paused)
+            # Even for pos_ms <= 200 (effectively start-of-track), mute briefly so
+            # any seek-window audio glitch or codec pre-buffer flush is inaudible.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
             def _after_preroll(_sil=silent):
                 self._anchor_from_gst()
+                if self._pipe:
+                    self._pipe.set_property('volume', self._volume)
                 if not _sil:
                     self.sig_busy.emit(False)
                 self._silent_recovery = False
@@ -5433,7 +6288,7 @@ class Player(QObject):
             gst_ms = pos // Gst.MSECOND if ok and pos > 0 else 0
         pos_ms = gst_ms if gst_ms > 200 else fallback_ms
 
-        self._load_and_seek(fp, pos_ms, silent=True)
+        self._load_and_seek(fp, pos_ms, silent=True, paused=not self._playing)
         # Release the guard after the pipeline has had time to preroll and seek.
         QTimer.singleShot(1000, lambda: setattr(self, '_reloading', False))
 
@@ -5466,17 +6321,27 @@ class Player(QObject):
             self._silent_recovery = True
             self.load(fp)
             self._pause_ts = 0.0
+            # Mute immediately so the preroll window before the seek fires is
+            # completely silent — user never hears the beginning of the track.
+            if self._pipe:
+                self._pipe.set_property('volume', 0.0)
             if pos_ms > 200:
                 # Same as _resume_with_reload: wait for preroll before seeking.
                 def _do_seek_silent(p=pos_ms):
                     self.seek(p)
                     def _finish():
                         self._anchor_from_gst()
+                        if self._pipe:
+                            self._pipe.set_property('volume', self._volume)
                         self._silent_recovery = False
                     QTimer.singleShot(350, _finish)
                 QTimer.singleShot(400, _do_seek_silent)
             else:
-                QTimer.singleShot(500, lambda: setattr(self, '_silent_recovery', False))
+                def _restore_vol_short():
+                    if self._pipe:
+                        self._pipe.set_property('volume', self._volume)
+                    self._silent_recovery = False
+                QTimer.singleShot(500, _restore_vol_short)
         finally:
             QTimer.singleShot(600, lambda: setattr(self, '_reload_guard', False))
 
@@ -5612,29 +6477,15 @@ class Player(QObject):
         if self._eq_enabled == enabled:
             return
         self._eq_enabled = enabled
-        # Rebuild the pipeline so EQ filters are added/removed (bit-perfect when off)
+        # Rebuild the pipeline so EQ filters are added/removed (bit-perfect when off).
+        # Use _resume_with_reload (same recovery path as sink-stolen errors) instead of
+        # the bare _reload_current destroy+load sequence, which can race with PipeWire
+        # buffer reclaim and trigger gst-resource-error-quark code 3.
         if self._pipe:
-            self._reload_current()
+            _fb = int(self._pos_anchor_ms)
+            self._resume_with_reload(fallback_ms=_fb)
         else:
             self._apply_eq_to_filters()
-
-    def _reload_current(self):
-        """Reload the currently-playing track to rebuild the pipeline."""
-        if not self._pipe:
-            return
-        ok, pos = self._pipe.query_position(Gst.Format.TIME)
-        pos_ms = pos // Gst.MSECOND if ok else 0
-        was_playing = self._playing
-        fp = self._last_filepath
-        if not fp:
-            return
-        self._destroy()
-        self.load(fp)
-        # Seek to saved position
-        if pos_ms > 0:
-            QTimer.singleShot(200, lambda: self.seek(pos_ms))
-        if not was_playing:
-            QTimer.singleShot(250, self.play_pause)
 
     def set_eq_bands(self, bands: List[tuple]):
         """bands: list of (freq, gain, Q)"""
@@ -5675,6 +6526,53 @@ class Player(QObject):
             filt.set_property('a', a)
         return False
 
+    def set_output_device(self, device_id: str):
+        """Switch audio output sink.  device_id is 'pipewire' or a plughw id like
+        'plughw:0,0'.  Change takes effect immediately by reloading the current
+        track at the current position.  If called before any track is loaded
+        (startup restore) the device is stored silently and takes effect on first play."""
+        if device_id == self._alsa_device:
+            return
+        self._alsa_device = device_id
+        print(f'[Player] output device -> {device_id}')
+        if self._last_filepath:
+            pos_ms = int(self.position_ms())
+            self._last_switch_pos_ms      = pos_ms         # consumed by ALSA probe
+            self._last_switch_was_playing = self._playing  # consumed by ALSA probe
+            was_playing = self._playing
+            self._destroy()
+            if device_id == 'pipewire':
+                # PipeWire: reload here.  Always start PLAYING — load() now routes
+                # paused=True through a deferred ASYNC_DONE pause to avoid blocking
+                # the main thread on PipeWire node acquisition.
+                fp = self._last_filepath
+                QTimer.singleShot(150, lambda: self._load_and_seek(
+                    fp, pos_ms, paused=not was_playing))
+
+    # ALSA probe helpers — derived dynamically from the selected plughw: device
+    # so probe always targets the card the user actually chose.
+    @staticmethod
+    def _alsa_primary(plughw_id: str) -> str:
+        """Return hw:X,Y for a given plughw:X,Y id (bit-perfect first attempt)."""
+        return plughw_id.replace('plughw:', 'hw:', 1)
+
+    @staticmethod
+    def _alsa_fallback(plughw_id: str) -> str:
+        """Return plughw:X,Y as-is (plug-layer fallback)."""
+        return plughw_id
+
+    def _active_sink_desc(self) -> str:
+        """Return the GStreamer sink description for the current output device.
+
+        When an ALSA device is selected, hw:X,Y (derived from the selected
+        plughw:X,Y) is tried first for bit-perfect output; plughw:X,Y is used
+        as fallback (set via _alsa_device after a failed hw: attempt).  audioconvert + audioresample are always prepended
+        so GStreamer caps negotiation succeeds regardless of source format.
+        """
+        if self._alsa_device and self._alsa_device != 'pipewire':
+            return f'audioconvert ! audioresample ! alsasink device={self._alsa_device}'
+        return self._out  # PipeWire (or autoaudiosink fallback)
+
     def _make_sink_bin(self):
         """Create a bin containing EQ (if any) and sink.
            The spectrum element is wired separately as audio-filter (pre-volume) in load().
@@ -5685,7 +6583,7 @@ class Player(QObject):
             elements.append(eq_bin)
 
         try:
-            sink = Gst.parse_bin_from_description(self._out, True)
+            sink = Gst.parse_bin_from_description(self._active_sink_desc(), True)
             elements.append(sink)
         except Exception as e:
             print(f'[Player] sink creation failed: {e}')
@@ -5831,7 +6729,22 @@ class Player(QObject):
     def _destroy(self):
         was_playing = self._playing
         if self._pipe:
-            self._pipe.set_state(Gst.State.NULL); self._pipe = None
+            # Remove the bus watch BEFORE set_state(NULL) so no further GLib bus
+            # messages (drift queries, errors) fire into the new pipeline's state.
+            bus = self._pipe.get_bus()
+            if bus:
+                bus.remove_signal_watch()
+            # set_state(NULL) on a pipewiresink pipeline can block the calling
+            # thread for several seconds while PipeWire's session manager negotiates
+            # link teardown.  Running it on the main thread causes the Qt event
+            # loop to stall → window goes "not responding".
+            # Fix: hand the old pipeline off to the GLib thread via idle_add so
+            # teardown happens off the main thread.  We null self._pipe immediately
+            # so no further code in this session touches the old pipeline.
+            _dying_pipe = self._pipe
+            self._pipe = None
+            GLib.idle_add(_dying_pipe.set_state, Gst.State.NULL)
+        self._pending_pause_pipe = None   # cancel any in-flight deferred pause
         self._spec_el = None; self._playing = False; self._pos_timer.stop()
         if not self._silent_recovery:
             self._pos_playing   = False
@@ -6002,7 +6915,22 @@ class Player(QObject):
             self.sig_dur.emit(dur_ms)
 
     def _on_msg(self, _bus, msg):
-        if msg.type == Gst.MessageType.EOS:
+        if msg.type == Gst.MessageType.ASYNC_DONE:
+            # Preroll complete.  If load() was called with paused=True we started
+            # PLAYING to avoid blocking the main thread on PipeWire node acquisition.
+            # Now that the pipeline is prerolled, drop to PAUSED safely — this
+            # set_state() call is non-blocking because the sink is already acquired.
+            pending = self._pending_pause_pipe
+            if pending is not None and pending is self._pipe:
+                self._pending_pause_pipe = None
+                self._pipe.set_state(Gst.State.PAUSED)
+                frozen = self._pos_anchor_ms   # anchor was set to seek target in _load_and_seek
+                self._playing = False; self._pos_timer.stop()
+                self._pos_playing = False
+                self._anchor_now(frozen)
+                if not self._silent_recovery:
+                    self.sig_playing.emit(False)
+        elif msg.type == Gst.MessageType.EOS:
             self._playing = False; self._pos_timer.stop()
             self._pos_playing = False
             # Freeze anchor at end of track
@@ -6011,7 +6939,7 @@ class Player(QObject):
             # Notify UI that playback stopped (viz must freeze immediately).
             # sig_playing and sig_end are both thread-safe pyqtSignals — they
             # are delivered queued to the main thread.
-            # We intentionally do NOT touch the pipeline here; _advance() →
+            # Do NOT touch the pipeline here; _advance() →
             # load() → _destroy() may run immediately on receipt of sig_end,
             # and any concurrent GLib idle touching the old pipeline causes
             # crashes (Repeat ONE, Shuffle, pipeline-NULL recovery, etc.).
@@ -6052,9 +6980,15 @@ class Player(QObject):
                 txt = (str(warn) + ' ' + (dbg or '')).lower()
                 if any(k in txt for k in ('resource', 'write', 'open', 'pipewire',
                                            'pulse', 'alsa', 'sink', 'output')):
-                    print(f'[Player] audio sink warning — reloading: {warn}')
-                    _fb = int(self._pos_anchor_ms)
-                    QTimer.singleShot(0, lambda: self._reload_at_pos(fallback_ms=_fb))
+                    # ALSA hw/plughw warnings (xrun, buffer underrun) are transient —
+                    # reloading would create an infinite loop.  Only reload for
+                    # PipeWire/pulse/auto sinks where a WARNING signals real sink loss.
+                    if self._alsa_device and self._alsa_device != 'pipewire':
+                        print(f'[Player] ALSA sink warning (no reload): {warn}')
+                    else:
+                        print(f'[Player] audio sink warning - reloading: {warn}')
+                        _fb = int(self._pos_anchor_ms)
+                        QTimer.singleShot(0, lambda: self._reload_at_pos(fallback_ms=_fb))
             except Exception:
                 pass
         elif msg.type == Gst.MessageType.ELEMENT:
@@ -6561,7 +7495,7 @@ class SeekSlider(QSlider):
             QSlider::groove:horizontal {{
                 background: rgba(80,80,80,160); height: 4px; border-radius: {r_grv}px;
             }}
-            QSlider::sub-page:horizontal {{ background: {acc}; border-radius: {r_grv}px; }}
+            QSlider::sub-page:horizontal {{ background: {acc}; border-radius: {r_grv}px 0 0 {r_grv}px; }}
             QSlider::handle:horizontal {{
                 background: {BG4}; border: 2px solid {acc};
                 width: 18px; height: 18px; border-radius: {r_hdl}px; margin: -7px 0;
@@ -6701,21 +7635,92 @@ class LongPressFilter(QObject):
 COLS  = ['Length', 'Title', 'Artist', 'Album', 'Sample Rate', 'Bit Depth', 'Type']
 C_LEN=0; C_TIT=1; C_ART=2; C_ALB=3; C_SR=4; C_BD=5; C_TYP=6
 
+_HEADER_GRAB = 14   # px either side of a column boundary = 28px total touch target
+
+class _TouchHeaderView(QHeaderView):
+    """Horizontal header with a wider touch grab zone for column resize handles.
+
+    Qt hard-codes the resize grip margin to ~4 px.  We intercept mouse/touch
+    press+move+release and remap any pointer that lands within _HEADER_GRAB px
+    of a section boundary to a resize drag, giving a 28 px wide invisible
+    touch target centred on the visible 1 px divider line.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self._drag_col   = -1   # section being resized (-1 = none)
+        self._drag_start = 0    # global x at drag start
+        self._drag_orig  = 0    # section width at drag start
+        self.setMouseTracking(True)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _section_at_boundary(self, local_x: int):
+        """Return (section_index, boundary_x) if local_x is near a boundary, else (-1, 0)."""
+        for col in range(self.count() - 1):   # last section has no right boundary to drag
+            bx = self.sectionViewportPosition(col) + self.sectionSize(col)
+            if abs(local_x - bx) <= _HEADER_GRAB:
+                return col, bx
+        return -1, 0
+
+    def _update_cursor(self, local_x: int):
+        col, _ = self._section_at_boundary(local_x)
+        if col >= 0:
+            self.setCursor(Qt.CursorShape.SplitHCursor)
+        else:
+            self.unsetCursor()
+
+    # ── events ────────────────────────────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            col, _ = self._section_at_boundary(e.position().toPoint().x())
+            if col >= 0 and self.sectionResizeMode(col) == QHeaderView.ResizeMode.Interactive:
+                self._drag_col   = col
+                self._drag_start = e.globalPosition().toPoint().x()
+                self._drag_orig  = self.sectionSize(col)
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_col >= 0:
+            delta = e.globalPosition().toPoint().x() - self._drag_start
+            new_w = max(self.minimumSectionSize(), self._drag_orig + delta)
+            self.resizeSection(self._drag_col, new_w)
+            e.accept()
+            return
+        self._update_cursor(e.position().toPoint().x())
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag_col >= 0 and e.button() == Qt.MouseButton.LeftButton:
+            self._drag_col = -1
+            self._update_cursor(e.position().toPoint().x())
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+
 class TrackTable(QTableWidget):
     row_activated  = pyqtSignal(int)
     ctx_requested  = pyqtSignal(int, QPoint)
     col_widths_changed = pyqtSignal(list)   # emitted after user resizes a column
 
     # Default column ratios (sum = 1.0); used for proportional sizing.
-    _DEFAULT_COL_RATIOS = [72, 260, 180, 180, 92, 82, 62]  # raw weights
-    _DEFAULT_COL_RATIOS = list(map(lambda w: w / 928, _DEFAULT_COL_RATIOS))  # 928 = sum
+    _DEFAULT_COL_RATIOS = [w / 928 for w in (72, 260, 180, 180, 92, 82, 62)]  # 928 = sum
 
-    # Current ratios (may be updated by user dragging or config restore)
-    _col_ratios: list = []  # instance attribute set in __init__
+    _POPULATE_CHUNK = 200   # rows filled synchronously on first pass / per deferred tick
+    _GALLERY_CHUNK  = 80    # rows per deferred tick in GalleryView
+
+    _CELL_ALIGN = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setColumnCount(len(COLS)); self.setHorizontalHeaderLabels(COLS)
+        # Replace default header with touch-friendly version (wider grab zone)
+        th = _TouchHeaderView(self)
+        self.setHorizontalHeader(th)
         self.verticalHeader().setVisible(False)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -6744,19 +7749,14 @@ class TrackTable(QTableWidget):
         self._row_h = 44   # tracks current desired row height; re-applied after setRowCount resets
         self.verticalHeader().setDefaultSectionSize(44)
         QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
-        sp = QScrollerProperties()
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,           0.35)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,              0.8)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.15)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance,            0.005)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        QScroller.scroller(self.viewport()).setScrollerProperties(sp)
+        _apply_scroller_properties(self.viewport())
         self._lp = LongPressFilter(self); self.viewport().installEventFilter(self._lp)
         self._lp.triggered.connect(self.ctx_requested)
         self.doubleClicked.connect(lambda idx: self.row_activated.emit(idx.row()))
+        # QScroller (TouchGesture) can suppress mouseDoubleClickEvent on the viewport
+        # on some platforms, preventing doubleClicked from firing. Install a viewport
+        # event filter to catch MouseButtonDblClick directly as a reliable fallback.
+        self.viewport().installEventFilter(self)
         # Manual sort — we keep _tracks in sync with visual order so row index is always correct
         self._sort_col = -1; self._sort_asc = True
         hh.sectionClicked.connect(self._on_header_clicked)
@@ -6771,14 +7771,26 @@ class TrackTable(QTableWidget):
         self._fp_to_row: dict = {}   # filepath → row index, O(1) cover-loaded lookup
         _ensure_async_cover_loader().cover_loaded.connect(self._on_cover_loaded)
 
-    def _on_cover_loaded(self, fp: str, size: int, radius: int):
+    def eventFilter(self, obj, event) -> bool:
+        """Catch MouseButtonDblClick on the viewport — QScroller may suppress
+        the normal doubleClicked signal on some platforms/Qt versions."""
+        if (obj is self.viewport() and
+                event.type() == QEvent.Type.MouseButtonDblClick and
+                event.button() == Qt.MouseButton.LeftButton):
+            item = self.itemAt(event.pos())
+            if item is not None:
+                self.row_activated.emit(item.row())
+                return True   # consumed — prevents duplicate from doubleClicked
+        return super().eventFilter(obj, event)
+
+    def _on_cover_loaded(self, fp: str, size: int):
         """Update table icon when an async cover arrives."""
         if size != 28 or not self._covers_on:
             return
         r = self._fp_to_row.get(fp, -1)
         if r < 0:
             return
-        pm = _cover_cache.get((fp, 28, 4))
+        pm = _cover_cache.get((fp, 28))
         item = self.item(r, C_TIT)
         if item and pm:
             item.setIcon(QIcon(pm))
@@ -6852,7 +7864,7 @@ class TrackTable(QTableWidget):
         self._tracks_ref = tracks  # keep ref so cover_ready can find the row
         # Build O(1) reverse index: filepath → row
         self._fp_to_row = {t.filepath: r for r, t in enumerate(tracks)}
-        CHUNK = 200
+        CHUNK = self._POPULATE_CHUNK
         # Fill first chunk synchronously so rows appear immediately
         end = min(CHUNK, len(tracks))
         for r in range(end):
@@ -6863,7 +7875,7 @@ class TrackTable(QTableWidget):
             self._populate_deferred(tracks, playing_idx, CHUNK)
 
     def _populate_deferred(self, tracks, playing_idx, start):
-        CHUNK = 200
+        CHUNK = self._POPULATE_CHUNK
         def _chunk(s):
             end = min(s + CHUNK, len(tracks))
             for r in range(s, end):
@@ -6912,21 +7924,20 @@ class TrackTable(QTableWidget):
                                     t.sr_str(), t.bd_str(), t.file_type]):
             item = QTableWidgetItem(txt)
             if col == C_TIT and self._covers_on:
-                pm = get_cover_pixmap(t.filepath, 28, 4)
+                pm = get_cover_pixmap(t.filepath, 28)
                 # pm is None when cover fetch is enabled but no embedded cover yet;
                 # show the default clef placeholder in that case.
                 if pm is None:
-                    pm = draw_default_cover(28, 4)
+                    pm = draw_default_cover(28)
                 item.setIcon(QIcon(pm))
-            align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-            item.setTextAlignment(align); self.setItem(row, col, item)
+            item.setTextAlignment(self._CELL_ALIGN); self.setItem(row, col, item)
 
     def set_covers_on(self, on: bool, tracks: list):
         self._covers_on = on
         self._tracks_ref = tracks  # keep ref for cover_ready slot
         self.setIconSize(QSize(28, 28) if on else QSize(0, 0))
         # Process in small chunks so the event loop stays responsive
-        CHUNK = 80
+        CHUNK = self._GALLERY_CHUNK
         total = min(self.rowCount(), len(tracks))
 
         def _process_chunk(start: int):
@@ -6936,8 +7947,8 @@ class TrackTable(QTableWidget):
                 item = self.item(r, C_TIT)
                 if item:
                     if on:
-                        pm = get_cover_pixmap(t.filepath, 28, 4)
-                        item.setIcon(QIcon(pm if pm is not None else draw_default_cover(28, 4)))
+                        pm = get_cover_pixmap(t.filepath, 28)
+                        item.setIcon(QIcon(pm if pm is not None else draw_default_cover(28)))
                     else:
                         item.setIcon(QIcon())
             if end < total:
@@ -7225,8 +8236,13 @@ class GalleryView(QWidget):
 
     def _invalidate_track(self, ti: int):
         if ti < 0: return
-        try:    pos = self._vis_idx.index(ti)
-        except ValueError: return
+        # Build a track-index → visual-position map lazily (reset in _apply_filter_and_layout).
+        rmap = getattr(self, '_ti_to_vis_pos', None)
+        if rmap is None:
+            rmap = {track_idx: pos for pos, track_idx in enumerate(self._vis_idx)}
+            self._ti_to_vis_pos = rmap
+        pos = rmap.get(ti, -1)
+        if pos < 0: return
         self._canvas.update(self._card_rect(pos))
 
     # ── Filter ────────────────────────────────────────────────────────────────
@@ -7241,8 +8257,9 @@ class GalleryView(QWidget):
                     or q in Path(t.filepath).name.lower())]
         else:
             self._vis_idx = list(range(len(self._tracks)))
-        # Invalidate the filepath→position lookup used by _on_cover_loaded
+        # Invalidate both lazy lookup caches used by _on_cover_loaded and _invalidate_track
         self._fp_to_vis_positions = None
+        self._ti_to_vis_pos       = None
         self._recompute_layout()
 
     # ── Show / resize ─────────────────────────────────────────────────────────
@@ -7282,6 +8299,12 @@ class GalleryView(QWidget):
         pen_border  = QPen(QColor(BORD), 1.2)
         pen_hover   = QPen(QColor(B2),  1.2)
         pen_playing = QPen(QColor(ACC), 1.5)
+        brush_sel   = QBrush(QColor(SEL))
+        brush_bg3   = QBrush(QColor(BG3))
+        brush_bg2   = QBrush(QColor(BG2))
+        col_fg      = QColor(FG)
+        col_fg2     = QColor(FG2)
+        col_acc     = QColor(ACC)
 
         h = self._card_h_act
         title_sz  = max(12, min(16, h // 9 + 1))
@@ -7312,11 +8335,11 @@ class GalleryView(QWidget):
                 playing = (ti == self._playing_idx)
                 hovered = (ti == self._hovered_idx)
                 if playing:
-                    p.setBrush(QBrush(QColor(SEL)));  p.setPen(pen_playing)
+                    p.setBrush(brush_sel);  p.setPen(pen_playing)
                 elif hovered:
-                    p.setBrush(QBrush(QColor(BG3)));  p.setPen(pen_hover)
+                    p.setBrush(brush_bg3);  p.setPen(pen_hover)
                 else:
-                    p.setBrush(QBrush(QColor(BG2)));  p.setPen(pen_border)
+                    p.setBrush(brush_bg2);  p.setPen(pen_border)
                 p.drawRoundedRect(rect, _r(18), _r(18))
 
                 # Cover — drawn with uniform padding on all sides
@@ -7324,11 +8347,11 @@ class GalleryView(QWidget):
                 cover_y = y + cover_pad + 2
                 text_x  = x + 10
                 if self._cover_on:
-                    pm = get_cover_pixmap(t.filepath, cover_sz, cover_r)
+                    pm = get_cover_pixmap(t.filepath, cover_sz)
                     if pm is None:
-                        pm = draw_default_cover(cover_sz, cover_r)
+                        pm = draw_default_cover(cover_sz)
                     if pm is not None:
-                        p.drawPixmap(cover_x, cover_y, cover_sz, cover_sz, pm)
+                        _draw_cover_rounded(p, pm, cover_x, cover_y, cover_sz, cover_r, BG2)
                     text_x = cover_x + cover_sz + 8
 
                 # Text
@@ -7350,13 +8373,13 @@ class GalleryView(QWidget):
                 ty       = y + (h - block_h) // 2
 
                 p.setFont(f_title)
-                p.setPen(QColor(ACC if playing else FG))
+                p.setPen(col_acc if playing else col_fg)
                 p.drawText(QRect(int(text_x), ty, text_w, title_sz + 2),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                            fm_title.elidedText(title_s, Qt.TextElideMode.ElideRight, text_w))
 
                 p.setFont(f_artist)
-                p.setPen(QColor(FG2))
+                p.setPen(col_fg2)
                 p.drawText(QRect(int(text_x), ty + title_sz + 4, text_w, artist_sz + 2),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                            fm_artist.elidedText(artist_s, Qt.TextElideMode.ElideRight, text_w))
@@ -7436,7 +8459,7 @@ class GalleryView(QWidget):
             ti = self._vis_idx[pos]
             self.ctx_requested.emit(ti, self._canvas.mapToGlobal(self._press_pos))
 
-    def _on_cover_loaded(self, fp: str, size: int, radius: int):
+    def _on_cover_loaded(self, fp: str, size: int):
         """Repaint any visible cards whose cover just arrived from the async loader."""
         # Build a filepath -> list-of-positions map lazily on first use per layout.
         # Invalidated whenever _vis_idx changes (in _apply_filter_and_layout).
@@ -7606,6 +8629,10 @@ class PlaylistPage(QWidget):
         self.gallery.refresh_theme()
         self.table.update()
 
+    def set_label(self, new_label: str):
+        """Update the playlist's display label (used by rename)."""
+        self._label = new_label
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7613,6 +8640,10 @@ class _PlaylistRowWidget(QWidget):
     """A sidebar playlist row: [label] [X btn] — delete button on the far right."""
     delete_clicked = pyqtSignal()
     select_clicked = pyqtSignal()
+    long_pressed   = pyqtSignal(QPoint)   # emitted with global pos after hold
+
+    _LONG_PRESS_MS = 550
+    _DRIFT_PX      = 10
 
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
@@ -7644,6 +8675,19 @@ class _PlaylistRowWidget(QWidget):
         lay.addWidget(self._lbl, 1)
         lay.addWidget(self._del_btn)
 
+        # Long-press detection
+        self._lp_timer = QTimer(self)
+        self._lp_timer.setSingleShot(True)
+        self._lp_timer.setInterval(self._LONG_PRESS_MS)
+        self._lp_timer.timeout.connect(self._on_long_press_fire)
+        self._lp_start  = QPoint()
+        self._lp_gpos   = QPoint()
+        self._lp_active = False
+
+    def _on_long_press_fire(self):
+        self._lp_active = True
+        self.long_pressed.emit(self._lp_gpos)
+
     def set_selected(self, on: bool):
         c = ACC if on else FG
         self._selected = on
@@ -7651,8 +8695,30 @@ class _PlaylistRowWidget(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            self.select_clicked.emit()
+            # Only arm long-press when the press is on the label area, not the delete button
+            if self.childAt(e.position().toPoint()) is not self._del_btn:
+                self._lp_start  = e.position().toPoint()
+                self._lp_gpos   = self.mapToGlobal(e.position().toPoint())
+                self._lp_active = False
+                self._lp_timer.start()
         super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._lp_timer.isActive():
+            d = e.position().toPoint() - self._lp_start
+            if abs(d.x()) + abs(d.y()) > self._DRIFT_PX:
+                self._lp_timer.stop()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._lp_timer.stop()
+            if not self._lp_active:
+                # Short tap — treat as select only if not on the delete button
+                if self.childAt(e.position().toPoint()) is not self._del_btn:
+                    self.select_clicked.emit()
+            self._lp_active = False
+        super().mouseReleaseEvent(e)
 
     def update_accent(self):
         self._del_btn.setStyleSheet(
@@ -7679,6 +8745,9 @@ class Sidebar(QWidget):
     new_playlist_req  = pyqtSignal()
     refresh_req       = pyqtSignal()
     remove_req        = pyqtSignal(int)
+    rename_req        = pyqtSignal(int, str)   # (index, new_label)
+    move_up_req       = pyqtSignal(int)        # index to move up
+    move_down_req     = pyqtSignal(int)        # index to move down
     source_selected   = pyqtSignal(int)
     search_changed    = pyqtSignal(str)
     export_m3u_req    = pyqtSignal()
@@ -7736,16 +8805,7 @@ class Sidebar(QWidget):
         scroll.setStyleSheet('background:transparent; border:none;')
         # Enable touch scrolling for sidebar playlist area
         QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
-        sp = QScrollerProperties()
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor,           0.35)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity,              0.8)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.15)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance,            0.005)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        sp.setScrollMetric(QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-                           QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
-        QScroller.scroller(scroll.viewport()).setScrollerProperties(sp)
+        _apply_scroller_properties(scroll.viewport())
         self._pl_container = QWidget(); self._pl_container.setStyleSheet('background:transparent;')
         self._pl_layout = QVBoxLayout(self._pl_container)
         self._pl_layout.setContentsMargins(0,0,0,0); self._pl_layout.setSpacing(0)
@@ -7796,19 +8856,109 @@ class Sidebar(QWidget):
         self._pl_layout.insertWidget(self._pl_layout.count() - 1, row)
         row.select_clicked.connect(lambda i=idx: self._on_select(i))
         row.delete_clicked.connect(lambda i=idx: self._on_delete_clicked(i))
+        row.long_pressed.connect(lambda gpos, i=idx: self._show_pl_context_menu(i, gpos))
 
-    def remove_playlist(self, idx: int):
-        if not (0 <= idx < len(self._pl_rows)): return
-        row = self._pl_rows.pop(idx)
-        self._pl_layout.removeWidget(row); row.deleteLater()
-        # Re-wire indices for remaining rows
+    def _show_pl_context_menu(self, idx: int, gpos: QPoint):
+        if not (0 <= idx < len(self._pl_rows)):
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f'QMenu {{ background:{BG3}; color:{FG}; border:2px solid {ACC};'
+            f' border-radius:{_r(12)}px; padding:4px 0; font-size:12px; }}'
+            f'QMenu::item {{ padding:6px 20px; }}'
+            f'QMenu::item:selected {{ background:{SEL}; color:{ACC}; }}'
+            f'QMenu::separator {{ height:1px; background:{B2}; margin:3px 8px; }}')
+        act_rename = menu.addAction('✎  Rename')
+        menu.addSeparator()
+        act_up   = menu.addAction('▲  Move Up')
+        act_down = menu.addAction('▼  Move Down')
+        act_up.setEnabled(idx > 0)
+        act_down.setEnabled(idx < len(self._pl_rows) - 1)
+        chosen = menu.exec(gpos)
+        if chosen is act_rename:
+            self._prompt_rename(idx)
+        elif chosen is act_up:
+            self.move_up_req.emit(idx)
+        elif chosen is act_down:
+            self.move_down_req.emit(idx)
+
+    def _prompt_rename(self, idx: int):
+        if not (0 <= idx < len(self._pl_rows)):
+            return
+        current = self._pl_rows[idx]._lbl.text()
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle('Rename Playlist')
+        dlg.setLabelText('New name:')
+        dlg.setTextValue(current)
+        dlg.setStyleSheet(
+            f'QDialog {{ background:{BG2}; }}'
+            f'QLabel {{ color:{FG}; font-size:13px; }}'
+            f'QLineEdit {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+            f' border-radius:6px; padding:4px 8px; font-size:13px; }}'
+            f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+            f' border-radius:5px; padding:4px 16px; font-size:12px; }}'
+            f'QPushButton:hover {{ border-color:{ACC}; }}'
+            f'QPushButton:default {{ border-color:{ACC}; color:{ACC}; }}')
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_name = dlg.textValue().strip()
+            if new_name and new_name != current:
+                self.rename_row(idx, new_name)
+                self.rename_req.emit(idx, new_name)
+
+    def rename_row(self, idx: int, new_label: str):
+        """Update the sidebar label for playlist at idx."""
+        if not (0 <= idx < len(self._pl_rows)):
+            return
+        row = self._pl_rows[idx]
+        row._lbl.setText(new_label)
+        # Re-apply colour so bold/accent state is preserved
+        row.set_selected(getattr(row, '_selected', False))
+
+    def move_playlist_row(self, from_idx: int, to_idx: int):
+        """Swap two adjacent playlist rows in the sidebar UI and rewire signals."""
+        n = len(self._pl_rows)
+        if not (0 <= from_idx < n and 0 <= to_idx < n):
+            return
+        lo_i = min(from_idx, to_idx)
+        hi_i = max(from_idx, to_idx)
+        lo_w = self._pl_rows[lo_i]
+        hi_w = self._pl_rows[hi_i]
+        # Swap in the list
+        self._pl_rows[from_idx], self._pl_rows[to_idx] = (
+            self._pl_rows[to_idx], self._pl_rows[from_idx])
+        # Remove both widgets then reinsert swapped at the same positions.
+        # Remove higher index first to avoid index shifting.
+        lo = self._pl_layout
+        lo.removeWidget(hi_w)
+        lo.removeWidget(lo_w)
+        lo.insertWidget(lo_i, hi_w)
+        lo.insertWidget(hi_i, lo_w)
+        # Update selected index if needed
+        if self._selected_pl_idx == from_idx:
+            self._selected_pl_idx = to_idx
+        elif self._selected_pl_idx == to_idx:
+            self._selected_pl_idx = from_idx
+        # Rewire all signals with fresh captured indices
+        self._rewire_all_rows()
+
+    def _rewire_all_rows(self):
+        """Disconnect and reconnect all row signals with correct current indices."""
         for i, r in enumerate(self._pl_rows):
             try: r.select_clicked.disconnect()
             except Exception: pass
             try: r.delete_clicked.disconnect()
             except Exception: pass
+            try: r.long_pressed.disconnect()
+            except Exception: pass
             r.select_clicked.connect(lambda _i=i: self._on_select(_i))
             r.delete_clicked.connect(lambda _i=i: self._on_delete_clicked(_i))
+            r.long_pressed.connect(lambda gpos, _i=i: self._show_pl_context_menu(_i, gpos))
+
+    def remove_playlist(self, idx: int):
+        if not (0 <= idx < len(self._pl_rows)): return
+        row = self._pl_rows.pop(idx)
+        self._pl_layout.removeWidget(row); row.deleteLater()
+        self._rewire_all_rows()
         if self._selected_pl_idx >= len(self._pl_rows):
             self._selected_pl_idx = -1
 
@@ -8026,6 +9176,56 @@ class SpinningPlayButton(QPushButton):
         p.drawArc(rect, start_angle, span_angle)
         p.end()
 
+class _RoundedCoverLabel(QWidget):
+    """Cover thumbnail that clips its pixmap to a rounded rect matching the
+    global corner radius (RAD_PCT).  The clip is applied via QPainterPath on
+    every paintEvent — no cache needed because QPainterPath construction is
+    O(1) and the painter clip is the only thing that makes the corners
+    transparent against the viz background."""
+
+    def __init__(self, size: int, parent=None):
+        super().__init__(parent)
+        self._sz  = size
+        self._pm: QPixmap | None = None
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def setPixmap(self, pm: QPixmap | None):
+        self._pm = pm
+        self.update()
+
+    def clear(self):
+        self._pm = None
+        self.update()
+
+    def paintEvent(self, _):
+        if self._pm is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # Build a rounded-rect clip path using the current global radius.
+        # _r(self._sz // 2) gives a full pill at 100 % and sharp at 0 %.
+        radius = _r(self._sz // 2)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, self._sz, self._sz), radius, radius)
+        p.setClipPath(path)
+        # Scale pixmap to fill the widget square if sizes differ
+        if self._pm.size() != QSize(self._sz, self._sz):
+            pm = self._pm.scaled(self._sz, self._sz,
+                                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                 Qt.TransformationMode.SmoothTransformation)
+            # Centre-crop to exact square
+            ox = (pm.width()  - self._sz) // 2
+            oy = (pm.height() - self._sz) // 2
+            pm = pm.copy(ox, oy, self._sz, self._sz)
+        else:
+            pm = self._pm
+        p.setOpacity(0.65)
+        p.drawPixmap(0, 0, pm)
+        p.end()
+
+
 class ControlBar(QFrame):
     cover_on_changed = pyqtSignal(bool)
     accent_changed   = pyqtSignal(str)
@@ -8090,6 +9290,11 @@ class ControlBar(QFrame):
         self._px_col_y0:  object = None   # (iw,) int32 — bar top row per column
         self._px_row_idx: object = None   # (ih, 1) int32 — row indices for broadcast
         self._render_last_wt:    float = 0.0   # timestamp of last update() call
+        # Cached QPen / QBrush objects for paintEvent — rebuilt when BORD/BG globals change.
+        # Avoids constructing QPen(QColor(BORD), 1) on every 60-fps frame.
+        self._paint_bord_key: object = None    # tracks BORD global
+        self._paint_bord_pen: QPen   = QPen()  # QPen(BORD, 1) — rebuilt on demand
+        self._paint_bg_brush: QBrush = QBrush()
 
         # Settings and EQ popups (lazy-created)
         self._settings_popup: Optional[SettingsPopup] = None
@@ -8121,14 +9326,9 @@ class ControlBar(QFrame):
         # Horizontal layout: cover thumbnail (optional) + title/artist stack
         info_h = QHBoxLayout(info); info_h.setContentsMargins(8, 0, 0, 0); info_h.setSpacing(10)
         _COVER_SZ = 64
-        # Cover thumbnail — uses CSS opacity instead of QGraphicsOpacityEffect
-        self._cover_lbl = QLabel()
-        self._cover_lbl.setFixedSize(_COVER_SZ, _COVER_SZ)
-        self._cover_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._cover_lbl.setStyleSheet(
-            'background:transparent; opacity:0.65;'
-        )
-        self._cover_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Cover thumbnail — rounded corners via _RoundedCoverLabel (clips to global RAD_PCT;
+        # transparent corners show the viz background cleanly, computed per paintEvent, no cache)
+        self._cover_lbl = _RoundedCoverLabel(_COVER_SZ)
         self._cover_lbl.setVisible(True)
         info_h.addWidget(self._cover_lbl)
         # Title pinned to cover top, artist pinned to cover bottom
@@ -8268,6 +9468,11 @@ class ControlBar(QFrame):
         if pop.isVisible():
             pop.hide()
         else:
+            win = self.window()
+            if win and isinstance(win, QMainWindow):
+                ov = _ModalOverlay(win, pop)
+                ov.show()
+                ov.raise_()
             pop.show_center()
 
     def _on_eq_changed(self, bands, enabled):
@@ -8308,6 +9513,14 @@ class ControlBar(QFrame):
             pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
             pop.rename_toggled.connect(self._on_rename_btn)
             pop.radius_changed.connect(self._on_radius_change)
+            pop.output_device_changed.connect(self._player.set_output_device)
+            pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            # Notify MainWindow to run the ALSA probe when the device changes.
+            # Must be connected here (lazy popup creation) — MainWindow's __init__
+            # guard `if _settings_popup is not None` always fails at startup.
+            win = self.window()
+            if win is not None and hasattr(win, '_on_output_device_changed'):
+                pop.output_device_changed.connect(win._on_output_device_changed)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
             # Auto-save on every setting change
@@ -8320,7 +9533,7 @@ class ControlBar(QFrame):
                 pop.overlay_scale_changed, pop.overlay_auto_open_toggled,
                 pop.overlay_timeout_changed, pop.view_mode_changed,
                 pop.list_scale_changed, pop.gallery_scale_changed,
-                pop.radius_changed,
+                pop.radius_changed, pop.output_device_changed,
             ]
             for sig in _save_sigs:
                 sig.connect(lambda *_: self.settings_changed.emit())
@@ -8328,6 +9541,64 @@ class ControlBar(QFrame):
             pop._theme_sw.toggled.connect(lambda *_: self.settings_changed.emit())
             self._settings_popup = pop
         return self._settings_popup
+
+    def _refresh_audio_info(self):
+        """Update the AUDIO INFO labels in SettingsPopup from current player state.
+
+        Reads format/EQ/device from the Player and the current track; writes to
+        the four _info_* QLabels that live in SettingsPopup's left column.
+        Safe to call when the popup does not yet exist (no-op) or when no track
+        is loaded (shows '—' placeholders).
+        """
+        pop = self._settings_popup
+        if pop is None:
+            return
+
+        # ── Format ────────────────────────────────────────────────────────────
+        track = self._cur_track   # set by ControlBar._on_track_change
+        if track is not None:
+            parts = []
+            if track.sample_rate:
+                parts.append(f'{track.sample_rate / 1000:.1f} kHz')
+            if track.bit_depth:
+                parts.append(f'{track.bit_depth}-bit')
+            if track.filepath:
+                ext = track.filepath.rsplit('.', 1)[-1].upper() if '.' in track.filepath else ''
+                if ext:
+                    parts.append(ext)
+            fmt_str = '  ·  '.join(parts) if parts else '—'
+        else:
+            fmt_str = '—'
+        pop._info_fmt.setText(fmt_str)
+
+        # ── EQ ────────────────────────────────────────────────────────────────
+        eq_pop = self._eq_popup  # may be None if EQ popup was never opened
+        eq_profile = getattr(eq_pop, '_current_profile', '') if eq_pop is not None else ''
+        if self._player._eq_enabled and self._player._eq_bands:
+            bands_str = f'{len(self._player._eq_bands)} bands'
+            if eq_profile:
+                pop._info_eq.setText(f'On  ·  {eq_profile}  ({bands_str})')
+            else:
+                pop._info_eq.setText(f'On  ({bands_str})')
+        elif self._player._eq_enabled:
+            if eq_profile:
+                pop._info_eq.setText(f'On  ·  {eq_profile}')
+            else:
+                pop._info_eq.setText('On')
+        else:
+            pop._info_eq.setText('Off')
+
+        # ── Output / Device ───────────────────────────────────────────────────
+        dev = self._player._alsa_device
+        if not dev or dev == 'pipewire':
+            pop._info_dev.setText('PipeWire')
+        else:
+            # Show human name from combo + the raw ALSA device string
+            idx = pop._out_dev_combo.findData(dev)
+            if idx >= 0:
+                pop._info_dev.setText(f'{pop._out_dev_combo.itemText(idx)}  ({dev})')
+            else:
+                pop._info_dev.setText(dev)
 
     @property
     def lyrics_fetch_enabled(self) -> bool:
@@ -8417,7 +9688,6 @@ class ControlBar(QFrame):
         self._blackout_ref = overlay
         if overlay is not None:
             overlay._ctrlbar_ref = self
-            self._player._ctrlbar_bref = overlay
 
     def _on_cover_fetch_btn(self):
         """Open the CoverFetchPopup — triggered by the Settings button."""
@@ -8442,12 +9712,7 @@ class ControlBar(QFrame):
             return
         
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
-        # Center popup to main window
-        win_geo = win.geometry()
-        dlg_geo = dlg.frameGeometry()
-        center_point = win_geo.center()
-        dlg_geo.moveCenter(center_point)
-        dlg.move(dlg_geo.topLeft())
+        _ModalOverlay.show_for(dlg)
         dlg.show()
 
     def _on_lyric_fetch_btn(self):
@@ -8470,12 +9735,7 @@ class ControlBar(QFrame):
             return
         
         dlg = LyricsFetchPopup(all_tracks, parent=win)
-        # Center popup to main window
-        win_geo = win.geometry()
-        dlg_geo = dlg.frameGeometry()
-        center_point = win_geo.center()
-        dlg_geo.moveCenter(center_point)
-        dlg.move(dlg_geo.topLeft())
+        _ModalOverlay.show_for(dlg)
         dlg.show()
 
     def _on_tag_fetch_btn(self):
@@ -8497,8 +9757,8 @@ class ControlBar(QFrame):
             return
         
         dlg = TagFetchPopup(all_tracks, parent=win)
-        # When tags are written, refresh the Track objects in all pages
         dlg.tags_updated.connect(lambda fp, tags: win._on_tags_fetched(fp, tags))
+        _ModalOverlay.show_for(dlg)
         dlg.show()
 
     def _on_rename_btn(self):
@@ -8546,15 +9806,33 @@ class ControlBar(QFrame):
                     win._known_paths.discard(old)
                     win._known_paths.add(new)
 
+            # 2b. Patch live player state so the playing track keeps its accent
+            # indicator and lyrics panel after the rescan produces new Track objects.
+            # Without this, _rebuild_library can't match the old filepath to the
+            # rebuilt track list (pidx stays -1) and the lyrics panel fetches
+            # lyrics for the now-gone old path ("does not contain lyrics").
+            ctrlbar = getattr(win, '_ctrlbar', None)
+            player  = getattr(win, '_player', None)
+            if player and player._last_filepath in rename_map:
+                player._last_filepath = rename_map[player._last_filepath]
+            if ctrlbar and getattr(ctrlbar, '_cur_track', None):
+                old_fp = ctrlbar._cur_track.filepath
+                if old_fp in rename_map:
+                    ctrlbar._cur_track.filepath = rename_map[old_fp]
+            if getattr(win, '_cur_track_mw', None):
+                old_fp = win._cur_track_mw.filepath
+                if old_fp in rename_map:
+                    win._cur_track_mw.filepath = rename_map[old_fp]
+
             # 3. Save config
             if hasattr(win, '_save_config'):
                 win._save_config()
 
-            # 4. Rescan all known paths
+            # 4. Rescan all known paths to pick up renamed files
             win._status.showMessage('Rename complete — refreshing library…')
             _cover_cache.clear()
-            if hasattr(win, '_lib_page') and win._lib_page:
-                win._lib_page.rescan_all()
+            if hasattr(win, '_refresh_library'):
+                win._refresh_library()
 
         win = self.window()
         all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
@@ -8575,9 +9853,9 @@ class ControlBar(QFrame):
             return
         
         dlg = RenamePopup(all_tracks, parent=win)
-        
-        dlg._post_finish_cb = _on_rename_finished   # called by _on_finished when complete
-        dlg.show()   # non-blocking - allows background operation
+        dlg._post_finish_cb = _on_rename_finished
+        _ModalOverlay.show_for(dlg)
+        dlg.show()
 
     def _toggle_fullscreen(self):
         win = self.window()
@@ -8601,6 +9879,7 @@ class ControlBar(QFrame):
         if pop.isVisible():
             pop.hide()
         else:
+            self._refresh_audio_info()
             pop.show_above(self.btn_settings)
 
     @staticmethod
@@ -8660,9 +9939,9 @@ class ControlBar(QFrame):
             self._blackout_ref.set_overlay_lyrics(_ov_lyr)
             self._blackout_ref.set_overlay_clock(_ov_clk)
             self._blackout_ref.set_scale(_ov_sc)
-        _cf = cfg.get('cover_fetch_on', True)
-        pop.set_cover_fetch(_cf)
-        global _cover_fetch_on; _cover_fetch_on = _cf
+        _cover_fetch = cfg.get('cover_fetch_on', True)
+        pop.set_cover_fetch(_cover_fetch)
+        global _cover_fetch_on; _cover_fetch_on = _cover_fetch
         self._player.set_volume(volume / 100)
         # Corner radius — restore before theme so the first stylesheet is correct
         _rad = int(float(cfg.get('corner_radius', RAD_PCT)))
@@ -8680,7 +9959,34 @@ class ControlBar(QFrame):
 
         # View mode + scale sliders
         _vm = cfg.get('view_mode', 'classic')
-        # Migrate old single 'gallery' value to default gallery_z
+
+        # Output device — restore silently (no pipeline reload during startup).
+        # Re-probe available ALSA devices at startup; if the saved device id is
+        # no longer present (card unplugged, renumbered) fall back to PipeWire
+        # so the user is not left with a broken/silent sink on next launch.
+        _saved_dev = cfg.get('output_device', 'pipewire')
+        if _saved_dev != 'pipewire':
+            _available_ids = {dev_id for _, dev_id in SettingsPopup._probe_alsa_devices()}
+            if _saved_dev not in _available_ids:
+                print(f'[Config] saved output device {_saved_dev!r} not found — falling back to PipeWire')
+                _saved_dev = 'pipewire'
+        # When an ALSA device is saved, start the pipeline on hw:X,Y derived from
+        # the saved plughw:X,Y — so probe targets the correct card, not hw:0,0.
+        # plughw:X,Y is used as the fallback if hw:X,Y fails.
+        if _saved_dev != 'pipewire':
+            _pipeline_dev = _saved_dev.replace('plughw:', 'hw:', 1)
+        else:
+            _pipeline_dev = 'pipewire'
+        pop.set_output_device(_saved_dev)          # combo shows saved card name
+        self._player._alsa_device = _pipeline_dev  # pipeline starts on hw:X,Y
+        print(f'[AudioSwitch] startup: combo={_saved_dev!r}, pipeline device={_pipeline_dev!r}')
+        # Pre-confirm hw:X,Y as the optimistic default immediately.
+        # The real probe runs on first _alsa_play() which validates it with audio.
+        if _pipeline_dev != 'pipewire':
+            win = self.window()
+            win._alsa_confirmed_device = _pipeline_dev   # hw:X,Y (correct card)
+            win._alsa_selected_plughw  = _saved_dev      # plughw:X,Y (user's choice)
+            win._alsa_probe_needed     = True            # probe on next play
         if _vm == 'gallery':
             _vm = 'gallery_z'
         _ls = int(float(cfg.get('list_scale', 44)))
@@ -8734,7 +10040,8 @@ class ControlBar(QFrame):
                     'gallery_scale': pop.gallery_scale(),
                     'dark_mode': pop.dark_mode_on(),
                     'viz_type': pop.viz_type(),
-                    'corner_radius': pop.radius()})
+                    'corner_radius': pop.radius(),
+                    'output_device': pop.output_device()})
         eq_pop = self._ensure_eq_popup()
         cfg['eq_profiles'] = eq_pop.get_profiles()
         default_bands, default_enabled = eq_pop.get_default()
@@ -8744,7 +10051,8 @@ class ControlBar(QFrame):
         return cfg
 
     def _precompute_bars(self):
-        iw = self.width()
+        dpr = self.devicePixelRatio()
+        iw = round(self.width() * dpr)
         if iw < 2: return
 
         # ── Integer bar geometry: all bars same width, exactly 1px gap ─────────
@@ -8770,7 +10078,8 @@ class ControlBar(QFrame):
         self._col_bar_safe = _np.maximum(col_bar, 0)
 
         # ── Cap pixel offset arrays — fully vectorized ────────────────────────────
-        radius = bw // 2
+        # Round caps are disabled when the global corner-radius is below 50 %
+        radius = (bw // 2) if RAD_PCT >= 50 else 0
         if radius > 0 and bw >= 2:
             cx   = (bw - 1) * 0.5
             r2   = float(radius * radius)
@@ -8910,6 +10219,10 @@ class ControlBar(QFrame):
 
     def _on_log_toggle(self, on: bool):
         self._log_scale = on
+        # Flush stale bar data so the old mapping does not bleed into the first
+        # frame rendered with the new freq->bin tables.
+        self._player._viz_bar_buf[:] = 0.0
+        self._player._viz_spec[:]    = MIN_DB
         self._precompute_bars()
         self.update()
 
@@ -8960,7 +10273,6 @@ class ControlBar(QFrame):
             tint.setHsvF(ah, s0 + t * (s1 - s0), v0 + t * (v1 - v0))
 
         self._bar_color = tint
-        self._brush_cache = QBrush(tint)
         self.update()
 
     def _on_viz_type_change(self, vtype: str):
@@ -9039,6 +10351,11 @@ class ControlBar(QFrame):
                 f'}}')
         # TagEditDialog is transient — no refresh needed here
         # All ToggleSwitch widgets repaint automatically from globals on next update()
+        # Recompute bar cap geometry — cap radius depends on RAD_PCT
+        self._precompute_bars()
+        # Corner-frame overlays are radius-dependent — clear so they rebuild with new RAD_PCT.
+        # Cover pixmaps themselves are untouched (radius-independent).
+        _corner_frame_cache.clear()
         self.update()
         # Dismiss overlay (present only during live user interaction)
         ov = getattr(self, '_radius_overlay', None)
@@ -9054,6 +10371,8 @@ class ControlBar(QFrame):
         QApplication.instance().setStyleSheet(SS)
         self._on_brightness_change(getattr(self, '_brightness_v', 40))
         _cover_cache.clear()
+        _corner_frame_cache.clear()
+        _default_cover_mem_cache.clear()
         # Remove stale default cover disk cache (will regenerate with new color)
         for f in CONFIG_PATH.parent.glob('default_cover_*.jpg'):
             try: f.unlink()
@@ -9078,8 +10397,8 @@ class ControlBar(QFrame):
     def _on_cover_toggle(self, on: bool):
         self._cover_lbl.setVisible(on)
         if on and self._cur_track:
-            pm = get_cover_pixmap(self._cur_track.filepath, 64, 8)
-            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64, 8))
+            pm = get_cover_pixmap(self._cur_track.filepath, 64)
+            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64))
         # Propagate to main window via signal
         self.cover_on_changed.emit(on)
 
@@ -9175,12 +10494,23 @@ class ControlBar(QFrame):
         self._resize_timer.start()
 
     def paintEvent(self, _):
-        iw = self.width(); ih = self.height()
+        dpr = self.devicePixelRatio()
+        iw = round(self.width() * dpr); ih = round(self.height() * dpr)
         if iw <= 0 or ih <= 0:
             return
         p = QPainter(self)
         if not p.isActive():
             return
+        p.scale(1.0 / dpr, 1.0 / dpr)
+
+        # ── Border pen / background brush cache — always valid, even in fallback ─
+        # Initialised here (before the viz branch) so the stopped/paused fallback
+        # path always has a valid QPen and QBrush even if the viz active path has
+        # never executed (e.g. first paint while stopped at startup).
+        if self._paint_bord_key != BORD:
+            self._paint_bord_key = BORD
+            self._paint_bord_pen = QPen(QColor(BORD), 1)
+            self._paint_bg_brush = QBrush(QColor(BG))
 
         if self._viz_on and not self._viz_paused:
             bh = self._viz_display_buf
@@ -9203,8 +10533,7 @@ class ControlBar(QFrame):
                     self._viz_brush_bg = QBrush(QColor(BG))
                     # invalidate pixel buffer so it is reallocated with new colors
                     self._px_shape = (0, 0)
-
-                if getattr(self, '_viz_type', 'bars') == 'fill':
+                if self._viz_type == 'fill':
                     # ── FILL MODE ─────────────────────────────────────────────
                     bar_px_arr = self._paint_bar_px
                     _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
@@ -9225,22 +10554,25 @@ class ControlBar(QFrame):
                     buf = self._px_buf
                     buf[:] = self._px_bg
 
-                    cx_arr = _np.linspace(0, iw - 1, len(bar_px_arr), dtype=_np.float64)
-                    cy_arr = (ih - bar_px_arr).astype(_np.float64)
-                    col_x      = _np.arange(iw, dtype=_np.float64)
-                    line_y     = _np.interp(col_x, cx_arr, cy_arr)
-                    line_y_int = _np.clip(line_y.astype(_np.int32), 0, ih - 1)
+                    # Use precomputed linear-interp tables (same as line mode) — zero allocation.
+                    cy_buf = self._line_cy_buf
+                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
+                    line_y_f = (cy_buf[self._line_bin_i]
+                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
+                                                      - cy_buf[self._line_bin_i]))
+                    line_y_i = line_y_f.astype(_np.int32)
+                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)
 
-                    fill_mask = self._px_row_idx >= line_y_int
+                    fill_mask = self._px_row_idx >= line_y_i
                     buf[fill_mask] = self._px_bar
 
                     p.drawImage(0, 0, self._px_qimg)
-                    p.setPen(QPen(QColor(BORD), 1))
+                    p.setPen(self._paint_bord_pen)
                     p.drawLine(0, 0, iw, 0)
                     p.end()
                     return
 
-                if getattr(self, '_viz_type', 'bars') == 'line':
+                if self._viz_type == 'line':
                     # ── LINE MODE — pixel-buffer + Bresenham span fill ─────────
                     # No AA QPainter overhead; gaps on steep slopes are filled by
                     # drawing a vertical span between each pair of consecutive y
@@ -9296,12 +10628,12 @@ class ControlBar(QFrame):
                         buf[y0:y1 + 1, idx + 1] = px_bar
 
                     p.drawImage(0, 0, self._px_qimg)
-                    p.setPen(QPen(QColor(BORD), 1))
+                    p.setPen(self._paint_bord_pen)
                     p.drawLine(0, 0, iw, 0)
                     p.end()
                     return
 
-                if getattr(self, '_viz_type', 'bars') == 'line+fill':
+                if self._viz_type == 'line+fill':
                     # ── LINE+FILL MODE — fill beneath the line + line on top ────
                     bar_px_arr = self._paint_bar_px
                     _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
@@ -9331,16 +10663,20 @@ class ControlBar(QFrame):
                     buf = self._px_buf
                     buf[:] = self._px_bg
 
-                    # Fill colour — semi-transparent version of bar color (40% alpha blend onto BG)
-                    _bc = self._bar_color
-                    _bgc_r = (self._px_bg >> 16) & 0xFF
-                    _bgc_g = (self._px_bg >> 8)  & 0xFF
-                    _bgc_b =  self._px_bg         & 0xFF
-                    _alpha = 0.38
-                    _fill_r = int(_bgc_r + (_bc.red()   - _bgc_r) * _alpha)
-                    _fill_g = int(_bgc_g + (_bc.green() - _bgc_g) * _alpha)
-                    _fill_b = int(_bgc_b + (_bc.blue()  - _bgc_b) * _alpha)
-                    px_fill = (0xFF << 24 | _fill_r << 16 | _fill_g << 8 | _fill_b)
+                    # Fill colour — semi-transparent version of bar color (40% alpha blend onto BG).
+                    # Recompute only when bar color or BG changes (same key as px_bar/px_bg cache).
+                    if getattr(self, '_px_fill_key', None) != (self._px_bg, self._px_bar_key):
+                        _bc = self._bar_color
+                        _bgc_r = (self._px_bg >> 16) & 0xFF
+                        _bgc_g = (self._px_bg >> 8)  & 0xFF
+                        _bgc_b =  self._px_bg         & 0xFF
+                        _alpha = 0.38
+                        _fill_r = int(_bgc_r + (_bc.red()   - _bgc_r) * _alpha)
+                        _fill_g = int(_bgc_g + (_bc.green() - _bgc_g) * _alpha)
+                        _fill_b = int(_bgc_b + (_bc.blue()  - _bgc_b) * _alpha)
+                        self._px_fill     = (0xFF << 24 | _fill_r << 16 | _fill_g << 8 | _fill_b)
+                        self._px_fill_key = (self._px_bg, self._px_bar_key)
+                    px_fill = self._px_fill
 
                     # ── Fill: all rows at or below the line y ──────────────────
                     fill_mask = self._px_row_idx >= line_y_i
@@ -9361,7 +10697,123 @@ class ControlBar(QFrame):
                         buf[y0:y1 + 1, idx + 1] = px_bar
 
                     p.drawImage(0, 0, self._px_qimg)
-                    p.setPen(QPen(QColor(BORD), 1))
+                    p.setPen(self._paint_bord_pen)
+                    p.drawLine(0, 0, iw, 0)
+                    p.end()
+                    return
+
+                if self._viz_type == 'fourier_notes':
+                    # ── FOURIER NOTES MODE ─────────────────────────────────────
+                    # Maps each musical note (C2–B7, 72 notes) to its FFT bin,
+                    # draws a bar per note coloured by frequency group, and
+                    # labels each peak with both Turkish (Do/Re/Mi…) and
+                    # Western (C/D/E…) note names.
+                    import math as _math
+
+                    # Musical note → frequency: A4 = 440 Hz, equal temperament
+                    # Note names: index 0 = C
+                    _NOTE_NAMES_EN = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                                      'F#', 'G', 'G#', 'A', 'A#', 'B']
+                    _NOTE_NAMES_TR = ['Do', 'Do#', 'Re', 'Re#', 'Mi', 'Fa',
+                                      'Fa#', 'Sol', 'Sol#', 'La', 'La#', 'Si']
+
+                    # Notes from C2 (MIDI 36) to B7 (MIDI 107) = 72 notes
+                    _MIDI_START = 36
+                    _MIDI_END   = 107
+                    _N_NOTES    = _MIDI_END - _MIDI_START + 1  # 72
+
+                    fs        = getattr(self._player, '_current_fs', 48000)
+                    fft_size  = GST_BANDS * 2  # GStreamer spectrum: bands = fft_size/2
+
+                    # Hz per FFT bin
+                    hz_per_bin = fs / fft_size  # = fs / (2*GST_BANDS)
+
+                    # For each note: find the nearest FFT bin and read magnitude
+                    note_heights = _np.zeros(_N_NOTES, dtype=_np.float32)
+                    for ni in range(_N_NOTES):
+                        midi  = _MIDI_START + ni
+                        freq  = 440.0 * (2.0 ** ((midi - 69) / 12.0))
+                        bin_f = freq / hz_per_bin
+                        b0    = int(bin_f)
+                        b1    = b0 + 1
+                        frac  = bin_f - b0
+                        if b0 < 0:
+                            note_heights[ni] = 0.0
+                        elif b1 >= len(bh):
+                            note_heights[ni] = bh[min(b0, len(bh)-1)]
+                        else:
+                            note_heights[ni] = bh[b0] * (1.0 - frac) + bh[b1] * frac
+
+                    # ── Layout ─────────────────────────────────────────────────
+                    label_area = 36     # px at top reserved for note labels
+                    bar_area   = ih - label_area
+                    if bar_area < 4:
+                        bar_area = 4
+                    bar_total_w = iw / _N_NOTES
+                    gap         = max(1.0, bar_total_w * 0.15)
+                    bar_w       = max(1.0, bar_total_w - gap)
+
+                    # Colour groups by octave (C2..B2=0, C3..B3=1, …, C7..B7=5)
+                    # Six hues cycling through the spectrum — pre-computed as QColor
+                    _OCT_COLORS = [
+                        QColor(180,  60,  60),  # oct 2 — deep red
+                        QColor(200, 120,  40),  # oct 3 — orange
+                        QColor(170, 170,  40),  # oct 4 — yellow-green
+                        QColor( 60, 170,  90),  # oct 5 — green
+                        QColor( 50, 130, 200),  # oct 6 — blue
+                        QColor(150,  60, 200),  # oct 7 — violet
+                    ]
+
+                    # Background fill
+                    p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
+
+                    # Determine which notes to label (only the tallest per semitone
+                    # group, above 0.15 threshold) — avoid cluttering
+                    _LABEL_THRESH = 0.15
+
+                    txt_font = QFont()
+                    txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
+                    txt_font.setWeight(QFont.Weight.Bold)
+                    p.setFont(txt_font)
+
+                    for ni in range(_N_NOTES):
+                        midi      = _MIDI_START + ni
+                        octave    = (midi // 12) - 1        # C2 → oct 2
+                        semitone  = midi % 12
+                        h_norm    = float(note_heights[ni])
+                        bar_h_px  = int(h_norm * bar_area)
+                        if bar_h_px < 1:
+                            continue
+
+                        x0 = ni * bar_total_w + gap * 0.5
+                        y0 = label_area + (bar_area - bar_h_px)
+
+                        oct_idx   = max(0, min(5, octave - 2))
+                        base_col  = _OCT_COLORS[oct_idx]
+                        # Brighten bar for white-key (natural) notes
+                        if semitone in (0, 2, 4, 5, 7, 9, 11):
+                            bar_col = base_col.lighter(130)
+                        else:
+                            bar_col = base_col
+
+                        p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
+
+                        # Label: only tall enough bars and avoid tiny fonts
+                        if h_norm >= _LABEL_THRESH and bar_w >= 6:
+                            name_en = _NOTE_NAMES_EN[semitone]
+                            name_tr = _NOTE_NAMES_TR[semitone]
+                            label   = f'{name_tr}\n{name_en}'
+
+                            # Text colour: white on dark BG, dark on light bars
+                            p.setPen(QColor(240, 240, 240))
+                            label_rect = QRectF(x0, 0, bar_w, label_area - 2)
+                            p.drawText(label_rect,
+                                       Qt.AlignmentFlag.AlignHCenter |
+                                       Qt.AlignmentFlag.AlignVCenter,
+                                       label)
+
+                    # Border line at top
+                    p.setPen(self._paint_bord_pen)
                     p.drawLine(0, 0, iw, 0)
                     p.end()
                     return
@@ -9428,15 +10880,17 @@ class ControlBar(QFrame):
 
                 # ── Single drawImage call — one Wayland surface write ──────────
                 p.drawImage(0, 0, self._px_qimg)
-                p.setPen(QPen(QColor(BORD), 1))
+                p.setPen(self._paint_bord_pen)
                 p.drawLine(0, 0, iw, 0)
                 p.end()
                 return
 
-        # Viz off / paused — plain background
-        p.fillRect(self.rect(), QColor(BG))
-        p.setPen(QPen(QColor(BORD), 1))
-        p.drawLine(0, 0, self.width(), 0)
+        # Viz off / paused — fill with background color across the full physical rect
+        # iw/ih are physical pixels (width * dpr); painter is pre-scaled by 1/dpr so
+        # QRectF(0, 0, iw, ih) maps to the correct physical extent on high-DPI screens.
+        p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
+        p.setPen(self._paint_bord_pen)
+        p.drawLine(0, 0, iw, 0)
         p.end()
 
     def _on_playing_changed(self, playing: bool):
@@ -9487,6 +10941,18 @@ class ControlBar(QFrame):
 
     def _on_dur(self, ms): self._dur_ms = ms; self._lbl_tot.setText(self._fmt(ms))
 
+    def refresh_theme(self):
+        """Re-apply theme after a dark/light switch.
+        Re-renders the cover label if it is showing the default placeholder
+        so it picks up the new background colour.
+        """
+        sz = self._cover_lbl._sz
+        if self._cover_lbl.isVisible() and self._cur_track is not None:
+            pm = get_cover_pixmap(self._cur_track.filepath, sz)
+            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(sz))
+        elif self._cover_lbl.isVisible():
+            self._cover_lbl.setPixmap(draw_default_cover(sz))
+
     def set_track(self, t: Track):
         self._lbl_title.setText(t.title or Path(t.filepath).name)
         self._lbl_artist.setText(t.artist)
@@ -9495,9 +10961,12 @@ class ControlBar(QFrame):
         self._player._viz_spec[:] = MIN_DB
         # Update cover thumbnail — always show whatever is in cache (or default)
         if self._cover_lbl.isVisible():
-            pm = get_cover_pixmap(t.filepath, 64, 8)
-            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64, 8))
+            pm = get_cover_pixmap(t.filepath, 64)
+            self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64))
         self._cur_track = t
+        # Keep AUDIO INFO labels current while the settings popup is open
+        if self._settings_popup is not None and self._settings_popup.isVisible():
+            self._refresh_audio_info()
 
     def set_play_icon(self, playing: bool):
         self.btn_play.setText('⏸' if playing else '▶')
@@ -9518,10 +10987,7 @@ class ControlBar(QFrame):
         """Show/hide spinner on play button during pipeline reload."""
         self.btn_play.set_busy(busy)
 
-    @staticmethod
-    def _fmt(ms):
-        t = ms//1000; h, r = divmod(t, 3600); m, s = divmod(r, 60)
-        return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+    _fmt = staticmethod(_fmt_ms)   # alias for backward compatibility
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Custom title bar
@@ -9631,9 +11097,13 @@ class BlackTitleBar(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
-            handle = self._win.windowHandle()
-            if handle:
-                handle.startSystemMove()
+            # Do not start a system-move drag when the press lands on a child
+            # widget (minimize / maximize / close buttons).  childAt() returns
+            # None when the click is on the bare titlebar background.
+            if self.childAt(e.position().toPoint()) is None:
+                handle = self._win.windowHandle()
+                if handle:
+                    handle.startSystemMove()
         super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e: QMouseEvent):
@@ -9680,7 +11150,7 @@ class MainWindow(QMainWindow):
         self._mpris.set_cover_on(self._ctrlbar.cover_on())
         self._player.sig_seek.connect(self._mpris.notify_seeked)
         # Install app-level event filter to detect mouse/key activity for idle timer.
-        # We filter at the application level so we catch events on all child widgets
+        # Filtering at application level catches events on all child widgets
         # without installing per-widget filters or enabling mouse-tracking everywhere.
         QApplication.instance().installEventFilter(self)
 
@@ -9692,7 +11162,7 @@ class MainWindow(QMainWindow):
         self._titlebar = BlackTitleBar(self)
         root.addWidget(self._titlebar)
 
-        body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(1)
+        body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(16)
         body.setObjectName('body_splitter')
         self._sidebar = Sidebar(); body.addWidget(self._sidebar)
 
@@ -9740,9 +11210,9 @@ class MainWindow(QMainWindow):
         self._lyrics_panel._ctrlbar = self._ctrlbar
 
         # Vertical splitter: body on top, ctrlbar on bottom.
-        # handleWidth(1) + stylesheet height:1px → thin border line, no extra gap.
+        # handleWidth(16) + stylesheet border:1px → thin visual line, fat 16px touch target.
         self._vsplit = QSplitter(Qt.Orientation.Vertical)
-        self._vsplit.setHandleWidth(1)
+        self._vsplit.setHandleWidth(16)
         self._vsplit.setChildrenCollapsible(False)
         self._vsplit.addWidget(body)
         self._vsplit.addWidget(self._ctrlbar)
@@ -9755,6 +11225,9 @@ class MainWindow(QMainWindow):
         # Tab bar hidden; update count when tab changes programmatically
         self._tabs.currentChanged.connect(self._on_tab_change)
 
+        # Device-busy popup — child of central so it floats above all content
+        self._device_busy_popup = DeviceBusyPopup(central)
+
     # Keep custom titlebar in sync with window title changes
     def setWindowTitle(self, title: str):
         super().setWindowTitle(title)
@@ -9766,14 +11239,23 @@ class MainWindow(QMainWindow):
         self._sidebar.add_m3u_req.connect(self._import_m3u_dialog)
         self._sidebar.new_playlist_req.connect(self._new_playlist_dialog)
         self._sidebar.remove_req.connect(self._remove_playlist)
+        self._sidebar.rename_req.connect(self._rename_playlist)
+        self._sidebar.move_up_req.connect(lambda i: self._move_playlist(i, i - 1))
+        self._sidebar.move_down_req.connect(lambda i: self._move_playlist(i, i + 1))
         self._sidebar.source_selected.connect(self._select_source)
         self._sidebar.search_changed.connect(self._apply_search)
         self._sidebar.refresh_req.connect(self._refresh_library)
         self._sidebar.export_m3u_req.connect(self._export_m3u_dialog)
 
         self._player.sig_end.connect(self._on_track_end)
-        self._player.sig_err.connect(lambda e: self._status.showMessage(f'Error: {e}', 5000))
+        self._player.sig_err.connect(self._on_player_error)
         self._player.sig_busy.connect(self._on_player_busy)
+        self._device_busy_popup.switch_to_pipewire.connect(self._on_switch_to_pipewire)
+        self._device_busy_popup.retry.connect(self._on_alsa_retry)
+
+        # _on_output_device_changed is a proper MainWindow method connected via
+        # _ensure_settings_popup (ControlBar) when the popup is first created.
+        # The old guard `if _settings_popup is not None` was always False at init.
         self._ctrlbar.btn_play.clicked.connect(self._play_pause)
         self._ctrlbar.btn_prev.clicked.connect(self._prev_track)
         self._ctrlbar.btn_next.clicked.connect(self._next_track)
@@ -9790,6 +11272,9 @@ class MainWindow(QMainWindow):
         self._lyrics_panel.status_msg.connect(
             lambda m: self._status.showMessage(m, 0) if m else self._status.clearMessage())
         self._lyrics_panel.seek_requested.connect(self._player.seek)
+        # Immediately refresh seekbar + time label on lyric-click seek so the
+        # position is visible even while paused (sig_pos stops ticking when paused).
+        self._lyrics_panel.seek_requested.connect(self._ctrlbar._on_pos)
         self._lyrics_panel.lyrics_context.connect(self._blackout.set_lyrics_context)
         self._ctrlbar.set_blackout_ref(self._blackout)
 
@@ -9814,7 +11299,32 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_mpris'):
             self._mpris.set_cover_on(on)
 
-    def _on_cover_loaded_mw(self, fp: str, size: int, radius: int):
+    def _on_cover_toggle_with_overlay(self, on: bool, _overlay=None):
+        """Cover toggle with async processing and optional overlay."""
+        # Start the cover processing
+        self._lib_page.set_covers_on(on)
+        
+        playlists_to_process = list(self._playlists)
+        
+        def _process_playlists(idx: int):
+            if idx >= len(playlists_to_process):
+                # All done — update MPRIS and close overlay
+                if hasattr(self, '_mpris'):
+                    self._mpris.set_cover_on(on)
+                if _overlay is not None:
+                    _overlay.close_overlay()
+                return
+            
+            pl = playlists_to_process[idx]
+            pl.set_covers_on(on)
+            
+            # Continue to next playlist after a brief delay to let UI update
+            QTimer.singleShot(16, lambda: _process_playlists(idx + 1))
+        
+        # Start processing playlists after a short delay
+        QTimer.singleShot(16, lambda: _process_playlists(0))
+
+    def _on_cover_loaded_mw(self, fp: str, size: int):
         """Update ctrlbar thumbnail when async cover loader finishes for the playing track."""
         if size != 64:
             return
@@ -9823,7 +11333,7 @@ class MainWindow(QMainWindow):
             return
         cur = ctrlbar._cur_track
         if cur and cur.filepath == fp:
-            pm = _cover_cache.get((fp, 64, 8))
+            pm = _cover_cache.get((fp, 64))
             if pm:
                 ctrlbar._cover_lbl.setPixmap(pm)
 
@@ -9894,6 +11404,7 @@ class MainWindow(QMainWindow):
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self._ctrlbar.btn_shuf, self._ctrlbar.btn_prev, self._ctrlbar.btn_next):
             b.setStyleSheet(_ts)
+        self._ctrlbar.refresh_theme()
         if hasattr(self, '_titlebar'):
             self._titlebar.refresh_theme()
         QApplication.processEvents()
@@ -9943,8 +11454,9 @@ class MainWindow(QMainWindow):
         self._refresh_all_theme_widgets(_overlay=None)
 
     def _on_pos_for_lyrics(self, ms: int):
-        delay = self._ctrlbar._delay_ms
-        self._lyrics_panel.on_position(max(0, ms - delay))
+        # Lyrics use raw playback position — viz audio-delay compensation must not
+        # be applied here (that offset only corrects spectrum-display latency).
+        self._lyrics_panel.on_position(ms)
 
     def _open_lyrics_panel_from_config(self):
         """Restore lyrics panel open state from config."""
@@ -10000,36 +11512,34 @@ class MainWindow(QMainWindow):
     def _invalidate_cover_cache(self, fp: str, pre_embed_mtime: float = None):
         """Remove all cached cover data for fp so the next paint reloads from disk.
 
-        pre_embed_mtime: mtime captured BEFORE embed_cover_bytes() is called.
-        The disk cache key includes mtime; after af.save() the mtime changes,
-        so without the pre-embed value the old disk cache file would be missed.
+        pre_embed_mtime is kept as a parameter for API compatibility but is no
+        longer used: the filename-based disk key does not encode mtime, so we
+        simply delete the disk files and update the sidecar .mtime files to force
+        a re-extract on next access.
         """
         # Clear ALL cached sizes for this fp (includes gallery's dynamic cover_sz)
         for key in [k for k in _cover_cache if k[0] == fp]:
             _cover_cache.pop(key, None)
-        try:
-            cur_mtime = str(os.path.getmtime(fp))
-        except Exception:
-            cur_mtime = '0'
-        mtimes = {cur_mtime}
-        if pre_embed_mtime is not None:
-            mtimes.add(str(pre_embed_mtime))
-        for mt in mtimes:
-            for size, radius in [(28, 4), (64, 8)]:
-                dkey = hashlib.sha1(f'{fp}:{mt}:{size}:{radius}'.encode()).hexdigest()
-                disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
-                if disk_path.exists():
-                    try:
-                        disk_path.unlink()
-                    except Exception:
-                        pass
+        # Delete disk cover files for known fixed sizes; gallery sizes are evicted
+        # lazily (staleness detected via sidecar on next access).
+        stem = _sanitize_filename_part(Path(fp).stem)
+        if len(stem) > 120: stem = stem[:120]
+        if _COVER_DISK_DIR.exists():
+            for cover_file in list(_COVER_DISK_DIR.glob(f'{stem}_*.jpg')):
+                try:
+                    cover_file.unlink()
+                    sidecar = Path(str(cover_file) + '.mtime')
+                    if sidecar.exists():
+                        sidecar.unlink()
+                except Exception:
+                    pass
         # Async loader's no-embed blacklist — remove so it retries on next paint
         loader = _async_cover_loader
         if loader is not None:
             with loader._lock:
                 loader._no_embed.discard(fp)
-                for size, radius in [(28, 4), (64, 8)]:
-                    loader._in_flight.discard((fp, size, radius))
+                for size in (28, 64):
+                    loader._in_flight.discard((fp, size))
 
     def _edit_tags(self, page, row):
         track = page.tracks[row]
@@ -10062,19 +11572,13 @@ class MainWindow(QMainWindow):
             # Try anyway; error will be caught below with a clear message
             pass
 
-        dlg = TagEditDialog(track, locked_paths=self._cover_locked_paths, parent=None)
+        dlg = TagEditDialog(track, parent=self)
         dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        _ModalOverlay.show_for(dlg)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         new_title, new_artist, new_album = dlg.get_tags()
-        cover_action, cover_bytes, cover_locked = dlg.get_cover_result()
-        # Update cover lock set
-        if cover_locked:
-            self._cover_locked_paths.add(track.filepath)
-            _cover_locked_set.add(track.filepath)
-        else:
-            self._cover_locked_paths.discard(track.filepath)
-            _cover_locked_set.discard(track.filepath)
+        cover_action, cover_bytes = dlg.get_cover_result()
         # Write tags to file using mutagen
         try:
             af = _open_audio(track.filepath)
@@ -10117,11 +11621,11 @@ class MainWindow(QMainWindow):
             except Exception as _save_err:
                 _save_msg = str(_save_err)
                 if ext in ('.m4a', '.aac') and 'ftypdash' in _save_msg.lower():
-                    _hint = ' (Fragmented/DASH MP4 — dönüştür: ffmpeg -i in.m4a -c copy out.m4a)'
+                    _hint = ' (Fragmented/DASH MP4 — convert: ffmpeg -i in.m4a -c copy out.m4a)'
                 else:
                     _hint = ''
                 self._status.showMessage(
-                    f'Tag yazılamadı: {Path(track.filepath).name} — {_save_msg}{_hint}', 8000)
+                    f'Tag could not be written: {Path(track.filepath).name} — {_save_msg}{_hint}', 8000)
                 print(f'af.save() error [{ext}]: {_save_err}')
                 return
 
@@ -10135,16 +11639,17 @@ class MainWindow(QMainWindow):
                 embed_cover_bytes(fp, cover_bytes)
                 self._invalidate_cover_cache(fp, pre_embed_mtime=_pre_embed_mtime)
                 # Build pixmaps synchronously NOW — before any _fill_row / populate call
-                for size, radius in [(28, 4), (64, 8)]:
+                for size in (28, 64):
                     raw = QPixmap()
                     if raw.loadFromData(cover_bytes):
-                        pm = _rounded_pixmap(raw, size, radius)
-                        _cover_cache[(fp, size, radius)] = pm
+                        pm = _square_pixmap(raw, size)
+                        _cover_cache[(fp, size)] = pm
                         try:
-                            dkey = _cover_disk_key(fp, size, radius)
+                            dkey = _cover_disk_key(fp, size)
                             disk_path = _COVER_DISK_DIR / f'{dkey}.jpg'
                             _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
                             pm.save(str(disk_path), 'JPEG', _COVER_JPEG_QUALITY)
+                            _cover_disk_write_mtime(fp, disk_path)
                         except Exception:
                             pass
             elif cover_action == 'remove':
@@ -10162,8 +11667,8 @@ class MainWindow(QMainWindow):
                     pass
                 # Invalidate and pre-populate with default so _fill_row sees it immediately
                 self._invalidate_cover_cache(fp)
-                for size, radius in [(28, 4), (64, 8)]:
-                    _cover_cache[(fp, size, radius)] = draw_default_cover(size, radius)
+                for size in (28, 64):
+                    _cover_cache[(fp, size)] = draw_default_cover(size)
 
             # Re-read metadata to reflect changes in UI
             updated_track = read_metadata(fp)
@@ -10172,7 +11677,7 @@ class MainWindow(QMainWindow):
                 pg.tracks[idx] = updated_track
                 pg.table._tracks_ref = pg.tracks  # keep table ref in sync
                 pg.table._fill_row(idx, updated_track)
-                pm28 = _cover_cache.get((fp, 28, 4))
+                pm28 = _cover_cache.get((fp, 28))
                 if pm28:
                     item = pg.table.item(idx, C_TIT)
                     if item:
@@ -10199,13 +11704,16 @@ class MainWindow(QMainWindow):
                     and self._cur_track_mw is not None
                     and self._cur_track_mw.filepath == fp
                     and self._ctrlbar._cover_lbl.isVisible()):
-                pm64 = _cover_cache.get((fp, 64, 8))
+                pm64 = _cover_cache.get((fp, 64))
                 if pm64:
                     self._ctrlbar._cover_lbl.setPixmap(pm64)
             if self._cur_page is page and self._cur_idx == row:
                 self._ctrlbar.set_track(updated_track)
                 self.setWindowTitle(f'{updated_track.title}  —  VoidPulse')
                 self._mpris.notify_track(updated_track)
+                # Reload lyrics panel so edits to embedded lyrics are reflected immediately
+                if self._lyrics_panel.isVisible():
+                    self._lyrics_panel.set_track(updated_track)
 
             self._status.showMessage('Tags updated', 3000)
             self._save_config()
@@ -10375,13 +11883,20 @@ class MainWindow(QMainWindow):
         for t in all_tracks:
             if t.filepath not in seen: seen.add(t.filepath); dedup.append(t)
         dedup.sort(key=lambda t: t.sort_key())
+        fp_to_idx = {t.filepath: i for i, t in enumerate(dedup)}
+        # Resolve the playing row by the player's current filepath.
+        # Using _cur_idx (cursor/selection) was wrong: it is unrelated to
+        # which track is actually playing and goes stale after a rescan
+        # replaces all Track objects (e.g. after a batch rename).
         pidx = -1
-        if (self._cur_page is self._lib_page and
-                0 <= self._cur_idx < len(self._lib_page.tracks)):
-            fp = self._lib_page.tracks[self._cur_idx].filepath
-            # O(1) lookup via a temporary reverse index instead of O(n) scan
-            fp_to_idx = {t.filepath: i for i, t in enumerate(dedup)}
-            pidx = fp_to_idx.get(fp, -1)
+        player_fp = getattr(getattr(self, '_player', None), '_last_filepath', '')
+        if player_fp:
+            pidx = fp_to_idx.get(player_fp, -1)
+        # Fall back to the existing lib-page playing_idx when nothing has
+        # been played yet in this session (player_fp is empty).
+        if pidx == -1 and 0 <= self._lib_page.playing_idx < len(self._lib_page.tracks):
+            old_fp = self._lib_page.tracks[self._lib_page.playing_idx].filepath
+            pidx = fp_to_idx.get(old_fp, -1)
         self._lib_page.set_tracks(dedup, pidx)
         # Re-apply saved col widths after populate resets them
         saved = getattr(self, '_last_col_widths', None)
@@ -10401,6 +11916,43 @@ class MainWindow(QMainWindow):
         # Defer library rebuild so the UI unblocks immediately
         QTimer.singleShot(0, lambda: (self._rebuild_library(), self._save_config()))
 
+    def _rename_playlist(self, idx: int, new_label: str):
+        if not (0 <= idx < len(self._playlists)): return
+        page = self._playlists[idx]
+        page.set_label(new_label)
+        # Update the tab title
+        tab_idx = idx + 1   # tab 0 is the library page
+        if 0 < tab_idx < self._tabs.count():
+            self._tabs.setTabText(tab_idx, f' {new_label} ')
+        # Sidebar label is already updated by Sidebar._prompt_rename before emit
+        self._save_config()
+
+    def _move_playlist(self, from_idx: int, to_idx: int):
+        n = len(self._playlists)
+        if not (0 <= from_idx < n and 0 <= to_idx < n): return
+        # Swap in the data list
+        self._playlists[from_idx], self._playlists[to_idx] = (
+            self._playlists[to_idx], self._playlists[from_idx])
+        # Swap tab widgets (tabs: 0=library, 1..n=playlists)
+        t_from = from_idx + 1
+        t_to   = to_idx   + 1
+        # QTabWidget has no direct swap — remove the higher-index one first to
+        # avoid index shifting, then reinsert at the correct position.
+        hi = max(t_from, t_to); lo = min(t_from, t_to)
+        hi_widget = self._tabs.widget(hi)
+        hi_label  = self._tabs.tabText(hi)
+        lo_widget = self._tabs.widget(lo)
+        lo_label  = self._tabs.tabText(lo)
+        self._tabs.removeTab(hi)
+        self._tabs.removeTab(lo)
+        self._tabs.insertTab(lo, hi_widget, hi_label)
+        self._tabs.insertTab(hi, lo_widget, lo_label)
+        # Keep the currently displayed tab in view
+        cur = self._tabs.currentIndex()
+        # Sidebar reorder
+        self._sidebar.move_playlist_row(from_idx, to_idx)
+        self._save_config()
+
     def _select_source(self, idx):
         if idx == -1: self._tabs.setCurrentIndex(0)
         else:
@@ -10409,7 +11961,31 @@ class MainWindow(QMainWindow):
 
     # --- Playback ---
     def _play_from_page(self, page, row):
-        self._cur_page = page; self._cur_idx = row; self._start_playback()
+        self._cur_page = page; self._cur_idx = row; self._alsa_play()
+
+    def _alsa_play(self) -> None:
+        """High-level play entry point for normal play/pause/track-change.
+
+        If the current output is PipeWire, plays directly via _start_playback().
+        If the current output is ALSA, runs the hw:/plughw: probe on first use
+        or after an error; subsequent plays use the confirmed device directly.
+        """
+        # If the user has selected PipeWire, never touch _alsa_device.
+        if self._player._alsa_device == 'pipewire':
+            self._start_playback()
+            return
+        needs_probe = getattr(self, '_alsa_probe_needed', False)
+        if not needs_probe and getattr(self, '_alsa_probe_error', ''):
+            needs_probe = True
+            self._alsa_probe_needed = True
+        if needs_probe and self._cur_track_mw is not None:
+            self._alsa_probe_needed = False
+            self._alsa_probe_and_play()
+            return
+        confirmed = getattr(self, '_alsa_confirmed_device', None)
+        if confirmed and confirmed != 'pipewire':
+            self._player._alsa_device = confirmed
+        self._start_playback()
 
     def _start_playback(self):
         if not self._cur_page: return
@@ -10456,6 +12032,216 @@ class MainWindow(QMainWindow):
         self._mpris.notify_track(t); self._mpris.notify_status()
         self._blackout.set_track(t.title or Path(t.filepath).name, t.artist, t.album)
 
+    def _on_output_device_changed(self, dev_id: str) -> None:
+        """Called when the user picks a new output device in SettingsPopup.
+
+        set_output_device (connected first in ControlBar) has already destroyed
+        the pipeline and saved position/_last_switch_was_playing by the time this
+        fires.  For ALSA devices we run the hw:/plughw: probe to confirm the card
+        works; for PipeWire the reload is handled entirely by set_output_device.
+        """
+        if dev_id == 'pipewire':
+            return
+        # Derive hw:X,Y from the selected plughw:X,Y for the probe's first attempt.
+        self._alsa_confirmed_device = dev_id.replace('plughw:', 'hw:', 1)
+        self._alsa_selected_plughw  = dev_id
+        if self._cur_track_mw is not None:
+            QTimer.singleShot(0, self._alsa_probe_and_play)
+        else:
+            self._alsa_probe_needed = True
+
+    def _on_switch_to_pipewire(self) -> None:
+        """Called when the user clicks 'Switch to PipeWire' in DeviceBusyPopup.
+        Updates the player, syncs the SettingsPopup combobox, and saves config."""
+        prev = self._player._alsa_device
+        print(f'[AudioSwitch] user switched output: {prev!r} -> pipewire  (via DeviceBusyPopup)')
+        self._player.set_output_device('pipewire')
+        pop = self._ctrlbar._settings_popup
+        if pop is not None:
+            pop.set_output_device('pipewire')
+            self._ctrlbar._refresh_audio_info()
+        self._save_config()
+
+    def _on_alsa_retry(self) -> None:
+        """Called when the user clicks 'Retry' in DeviceBusyPopup."""
+        print(f'[AudioSwitch] user clicked Retry — probing ALSA devices')
+        if self._cur_track_mw is not None:
+            self._alsa_probe_and_play()
+
+    def _alsa_probe_and_play(self) -> None:
+        """Probe hw:X,Y then plughw:X,Y to find a working ALSA device, then play.
+
+        Called ONLY on:
+          • initial launch (when an ALSA device is saved in config)
+          • combobox device change
+          • Retry button in DeviceBusyPopup
+
+        Normal play/pause/track-change use _start_playback() directly with
+        whatever device was confirmed by the last probe (_alsa_confirmed_device).
+
+        Probe schedule: hw:, plughw:, hw:(+2s), plughw:(+2s), hw:(+4s), give up.
+        Retrying the same device with increasing back-off gives PipeWire time to
+        release its exclusive hold on the hw: node during async teardown.
+        Seeking to the original position happens once in _confirm after success,
+        not per-attempt, so position survives across retries.
+        """
+        PRIMARY  = self._player._alsa_device.replace('plughw:', 'hw:', 1) \
+                   if self._player._alsa_device and self._player._alsa_device != 'pipewire' \
+                   else getattr(self, '_alsa_selected_plughw', 'plughw:1,0').replace('plughw:', 'hw:', 1)
+        FALLBACK = getattr(self, '_alsa_selected_plughw',
+                           self._player._alsa_device or 'plughw:1,0')
+
+        gen = getattr(self, '_alsa_probe_gen', 0) + 1
+        self._alsa_probe_gen = gen
+        self._alsa_probe_error = ''
+        self._alsa_probe_active = True   # tells _on_player_error we're inside a probe
+
+        # Consume saved position/state once; reused across all retries.
+        _probe_pos_ms = getattr(self._player, '_last_switch_pos_ms', None)
+        _probe_was_playing = getattr(self._player, '_last_switch_was_playing', True)
+        if _probe_pos_ms is None:
+            _probe_pos_ms = max(0, int(self._player.position_ms())) if self._player._last_filepath else 0
+        if _probe_was_playing is None:
+            _probe_was_playing = True
+        self._player._last_switch_pos_ms      = None
+        self._player._last_switch_was_playing = None
+
+        print(f'[AudioSwitch] ALSA probe START: {PRIMARY!r} / {FALLBACK!r}'
+              f'  (resume pos={_probe_pos_ms} ms, was_playing={_probe_was_playing})')
+
+        _dev_label = FALLBACK.replace('plughw:', '').split(',')[0]
+        self._status.showMessage(f'⏳  Probing ALSA device: {_dev_label} …', 0)
+        self._ctrlbar.set_play_busy(True)
+
+        def _hide_spinner():
+            self._ctrlbar.set_play_busy(False)
+
+        def _confirm(device: str):
+            if self._alsa_probe_gen != gen:
+                return
+            print(f'[AudioSwitch] ALSA confirmed working device: {device!r}')
+            self._alsa_confirmed_device = device
+            self._alsa_probe_needed     = False
+            self._alsa_probe_error      = ''
+            self._alsa_probe_active     = False
+            self._player._alsa_device   = device
+            _hide_spinner()
+            self._status.clearMessage()
+            pop = self._ctrlbar._settings_popup
+            if pop is not None:
+                combo_dev = FALLBACK if device != 'pipewire' else 'pipewire'
+                pop.set_output_device(combo_dev)
+                self._ctrlbar._refresh_audio_info()
+            # Pipeline is PLAYING from position 0.  Mute, seek to original position,
+            # then unmute — ALSA device stays open (needs audio flowing) but user
+            # hears nothing from position 0.  After seek settles, restore play state.
+            if _probe_pos_ms > 200 and self._player.has_pipe:
+                self._player._pipe.set_property('volume', 0.0)
+                self._player.seek(_probe_pos_ms)
+                def _after_seek():
+                    if not self._player.has_pipe:
+                        return
+                    self._player._pipe.set_property('volume', self._player._volume)
+                    if not _probe_was_playing and self._player.playing:
+                        self._player.play_pause()
+                    self._ctrlbar.set_play_icon(self._player.playing)
+                QTimer.singleShot(450, _after_seek)
+                return   # set_play_icon called inside _after_seek
+            if not _probe_was_playing and self._player.playing:
+                self._player.play_pause()
+            self._ctrlbar.set_play_icon(self._player.playing)
+
+        def _give_up():
+            if self._alsa_probe_gen != gen:
+                return
+            err = self._alsa_probe_error or 'ALSA device unavailable'
+            print(f'[AudioSwitch] ALSA probe exhausted. Last error: {err!r}')
+            self._alsa_probe_active = False
+            _hide_spinner()
+            self._status.showMessage('⚠  ALSA device unavailable — try Retry or switch to PipeWire', 6000)
+            self._device_busy_popup.show_error(err)
+
+        # (device, delay_ms_before_attempt)
+        # hw: first (bit-perfect); plughw: as immediate fallback if hw: busy;
+        # then back off so PipeWire has time to release the hw: node.
+        _schedule = [
+            (PRIMARY,  0),
+            (FALLBACK, 0),
+            (PRIMARY,  2000),
+            (FALLBACK, 2000),
+            (PRIMARY,  4000),
+        ]
+
+        def _attempt(idx: int):
+            if self._alsa_probe_gen != gen:
+                return
+            if idx >= len(_schedule):
+                _give_up(); return
+            device, delay = _schedule[idx]
+
+            def _run():
+                if self._alsa_probe_gen != gen:
+                    return
+                print(f'[AudioSwitch] ALSA probe attempt {idx + 1}/{len(_schedule)}: {device!r}')
+                self._player._alsa_device = device
+                self._alsa_probe_error = ''
+                self._status.showMessage(
+                    f'⏳  ALSA {idx + 1}/{len(_schedule)}: trying {device} …', 0)
+                if self._cur_track_mw is not None:
+                    # Load PLAYING — ALSA hw: closes the device when no audio flows,
+                    # so paused=True would cause the pipeline to drop to NULL/READY
+                    # and _confirm's play_pause() would hit the dead-pipe reload path.
+                    # Anchor to the original position first so the seekbar doesn't
+                    # snap to 0 during the probe window.
+                    if _probe_pos_ms > 0:
+                        self._player._anchor_now(float(_probe_pos_ms))
+                    self._player.load(self._cur_track_mw.filepath)
+                    self._ctrlbar.set_track(self._cur_track_mw)
+                QTimer.singleShot(800, lambda: _check(idx, device))
+
+            if delay > 0:
+                self._status.showMessage(
+                    f'⏳  ALSA: device busy — retrying in {delay // 1000}s …', 0)
+                QTimer.singleShot(delay, _run)
+            else:
+                _run()
+
+        def _check(idx: int, device: str):
+            if self._alsa_probe_gen != gen:
+                return
+            if not self._alsa_probe_error:
+                _confirm(device)
+            else:
+                print(f'[AudioSwitch] attempt {idx + 1} failed ({self._alsa_probe_error!r}), trying next')
+                _attempt(idx + 1)
+
+        _attempt(0)
+
+    def _on_player_error(self, err: str) -> None:
+        """Record ALSA probe errors; PipeWire errors fall through to status bar."""
+        using_alsa = self._player._alsa_device != 'pipewire'
+        print(f'[AudioSwitch] player error (alsa={using_alsa}, device={self._player._alsa_device!r}): {err!r}')
+        if using_alsa:
+            self._alsa_probe_error = err
+            self._alsa_probe_needed = True
+            # If this error fired during normal playback (not inside an active probe
+            # window), the pipeline is now dead and nobody will restart it.
+            # Re-probe immediately so the user doesn't get stuck silently.
+            # If a probe IS already running, _check() handles the error — don't
+            # start a second probe (that would cancel the first via gen increment).
+            probe_running = getattr(self, '_alsa_probe_active', False)
+            if not probe_running and self._cur_track_mw is not None:
+                # Save position before pipeline was destroyed so resume is accurate.
+                if getattr(self._player, '_last_switch_pos_ms', None) is None:
+                    saved = int(self._player._pos_anchor_ms)
+                    if saved > 0:
+                        self._player._last_switch_pos_ms      = saved
+                        self._player._last_switch_was_playing = True
+                self._alsa_probe_needed = False
+                QTimer.singleShot(0, self._alsa_probe_and_play)
+        else:
+            self._status.showMessage(f'Error: {err}', 5000)
+
     def _on_player_busy(self, busy: bool):
         """Pipeline is reloading — show spinner on play button, disable MPRIS play/pause."""
         self._ctrlbar.set_play_busy(busy)
@@ -10469,7 +12255,7 @@ class MainWindow(QMainWindow):
         if not self._player.has_pipe:
             if self._cur_page and self._cur_page.tracks:
                 if self._cur_idx < 0: self._cur_idx = 0
-                self._start_playback()
+                self._alsa_play()
         else:
             self._player.play_pause()
             self._ctrlbar.set_play_icon(self._player.playing)
@@ -10499,7 +12285,7 @@ class MainWindow(QMainWindow):
         n = len(self._cur_page.tracks)
         if n == 0: return
         repeat = self._ctrlbar.btn_rep.current_mode()
-        if not forced and repeat == RepeatMode.ONE: self._start_playback(); return
+        if not forced and repeat == RepeatMode.ONE: self._alsa_play(); return
         if self._shuffle:
             if n > 1:
                 # Pick random index != current without allocating a list
@@ -10518,7 +12304,7 @@ class MainWindow(QMainWindow):
             # Manual next: preserve playing/paused state
             self._navigate_track(self._player.playing)
         else:
-            self._start_playback()
+            self._alsa_play()
 
     def _on_track_end(self): self._advance()
 
