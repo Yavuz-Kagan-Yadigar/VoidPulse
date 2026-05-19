@@ -10706,6 +10706,7 @@ class ControlBar(QFrame):
 
                 if self._viz_type == 'fourier_notes':
                     # ── FOURIER NOTES MODE ─────────────────────────────────────
+                    # Direct FFT analysis: reads RAW magnitude data from spectrum
                     # Maps each musical note (C2–B7, 72 notes) to its FFT bin,
                     # draws a bar per note ONLY if amplitude exceeds threshold,
                     # colored by accent hue with saturation proportional to amplitude.
@@ -10729,39 +10730,45 @@ class ControlBar(QFrame):
                     # Hz per FFT bin
                     hz_per_bin = fs / fft_size  # = fs / (2*GST_BANDS)
 
-                    # For each note: find the nearest FFT bin and read magnitude
-                    # Apply peak detection: only consider local maxima to reduce false detections
-                    note_heights = _np.zeros(_N_NOTES, dtype=_np.float32)
+                    # Get RAW magnitude data directly from player (before interpolation/smoothing)
+                    # This is the actual FFT output from the audio wave decomposition
+                    raw_mags = getattr(self._player, '_viz_mag_buf', None)
+                    if raw_mags is None:
+                        # Fallback to processed data if raw not available
+                        raw_mags = bh
                     
-                    # Pre-compute all bin magnitudes for peak detection
-                    bh_array = bh.copy()  # bh is already normalized [0,1]
+                    # Convert raw dB magnitudes to linear [0,1] scale
+                    # MIN_DB = -70.0, so: linear = (mag - MIN_DB) / (-MIN_DB), clipped to [0,1]
+                    mag_linear = _np.clip((raw_mags - MIN_DB) / (-MIN_DB), 0.0, 1.0)
+                    
+                    # For each note: find the exact FFT bin and read RAW magnitude
+                    # No interpolation between bins - use the closest bin only
+                    note_heights = _np.zeros(_N_NOTES, dtype=_np.float32)
                     
                     for ni in range(_N_NOTES):
                         midi  = _MIDI_START + ni
                         freq  = 440.0 * (2.0 ** ((midi - 69) / 12.0))
                         bin_f = freq / hz_per_bin
-                        b0    = int(bin_f)
-                        b1    = b0 + 1
-                        frac  = bin_f - b0
-                        if b0 < 0:
+                        b0    = int(round(bin_f))  # Use closest bin, no interpolation
+                        
+                        if b0 < 0 or b0 >= len(mag_linear):
                             note_heights[ni] = 0.0
-                        elif b1 >= len(bh):
-                            note_heights[ni] = bh[min(b0, len(bh)-1)]
                         else:
-                            note_heights[ni] = bh[b0] * (1.0 - frac) + bh[b1] * frac
-                    
-                    # Peak detection: suppress notes that are not local maxima
-                    # A note is considered "real" only if it's significantly higher than neighbors
-                    _PEAK_RATIO = 0.7  # must be at least 70% of neighbor height to count
+                            note_heights[ni] = float(mag_linear[b0])
+
+                    # Aggressive peak detection: suppress notes that are not clear local maxima
+                    # A note is "real" only if it stands significantly above ALL neighbors
+                    _PEAK_THRESHOLD_MULT = 1.8  # must be 1.8x higher than neighbors
                     for ni in range(1, _N_NOTES - 1):
                         left  = note_heights[ni - 1]
                         right = note_heights[ni + 1]
                         center = note_heights[ni]
-                        # If both neighbors are higher, this is likely spectral leakage
-                        if left > center and right > center:
-                            # Suppress if neighbors are significantly higher
-                            if left > center * (1.0 / _PEAK_RATIO) or right > center * (1.0 / _PEAK_RATIO):
-                                note_heights[ni] *= 0.3  # strongly suppress non-peaks
+                        
+                        # Check if center is a true local maximum
+                        max_neighbor = max(left, right)
+                        if center < max_neighbor * _PEAK_THRESHOLD_MULT:
+                            # Not a clear peak - likely spectral leakage
+                            note_heights[ni] = 0.0
 
                     # ── Layout ─────────────────────────────────────────────────
                     label_area = 36     # px at top reserved for note labels
@@ -10782,14 +10789,9 @@ class ControlBar(QFrame):
                     # Background fill
                     p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
 
-                    # Determine which notes to label (only the tallest per semitone
-                    # group, above 0.15 threshold) — avoid cluttering
-                    _LABEL_THRESH = 0.20
                     # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    # Increased threshold to reduce spurious detections from spectral leakage
-                    _AMP_THRESH = 0.15
-                    # Peak prominence: note must be significantly higher than surrounding noise floor
-                    _PEAK_PROMINENCE = 0.10  # must exceed neighbors by at least this amount
+                    _AMP_THRESH = 0.25  # High threshold - only clear notes show
+                    _LABEL_THRESH = 0.35  # Only label very clear notes
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
@@ -10806,14 +10808,6 @@ class ControlBar(QFrame):
                         if h_norm < _AMP_THRESH:
                             continue
                         
-                        # Additional peak prominence check: note must stand out from neighbors
-                        # This catches cases where spectral leakage creates small bumps
-                        left_h  = float(note_heights[ni - 1]) if ni > 0 else 0.0
-                        right_h = float(note_heights[ni + 1]) if ni < _N_NOTES - 1 else 0.0
-                        neighbor_avg = (left_h + right_h) / 2.0
-                        if h_norm - neighbor_avg < _PEAK_PROMINENCE:
-                            continue  # not prominent enough, likely leakage
-                        
                         bar_h_px  = int(h_norm * bar_area)
                         if bar_h_px < 1:
                             continue
@@ -10824,11 +10818,11 @@ class ControlBar(QFrame):
                         # Color: accent hue with saturation proportional to amplitude
                         # Higher amplitude = higher saturation (more vivid)
                         # Lower amplitude = lower saturation (more muted/gray)
-                        # Use direct amplitude-to-saturation mapping for cleaner look
-                        note_sat = acc_s * h_norm  # saturation directly proportional to amplitude
+                        # Saturation scales from 0.2 (quiet) to acc_s (loud)
+                        note_sat = 0.2 + (acc_s - 0.2) * h_norm
                         note_val = acc_v if acc_v > 0 else 0.8
                         bar_col = QColor()
-                        bar_col.setHsvF(acc_h, max(0.1, note_sat), note_val)
+                        bar_col.setHsvF(acc_h, max(0.2, min(acc_s, note_sat)), note_val)
 
                         p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
 
@@ -10838,7 +10832,7 @@ class ControlBar(QFrame):
                             name_tr = _NOTE_NAMES_TR[semitone]
                             label   = f'{name_tr}\n{name_en}'
 
-                            # Text colour: white on dark BG, dark on light bars
+                            # Text colour: white on dark BG
                             p.setPen(QColor(240, 240, 240))
                             label_rect = QRectF(x0, 0, bar_w, label_area - 2)
                             p.drawText(label_rect,
