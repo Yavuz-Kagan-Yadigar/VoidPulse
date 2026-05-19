@@ -10794,8 +10794,7 @@ class ControlBar(QFrame):
                     p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
 
                     # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    _AMP_THRESH = 0.15  # Lower threshold since we use smoothed data
-                    _LABEL_THRESH = 0.25  # Only label very clear notes
+                    _AMP_THRESH = 0.05  # Lower threshold to show more notes
 
                     txt_font = QFont()
                     txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
@@ -10822,16 +10821,16 @@ class ControlBar(QFrame):
                         # Color: accent hue with saturation proportional to amplitude
                         # Higher amplitude = higher saturation (more vivid)
                         # Lower amplitude = lower saturation (more muted/gray)
-                        # Saturation scales from 0.2 (quiet) to acc_s (loud)
-                        note_sat = 0.2 + (acc_s - 0.2) * h_norm
+                        # Saturation scales from 0.3 (quiet) to acc_s (loud) for better differentiation
+                        note_sat = 0.3 + (acc_s - 0.3) * h_norm
                         note_val = acc_v if acc_v > 0 else 0.8
                         bar_col = QColor()
-                        bar_col.setHsvF(acc_h, max(0.2, min(acc_s, note_sat)), note_val)
+                        bar_col.setHsvF(acc_h, max(0.3, min(acc_s, note_sat)), note_val)
 
                         p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
 
-                        # Label: only tall enough bars and avoid tiny fonts
-                        if h_norm >= _LABEL_THRESH and bar_w >= 6:
+                        # Label: always show if bar is visible and wide enough (no discrete threshold)
+                        if bar_w >= 6:
                             name_en = _NOTE_NAMES_EN[semitone]
                             name_tr = _NOTE_NAMES_TR[semitone]
                             label   = f'{name_tr}\n{name_en}'
