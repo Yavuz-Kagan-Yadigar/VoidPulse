@@ -1,0 +1,64 @@
+app-id: org.voidpulse.VoidPulse
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: voidpulse
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Audio: PulseAudio emulation + native PipeWire socket (for pipewiresink)
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0
+  # Network: for lyrics and cover art fetching
+  - --share=network
+  # Music files (read-only)
+  - --filesystem=xdg-music
+  - --filesystem=home:ro
+  # Config directory (write) — ~/.config/voidpulse/config.json
+  - --filesystem=xdg-config
+  # MPRIS2 D-Bus
+  - --socket=session-bus
+  - --own-name=org.mpris.MediaPlayer2.VoidPulse
+  - --talk-name=org.gnome.SettingsDaemon.MediaKeys
+  - --talk-name=org.freedesktop.login1
+
+modules:
+
+  - name: python-deps
+    buildsystem: simple
+    build-options:
+      no-debuginfo: true
+      no-debuginfo-compression: true
+      build-args:
+        - --share=network
+    build-commands:
+      - pip3 install --prefix=/app --no-cache-dir --quiet mutagen
+      - pip3 install --prefix=/app --no-cache-dir --quiet PyQt6 PyQt6-Qt6 PyQt6-sip numpy
+    sources: []
+
+  - name: voidpulse
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 voidpulse.py /app/lib/voidpulse/voidpulse.py
+      - install -Dm755 voidpulse-launcher /app/bin/voidpulse
+      - install -Dm644 org.voidpulse.VoidPulse.desktop /app/share/applications/org.voidpulse.VoidPulse.desktop
+      - install -Dm644 org.voidpulse.VoidPulse.svg /app/share/icons/hicolor/scalable/apps/org.voidpulse.VoidPulse.svg
+      - install -Dm644 appdata.xml /app/share/metainfo/org.voidpulse.VoidPulse.appdata.xml
+      # NotoMusic fontini standart font dizinine kopyala
+      - install -Dm644 NotoMusic-Regular.ttf /app/share/fonts/truetype/NotoMusic/NotoMusic-Regular.ttf
+    sources:
+      - type: file
+        path: voidpulse.py
+      - type: file
+        path: voidpulse-launcher
+      - type: file
+        path: org.voidpulse.VoidPulse.desktop
+      - type: file
+        path: org.voidpulse.VoidPulse.svg
+      - type: file
+        path: appdata.xml
+      - type: file
+        path: NotoMusic-Regular.ttf
