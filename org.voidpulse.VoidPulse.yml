@@ -36,7 +36,12 @@ modules:
   - name: voidpulse
     buildsystem: simple
     build-commands:
-      # appdata.xml dosyasını oluştur
+      - |
+        cat > voidpulse-launcher << 'EOF'
+        #!/bin/bash
+        exec python3 /app/lib/voidpulse/voidpulse.py "$@"
+        EOF
+      - chmod +x voidpulse-launcher
       - |
         cat > appdata.xml << 'EOF'
         <?xml version="1.0" encoding="UTF-8"?>
@@ -46,24 +51,14 @@ modules:
           <project_license>GPL-3.0-or-later</project_license>
           <name>VoidPulse</name>
           <summary>Touch and OLED friendly advanced music player</summary>
-          <description>
-            <p>Touch and OLED friendly advanced music player</p>
-          </description>
+          <description><p>Touch and OLED friendly advanced music player</p></description>
           <launchable type="desktop-id">org.voidpulse.VoidPulse.desktop</launchable>
           <releases>
-            <release version="1.4.2" date="2025-03-13"/>
+            <release version="1.5.0" date="2025-03-13"/>
           </releases>
           <content_rating type="oars-1.1"/>
         </component>
         EOF
-      # voidpulse-launcher script'ini oluştur
-      - |
-        cat > voidpulse-launcher << 'EOF'
-        #!/bin/bash
-        exec python3 /app/lib/voidpulse/voidpulse.py "$@"
-        EOF
-      - chmod +x voidpulse-launcher
-      # Kurulum komutları
       - install -Dm644 voidpulse.py /app/lib/voidpulse/voidpulse.py
       - install -Dm755 voidpulse-launcher /app/bin/voidpulse
       - install -Dm644 org.voidpulse.VoidPulse.desktop /app/share/applications/org.voidpulse.VoidPulse.desktop
