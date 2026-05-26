@@ -6,217 +6,218 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
 
 ═══════════════════════════════════════════════════════════════════
  MODULE STRUCTURE
- V_1.9  (perf · bug fix · dead-code pass continued)
-   • _cf shadow bug fixed in init_from_config (cover_fetch_on local renamed)
-   • peaking_coefficients: cos(w0) computed once; a1 = b1 (removes duplicate trig call)
-   • _vtag: tag keys pre-lowercased once per call (O(keys*tags) → O(tags + keys*tags) lower calls)
-   • GalleryView._invalidate_track: O(n) list.index() → O(1) _ti_to_vis_pos dict
-     (invalidated alongside _fp_to_vis_positions in _apply_filter_and_layout)
-   • LyricsPanel: single QPropertyAnimation pre-allocated in __init__; _highlight
-     reuses it (stop + retarget) instead of constructing + wiring a new one every
-     lyric-line change (called up to 10×/s while synced lyrics play)
+ V_1.5  (Stereo wider, auto scaling eq, alsa volume mapping, bug fix · dead-code · perf pass)
+   • apply_theme: ACCH added to global declaration + recomputed via
+     make_acch(ACC) so hover highlights stay correct after dark/light switch
+   • `shutil` import removed — not used anywhere in the codebase
+   • EQGraph.paintEvent: dead ternary `QColor(BG if is_zero else BG)`
+     simplified to `QColor(BG)`; unused `freq_labels` dict removed
+   • EqPopup._build_ui: missing blank line before paintEvent restored;
+     double blank line after _on_enable_toggled removed
+   • BlackoutOverlay._paint_info: 7 QColor objects (RED, GREY, _acc_aNN)
+     now cached in self._ov_colors / self._ov_paint_key — rebuilt only
+     when ACC or BG3 changes (previously allocated on every overlay repaint)
 ═══════════════════════════════════════════════════════════════════
  PALETTE & THEME
-   apply_theme()               L255   Switch dark/light palette globals + rebuild SS
-   _apply_app_palette()        L269   Sync QPalette with current globals
-   make_acch()                 L289   Derive highlight colour from accent
-   make_stylesheet()           L329   Build global QSS string
+   apply_theme()               L280   Switch dark/light palette globals + rebuild SS
+   _apply_app_palette()        L295   Sync QPalette with current globals
+   make_acch()                 L315   Derive highlight colour from accent
+   make_stylesheet()           L355   Build global QSS string
 
  CONSTANTS & GLOBALS
    SUPPORTED_EXT, CONFIG_PATH, VIZ_BANDS, GST_BANDS, EQ_*, RAD …
-   _MB_BAD_SEC / _MB_GOOD_PRI  L2201  Shared MusicBrainz release-type filter sets (frozenset)
+   _MB_BAD_SEC / _MB_GOOD_PRI  L2269  Shared MusicBrainz release-type filter sets (frozenset)
 
  HELPERS
-   _apply_scroller_properties() L2519 Kinetic-scroll config (touch=True adds tight drag metrics)
-   _np_to_qpolygonf()          L3451  Vectorised numpy arrays → QPolygonF (no per-point float boxing)
-   _fmt_ms()                   L3461  ms integer → "M:SS" / "H:MM:SS" string
+   _apply_scroller_properties() L2584 Kinetic-scroll config (touch=True adds tight drag metrics)
+   _np_to_qpolygonf()          L3599  Vectorised numpy arrays → QPolygonF (no per-point float boxing)
+   _fmt_ms()                   L3609  ms integer → "M:SS" / "H:MM:SS" string
 
  WIDGETS
-   ToggleSwitch                L508   Animated two-state toggle (single/two-label)
-                                      _rebuild_track_colors() L583  Lazy-cached HSV + label colours
+   ToggleSwitch                L534   Animated two-state toggle (single/two-label)
+                                      _rebuild_track_colors() L608  Lazy-cached HSV + label colours
                                       (invalidated on ACC/BG4/B2/FG/FG2 change; dim/bright rgb
                                       cached here — no QColor alloc per frame in paintEvent)
-   JumpSlider                  L683   QSlider that jumps to click/touch position
-   SliderRow                   L735   Label + JumpSlider + value label row
-   SettingsPopup               L767   Settings panel popup (child widget, Wayland-safe)
-     _viz_combo_ss()           L1283  Static: viz-type QComboBox stylesheet (shared init+refresh)
-     refresh_theme()           L1292  Re-apply palette-baked inline stylesheets
-   DeviceBusyPopup             L1352  ALSA error popup (styled like other popups, centred)
-     show_error()              L1457  Set title/detail, reposition, start auto-dismiss timer
-   _ModalOverlay               L1508  Semi-transparent modal backdrop (Wayland-safe outside-click)
-     show_for()                L1598  Static factory: wrap any popup in an overlay
-   TagEditDialog               L1622  Modal tag editor; closes on deactivation (Wayland-safe)
-     changeEvent()             L1720  Reject on ActivationChange (Wayland outside-click close)
-     _pick_cover_file()        L1745  Open file dialog → set cover bytes
-     _search_cover_online()    L1761  Background cover search → update preview
-     _fetch_tags_online()      L1807  Background tag lookup → fill empty fields
-     _fetch_lyrics_online()    L1844  Force-fetch lyrics (all APIs, synced priority) → embed
-   LyricsEditDialog            L1983  Plain/LRC lyrics editor dialog
-   EQSliderCell                L2032  Table cell widget for a single EQ parameter
-   TouchComboBox               L3086  QComboBox immune to touch double-fire close
-   EqPopup                     L3105  Parametric EQ popup + preset management
-   EQGraph                     L3466  Frequency response curve widget (uses _np_to_qpolygonf)
-   BlackoutOverlay             L3567  Full-screen OLED burn-in protection overlay
-                                      (line/line+fill paths vectorised via numpy + _np_to_qpolygonf)
-   SeekSlider                  L7371  Touch-aware seek slider
-   LongPressFilter             L7477  Event filter: long-press → context menu
-   _TouchHeaderView            L7531  QHeaderView subclass: 28px touch grab zone on column dividers
-   RepeatButton                L8893  Tri-state repeat cycle button
-   _FullscreenBtn              L8934  Painted 4-arrow fullscreen toggle button
-   SpinningPlayButton          L8982  Play/pause button with spinning reload indicator
-   _RoundedCoverLabel          L9048  Rounded cover art label widget
-   TitleBarButton              L10739 Frameless window-control button
-   TitleBarCloseButton         L10764 Close variant (red hover)
-   BlackTitleBar               L10768 Custom frameless titlebar
-   _SpinningOverlay            L12393 Semi-transparent blocking overlay with spinner
+   JumpSlider                  L721   QSlider that jumps to click/touch position
+   SliderRow                   L773   Label + JumpSlider + value label row
+   SettingsPopup               L805   Settings panel popup (child widget, Wayland-safe)
+     _viz_combo_ss()           L1301  Static: viz-type QComboBox stylesheet (shared init+refresh)
+     refresh_theme()           L1310  Re-apply palette-baked inline stylesheets
+   DeviceBusyPopup             L1416  ALSA error popup (styled like other popups, centred)
+     show_error()              L1521  Set title/detail, reposition, start auto-dismiss timer
+   _ModalOverlay               L1573  Semi-transparent modal backdrop (Wayland-safe outside-click)
+     show_for()                L1663  Static factory: wrap any popup in an overlay
+   TagEditDialog               L1687  Modal tag editor; closes on deactivation (Wayland-safe)
+     changeEvent()             L1785  Reject on ActivationChange (Wayland outside-click close)
+     _pick_cover_file()        L1810  Open file dialog → set cover bytes
+     _search_cover_online()    L1826  Background cover search → update preview
+     _fetch_tags_online()      L1872  Background tag lookup → fill empty fields
+     _fetch_lyrics_online()    L1909  Force-fetch lyrics (all APIs, synced priority) → embed
+   LyricsEditDialog            L2048  Plain/LRC lyrics editor dialog
+   EQSliderCell                L2097  Table cell widget for a single EQ parameter
+   TouchComboBox               L3157  QComboBox immune to touch double-fire close
+   EqPopup                     L3176  Parametric EQ popup + preset management
+   EQGraph                     L3614  Frequency response curve widget (uses _np_to_qpolygonf)
+   BlackoutOverlay             L3752  Full-screen OLED burn-in protection overlay
+                                      _ov_colors / _ov_paint_key cache 7 QColor objects;
+                                      rebuilt only on ACC/BG3 change — not every overlay repaint
+   SeekSlider                  L7890  Touch-aware seek slider
+   LongPressFilter             L7996  Event filter: long-press → context menu
+   _TouchHeaderView            L8050  QHeaderView subclass: 28px touch grab zone on column dividers
+   RepeatButton                L9434  Tri-state repeat cycle button
+   _FullscreenBtn              L9475  Painted 4-arrow fullscreen toggle button
+   SpinningPlayButton          L9523  Play/pause button with spinning reload indicator
+   _RoundedCoverLabel          L9589  Rounded cover art label widget
+   TitleBarButton              L11329 Frameless window-control button
+   TitleBarCloseButton         L11354 Close variant (red hover)
+   BlackTitleBar               L11358 Custom frameless titlebar
+   _SpinningOverlay            L13025 Semi-transparent blocking overlay with spinner
 
  LYRICS
-   _lrc_parse()                L2457  Parse LRC timestamp lines → [(ms, text)]
-   _extract_embedded_lyrics()  L2468  Read USLT/Vorbis/M4A lyrics from file
-   _get() / _get_json()        L2509  HTTP helpers for online sources
-   _src_lrclib_exact/search()  L2541  LrcLib API sources
-   _src_lyrics_ovh()           L2575  Lyrics.ovh fallback source
-   _src_chartlyrics()          L2584  ChartLyrics fallback source
-   _src_genius_search()        L2596  Genius fallback source
-   _src_azlyrics()             L2622  AZLyrics fallback source
-   _src_songlyrics()           L2638  SongLyrics fallback source
-   _src_letras()               L2653  Letras fallback source
-   ClickableLyricLine          L2669  QLabel that emits clicked(ms)
-   LyricsFetcher               L2682  Worker: embedded → 9 APIs parallel, early-exit on first synced
-   LyricsPanel                 L2819  Scrollable lyric display with sync highlight
+   _lrc_parse()                L2522  Parse LRC timestamp lines → [(ms, text)]
+   _extract_embedded_lyrics()  L2533  Read USLT/Vorbis/M4A lyrics from file
+   _get() / _get_json()        L2574  HTTP helpers for online sources
+   _src_lrclib_exact/search()  L2606  LrcLib API sources
+   _src_lyrics_ovh()           L2640  Lyrics.ovh fallback source
+   _src_chartlyrics()          L2649  ChartLyrics fallback source
+   _src_genius_search()        L2661  Genius fallback source
+   _src_azlyrics()             L2687  AZLyrics fallback source
+   _src_songlyrics()           L2703  SongLyrics fallback source
+   _src_letras()               L2718  Letras fallback source
+   ClickableLyricLine          L2734  QLabel that emits clicked(ms)
+   LyricsFetcher               L2747  Worker: embedded → 9 APIs parallel, early-exit on first synced
+   LyricsPanel                 L2884  Scrollable lyric display with sync highlight
                                       _synced_ts initialised in __init__; bisect uses attribute directly
                                       _scroll_anim pre-allocated in __init__; _highlight reuses (stop+retarget)
 
  COVER ART
-   _trim_cover_cache()         L4069  Evict oldest entries when cache exceeds limit
-   _square_pixmap()            L4107  Scale + crop to exact square (no radius)
-   _get_corner_frame()         L4130  Build cached corner-frame overlay pixmap
-   _draw_cover_rounded()       L4157  Draw square cover + corner-frame overlay
-   draw_default_cover()        L4179  Render clef placeholder pixmap (square, no radius)
-   _cover_disk_key()           L4229  Filename-based disk cache key (<stem>_<size>)
-   _cover_disk_is_stale()      L4248  mtime sidecar check for re-tagging detection
-   _cover_disk_write_mtime()   L4266  Write mtime sidecar for stale-check
-   get_cover_pixmap()          L4274  Non-blocking async cover lookup (paint path)
-   _CoverTask                  L4295  QRunnable for one cover load
-   AsyncCoverLoader            L4337  QThreadPool-based async cover loader
-   _ensure_async_cover_loader() L4425 Module singleton factory
-   _BaseFetchPopup             L4431  Shared base class for fetch popups (multiple concurrent workers)
-     closeEvent()              L4744  Hide dialog, keep worker running in background
-   LibraryCoverFetchWorker     L4851  Sequential per-track cover fetcher
-   CoverFetchPopup             L4893  Modal "fetch covers for library" dialog
+   _trim_cover_cache()         L4275  Evict oldest entries when cache exceeds limit
+   _square_pixmap()            L4313  Scale + crop to exact square (no radius)
+   _get_corner_frame()         L4336  Build cached corner-frame overlay pixmap
+   _draw_cover_rounded()       L4363  Draw square cover + corner-frame overlay
+   draw_default_cover()        L4386  Render clef placeholder pixmap (square, no radius)
+   _cover_disk_key()           L4436  Filename-based disk cache key (<stem>_<size>)
+   _cover_disk_is_stale()      L4455  mtime sidecar check for re-tagging detection
+   _cover_disk_write_mtime()   L4473  Write mtime sidecar for stale-check
+   get_cover_pixmap()          L4481  Non-blocking async cover lookup (paint path)
+   _CoverTask                  L4502  QRunnable for one cover load
+   AsyncCoverLoader            L4544  QThreadPool-based async cover loader
+   _ensure_async_cover_loader() L4632 Module singleton factory
+   _BaseFetchPopup             L4638  Shared base class for fetch popups (multiple concurrent workers)
+     closeEvent()              L4951  Hide dialog, keep worker running in background
+   LibraryCoverFetchWorker     L5058  Sequential per-track cover fetcher
+   CoverFetchPopup             L5100  Modal "fetch covers for library" dialog
 
  TAGS / METADATA
-   fetch_cover_online()        L2178  Try iTunes/Deezer/MusicBrainz/LastFM
-   _mb_rel_score()             L2204  MusicBrainz release quality scorer
-   _mb_rec_score()             L2216  MusicBrainz recording quality scorer
-   lookup_tags_online()        L2295  Parallel MusicBrainz/iTunes/LastFM tag lookup
-   write_tags_to_file()        L2324  Write title/artist/album via mutagen
-   embed_cover_bytes()         L2361  Write cover into audio tags
-   embed_lyrics()              L2408  Write lyrics into audio tags
-   Track                       L3963  @dataclass: filepath + metadata
-   _tag() / _vtag()            L3988  Tag value helpers (_vtag: keys pre-lowercased once per call)
-   _open_audio()               L4006  Open audio file with mutagen (fallback chain)
-   read_metadata()             L4032  Build Track from mutagen
-   extract_cover_bytes()       L4082  Read raw cover bytes from audio tags
-   LibraryTagFetchWorker       L4963  Sequential per-track tag fetcher
-   TagFetchPopup               L5009  Modal "fetch missing tags for library" dialog
-   LibraryLyricsFetchWorker    L5051  Sequential per-track lyrics fetcher
-   LyricsFetchPopup            L5109  Modal "fetch lyrics for library" dialog
-   _sanitize_filename_part()   L5141  Strip illegal filename chars (/,\0,edge dots)
-   _build_new_filename()       L5152  Build new filename stem from pattern + metadata
-   _validate_rename_pattern()  L5180  Validate rename pattern tokens
-   _recover_rename_temps()     L5199  Recover leftover temp files from a crashed rename run
-   LibraryRenameWorker         L5231  Sequential per-track file renamer
+   fetch_cover_online()        L2243  Try iTunes/Deezer/MusicBrainz/LastFM
+   _mb_rel_score()             L2269  MusicBrainz release quality scorer
+   _mb_rec_score()             L2281  MusicBrainz recording quality scorer
+   lookup_tags_online()        L2360  Parallel MusicBrainz/iTunes/LastFM tag lookup
+   write_tags_to_file()        L2389  Write title/artist/album via mutagen
+   embed_cover_bytes()         L2426  Write cover into audio tags
+   embed_lyrics()              L2473  Write lyrics into audio tags
+   Track                       L4166  @dataclass: filepath + metadata
+   _tag() / _vtag()            L4191  Tag value helpers (_vtag: keys pre-lowercased once per call)
+   _open_audio()               L4212  Open audio file with mutagen (fallback chain)
+   read_metadata()             L4238  Build Track from mutagen
+   extract_cover_bytes()       L4288  Read raw cover bytes from audio tags
+   LibraryTagFetchWorker       L5170  Sequential per-track tag fetcher
+   TagFetchPopup               L5216  Modal "fetch missing tags for library" dialog
+   LibraryLyricsFetchWorker    L5258  Sequential per-track lyrics fetcher
+   LyricsFetchPopup            L5316  Modal "fetch lyrics for library" dialog
+   _sanitize_filename_part()   L5348  Strip illegal filename chars (/,\0,edge dots)
+   _build_new_filename()       L5359  Build new filename stem from pattern + metadata
+   _validate_rename_pattern()  L5387  Validate rename pattern tokens
+   _recover_rename_temps()     L5406  Recover leftover temp files from a crashed rename run
+   LibraryRenameWorker         L5438  Sequential per-track file renamer
                                       _MAX_FILENAME_BYTES / _DEDUP_RESERVE hoisted before loop
-   RenamePopup                 L5356  Modal "batch rename library" dialog (run-in-bg)
-     closeEvent()              L5647  Hide dialog, keep worker running in background
+   RenamePopup                 L5562  Modal "batch rename library" dialog (run-in-bg)
+     closeEvent()              L5855  Hide dialog, keep worker running in background
 
  LIBRARY
-   scan_folder()               L5709  Walk directory tree → [Track]  (parallel, 4 workers)
-   parse_m3u()                 L5724  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
-   ScanThread                  L5746  QThread wrapper for scan_folder/parse_m3u
-   ConfigPlaylistLoader        L5764  Non-blocking playlist loader for config restore
+   scan_folder()               L5915  Walk directory tree → [Track]  (parallel, 4 workers)
+   parse_m3u()                 L5930  Parse M3U/M3U8 → [Track]      (parallel, 4 workers)
+   ScanThread                  L5952  QThread wrapper for scan_folder/parse_m3u
+   ConfigPlaylistLoader        L5970  Non-blocking playlist loader for config restore
 
  PLAYER
-   RepeatMode                  L5796  Enum: NONE / ALL / ONE
-   peaking_coefficients()      L5799  Biquad peaking filter coefficients (cos_w0 computed once; a1=b1)
-   Player                      L5822  GStreamer playbin wrapper + EQ + spectrum viz
-     load()                    L5992  Load URI, build sink bin, start playback
-     play_pause()              L6096  Toggle play/pause with PipeWire resilience
-     _load_and_seek()          L6170  Load + seek after dead-pipe recovery; mute during preroll+seek window
-                                      pos captured in set_output_device() → _last_switch_pos_ms
-                                      so probe can resume at correct position
-     _resume_with_reload()     L6233  Reload pipeline at current position
-     _reload_at_pos()          L6273  WARNING-path pipeline reload (separate guard)
-     seek()                    L6324  Flush-accurate seek + anchor update
-     _apply_eq_to_filters_glib() L6477 Update biquad coefficients (GLib idle)
-     set_output_device()       L6505  Switch sink; saves pos to _last_switch_pos_ms before destroy
-     _alsa_primary()           L6531  Static: derive hw:X,Y from plughw:X,Y
-     _alsa_fallback()          L6536  Static: identity (plughw:X,Y as ALSA plug fallback)
-     _make_sink_bin()          L6552  Build EQ + spectrum + sink bin
-     _create_eq_bin()          L6607  Build MAX_EQ_BANDS audioiirfilter chain
-     _tick_pos()               L6756  Pos timer: interpolated pos + drift schedule
-     _drift_query_glib()       L6815  GLib thread: non-blocking position query for drift
-     _apply_drift_correction() L6845  Qt thread: anchor + stall detection (real GST pos)
-     _store_spectrum()         L6976  GLib-thread: burst-safe magnitude merge + el accumulate
-     _compute_viz_frame()      L7092  Main-thread smoothed bar computation (alpha^N EMA)
+   RepeatMode                  L6002  Enum: NONE / ALL / ONE
+   peaking_coefficients()      L6005  Biquad peaking filter coefficients (cos_w0 computed once; a1=b1)
+   _StereoWidthBin             L6041  M/S stereo width processing bin (appsrc/appsink probe)
+   Player                      L6135  GStreamer playbin wrapper + EQ + spectrum viz
+     load()                    L6305  Load URI, build sink bin, start playback
+     play_pause()              L6409  Toggle play/pause with PipeWire resilience
+     _load_and_seek()          L6483  Load + seek after dead-pipe recovery; mute during preroll+seek window
+     _resume_with_reload()     L6546  Reload pipeline at current position
+     _reload_at_pos()          L6586  WARNING-path pipeline reload (separate guard)
+     seek()                    L6637  Flush-accurate seek + anchor update
+     _apply_eq_to_filters_glib() L6790 Update biquad coefficients (GLib idle)
+     set_output_device()       L6818  Switch sink; saves pos to _last_switch_pos_ms before destroy
+     _alsa_primary()           L6844  Static: derive hw:X,Y from plughw:X,Y
+     _alsa_fallback()          L6849  Static: identity (plughw:X,Y as ALSA plug fallback)
+     _make_sink_bin()          L6865  Build EQ + spectrum + sink bin
+     _create_eq_bin()          L6920  Build MAX_EQ_BANDS audioiirfilter chain
+     _tick_pos()               L7069  Pos timer: interpolated pos + drift schedule
+     _drift_query_glib()       L7128  GLib thread: non-blocking position query for drift
+     _apply_drift_correction() L7158  Qt thread: anchor + stall detection (real GST pos)
+     _store_spectrum()         L7289  GLib-thread: burst-safe magnitude merge + el accumulate
+     _compute_viz_frame()      L7405  Main-thread smoothed bar computation (alpha^N EMA)
 
  MPRIS
-   MprisServer                 L7100  MPRIS2 D-Bus interface (GLib thread)
+   MprisServer                 L7619  MPRIS2 D-Bus interface (GLib thread)
 
  VIEWS
-   TrackTable                  L7594  QTableWidget: covers + sort + touch scroll
+   TrackTable                  L8113  QTableWidget: covers + sort + touch scroll
                                       _POPULATE_CHUNK / _GALLERY_CHUNK class constants
                                       _CELL_ALIGN hoisted as class constant
                                       _TouchHeaderView installed for fat column resize zones
-   GalleryView                 L7864  Virtual-scroll card gallery (Z/S layout modes)
+   GalleryView                 L8399  Virtual-scroll card gallery (Z/S layout modes)
                                       _invalidate_track uses _ti_to_vis_pos dict (O(1)) — not list.index() (O(n))
-   PlaylistPage                L8422  QStackedWidget: TrackTable + GalleryView
-   _PlaylistRowWidget          L8508  Sidebar playlist row (label + delete button)
-   Sidebar                     L8611  Left panel: search + library nav + playlist list
+   PlaylistPage                L8963  QStackedWidget: TrackTable + GalleryView
+   _PlaylistRowWidget          L9049  Sidebar playlist row (label + delete button)
+   Sidebar                     L9152  Left panel: search + library nav + playlist list
 
  CONTROL BAR
-   ControlBar                  L9087  Seek bar + transport + viz + settings/EQ toggles
+   ControlBar                  L9639  Seek bar + transport + viz + settings/EQ toggles
                                       _paint_bord_pen / _paint_bg_brush cached on BORD/BG change —
                                       avoids QPen(QColor(BORD), 1) construction on every 60-fps frame
                                       _fmt = staticmethod(_fmt_ms)  — alias, no duplication
-     _ensure_eq_popup()        L9311  Lazy-create EqPopup singleton
-     _ensure_settings_popup()  L9341  Lazy-create SettingsPopup singleton
-     _refresh_audio_info()     L9397  Fill Format/EQ/Device labels; called on open, track change, device change
-     _reset_idle_timer()       L9484  Reset OLED overlay idle countdown
-     _on_idle_timeout()        L9494  Fire overlay when idle threshold reached
-     init_from_config()        L9749  Apply saved config dict to all sub-widgets
-     config_state()            L9876  Collect current state → config dict
-     _precompute_bars()        L9906  Freq→bin map + bar geometry + cap offset arrays (vectorised)
-     paintEvent()              L10350 Fully vectorised numpy pixel-buffer rendering
+     _ensure_eq_popup()        L9845  Lazy-create EqPopup singleton
+     _ensure_settings_popup()  L9875  Lazy-create SettingsPopup singleton
+     _refresh_audio_info()     L9931  Fill Format/EQ/Device labels; called on open, track change, device change
+     _reset_idle_timer()       L10018 Reset OLED overlay idle countdown
+     _on_idle_timeout()        L10028 Fire overlay when idle threshold reached
+     init_from_config()        L10283 Apply saved config dict to all sub-widgets
+     config_state()            L10410 Collect current state → config dict
+     _precompute_bars()        L10440 Freq→bin map + bar geometry + cap offset arrays (vectorised)
+     paintEvent()              L10884 Fully vectorised numpy pixel-buffer rendering
                                       fill mode uses precomputed _line_bin_i/f tables — no per-frame alloc
                                       line+fill px_fill cached by (bg,bar) key — not recomputed per frame
 
  MAIN WINDOW
-   MainWindow                  L10838 QMainWindow: layout, signals, config I/O
-     _build_ui()               L10878 Construct widget tree
-     _connect_signals()        L10958 Wire all cross-widget signals
-     _refresh_all_theme_widgets() L11120 Async theme switch + overlay
-     _edit_tags()              L11284 Tag-edit dialog + mutagen write-back
-     _on_switch_to_pipewire()  L11774 Sync player + combobox when user switches sink
-     _on_alsa_retry()          L11786 Re-attempt playback on same ALSA device
-     _alsa_play()              L11706 High-level play entry: probe-if-needed or direct start
-     _alsa_probe_and_play()    L11792 hw:X,Y × 5 → plughw:X,Y probe with status bar feedback
-                                      Position from _player._last_switch_pos_ms → _load_and_seek
-     _on_output_device_changed() L10979 Triggered on combobox change; sets _alsa_selected_plughw
-     _on_player_error()        L11912 Records ALSA probe error; PipeWire errors → status bar
-     _start_playback()         L11729 Load track + update all UI state
-     _advance()                L11961 Next track (shuffle/repeat logic)
-     _save_config()            L12117 JSON config persistence (skips __open_with__)
-     _handle_open_with()       L12174 Load file-manager / CLI "Open With" track
-     _load_config()            L12245 JSON config restore
-     closeEvent()              L12361 Purge __open_with__ playlist, then save + stop
+   MainWindow                  L11444 QMainWindow: layout, signals, config I/O
+     _build_ui()               L11484 Construct widget tree
+     _connect_signals()        L11564 Wire all cross-widget signals
+     _refresh_all_theme_widgets() L11726 Async theme switch + overlay
+     _edit_tags()              L11890 Tag-edit dialog + mutagen write-back
+     _on_switch_to_pipewire()  L12380 Sync player + combobox when user switches sink
+     _on_alsa_retry()          L12392 Re-attempt playback on same ALSA device
+     _alsa_play()              L12312 High-level play entry: probe-if-needed or direct start
+     _alsa_probe_and_play()    L12398 hw:X,Y × 5 → plughw:X,Y probe with status bar feedback
+     _on_output_device_changed() L11585 Triggered on combobox change; sets _alsa_selected_plughw
+     _on_player_error()        L12518 Records ALSA probe error; PipeWire errors → status bar
+     _start_playback()         L12335 Load track + update all UI state
+     _advance()                L12567 Next track (shuffle/repeat logic)
+     _save_config()            L12723 JSON config persistence (skips __open_with__)
+     _handle_open_with()       L12779 Load file-manager / CLI "Open With" track
+     _load_config()            L12851 JSON config restore
+     closeEvent()              L12967 Purge __open_with__ playlist, then save + stop
 
  ENTRY POINT
-   main()                      L12484
+   main()                      L13132
 ═══════════════════════════════════════════════════════════════════
 """
-import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
+import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, base64, tempfile, subprocess
 import re          as _re
 import html        as _html
 import urllib.request as _urlreq
@@ -279,12 +280,13 @@ SEL  = _DARK['SEL']
 
 def apply_theme(dark: bool) -> None:
     """Switch all palette globals between dark and light, then rebuild stylesheet."""
-    global _DARK_MODE, BG, BG2, BG3, BG4, BORD, B2, FG, FG2, SEL, SS
+    global _DARK_MODE, BG, BG2, BG3, BG4, BORD, B2, FG, FG2, SEL, ACCH, SS
     _DARK_MODE = dark
     pal = _DARK if dark else _LIGHT
     BG = pal['BG']; BG2 = pal['BG2']; BG3 = pal['BG3']; BG4 = pal['BG4']
     BORD = pal['BORD']; B2 = pal['B2']; FG = pal['FG']; FG2 = pal['FG2']
     SEL = pal['SEL']
+    ACCH = make_acch(ACC)   # recompute from current ACC (HSV shift is palette-independent)
     SS = make_stylesheet(ACC, ACCH)
     app = QApplication.instance()
     if app:
@@ -783,7 +785,7 @@ class SliderRow(QWidget):
         self._sl = JumpSlider(Qt.Orientation.Horizontal)
         self._sl.setRange(lo, hi); self._sl.setValue(val)
         self._sl.setSingleStep(step); self._sl.setPageStep(step * 4)
-        self._sl.setFixedHeight(22)
+        self._sl.setFixedHeight(18)
         self._sl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._val_lbl = QLabel(fmt(val)); self._val_lbl.setObjectName('setting_lbl')
         self._val_lbl.setFixedWidth(46)
@@ -845,8 +847,8 @@ class SettingsPopup(QFrame):
 
         # ── Outer root: title + two-column body ──────────────────────────────
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 16)
-        root.setSpacing(6)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(4)
 
         hdr = QLabel('SETTINGS'); hdr.setObjectName('popup_title')
         hdr.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -883,7 +885,7 @@ class SettingsPopup(QFrame):
 
         # ── LEFT COLUMN: OVERLAY + VIEW ───────────────────────────────────────
         left = QVBoxLayout()
-        left.setSpacing(5)
+        left.setSpacing(3)
         left.setAlignment(Qt.AlignmentFlag.AlignTop)
         columns.addLayout(left)
 
@@ -983,28 +985,41 @@ class SettingsPopup(QFrame):
         left.addWidget(_hdivider())
         left.addWidget(_section('AUDIO INFO'))
 
-        def _info_row(label_text):
+        def _info_row(label_text, add_to_layout=True):
             row = QHBoxLayout(); row.setSpacing(4)
+            row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text); lbl.setObjectName('setting_lbl')
-            lbl.setFixedWidth(46)
+            lbl.setFixedWidth(52)
             lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             val = QLabel('—'); val.setObjectName('setting_lbl')
             val.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(lbl); row.addWidget(val, 1)
-            left.addLayout(row)
-            return val
+            if add_to_layout:
+                left.addLayout(row)
+            return val, row
 
-        self._info_fmt  = _info_row('Format')
-        self._info_eq   = _info_row('EQ')
-        self._info_dev  = _info_row('Device')
+        self._info_fmt, _ = _info_row('Format')
+
+        # DSP + Stereo Exp on one row, no DSP label
+        _dsp_stereo_row = QHBoxLayout(); _dsp_stereo_row.setSpacing(4)
+        _dsp_stereo_row.setContentsMargins(0, 0, 0, 0)
+        self._info_eq = QLabel('—'); self._info_eq.setObjectName('setting_lbl')
+        self._info_eq.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._info_stereo = QLabel('—'); self._info_stereo.setObjectName('setting_lbl')
+        self._info_stereo.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        _dsp_stereo_row.addWidget(self._info_eq, 1)
+        _dsp_stereo_row.addWidget(self._info_stereo, 1)
+        left.addLayout(_dsp_stereo_row)
+
+        self._info_dev, _ = _info_row('Device')
 
         # Vertical separator
         columns.addWidget(_vdivider())
 
         # ── RIGHT COLUMN: VISUALIZATION + FETCH + VOLUME ─────────────────────
         right = QVBoxLayout()
-        right.setSpacing(5)
+        right.setSpacing(3)
         right.setAlignment(Qt.AlignmentFlag.AlignTop)
         columns.addLayout(right)
 
@@ -1073,9 +1088,9 @@ class SettingsPopup(QFrame):
         self._btn_rename       = QPushButton('Rename')
         for b in (self._btn_fetch_covers, self._btn_fetch_lyrics,
                   self._btn_fetch_tags, self._btn_rename):
-            b.setMinimumHeight(28); b.setMaximumHeight(36)
+            b.setMinimumHeight(22); b.setMaximumHeight(26)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            b.setStyleSheet('font-size:11px; padding:2px 4px;')
+            b.setStyleSheet('font-size:10px; padding:1px 3px;')
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
         self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
@@ -1130,7 +1145,7 @@ class SettingsPopup(QFrame):
         out_row.addWidget(self._out_dev_combo, 1)   # stretch=1: fills full column width
         right.addLayout(out_row)
 
-        self.setFixedWidth(600)
+        self.setFixedWidth(580)
         self.adjustSize()
 
 
@@ -1235,14 +1250,15 @@ class SettingsPopup(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        cr = _r(11)   # respect global corner-radius percentage
         # Fill background
         p.setBrush(QBrush(QColor(BG)))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def volume(self)     -> int: return self._vol.value()
@@ -1496,11 +1512,12 @@ class DeviceBusyPopup(QFrame):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         p.setBrush(QBrush(QColor(BG)))
+        cr = _r(11)   # respect global corner-radius percentage
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def show_error(self, gst_error: str) -> None:
@@ -3159,6 +3176,9 @@ class TouchComboBox(QComboBox):
 # ══════════════════════════════════════════════════════════════════════════════
 class EqPopup(QFrame):
     eq_changed = pyqtSignal(list, bool)   # bands, enabled
+    limiter_changed     = pyqtSignal(bool)
+    stereo_changed      = pyqtSignal(bool)
+    stereo_width_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3194,28 +3214,26 @@ class EqPopup(QFrame):
 
     def _build_ui(self):
         main = QVBoxLayout(self)
-        main.setContentsMargins(16, 10, 16, 12)
-        main.setSpacing(7)
+        main.setContentsMargins(12, 8, 12, 10)
+        main.setSpacing(4)
 
         hdr = QLabel('PARAMETRIC EQ'); hdr.setObjectName('popup_title')
         main.addWidget(hdr)
 
         # Profile management
         prof_layout = QHBoxLayout()
-        prof_label = QLabel('Profile:')
-        prof_layout.addWidget(prof_label)
 
         self._NEW = '＋ New'   # sentinel — always first item
         self._profile_combo = TouchComboBox()
         self._profile_combo.setEditable(True)
-        self._profile_combo.setMinimumWidth(150)
+        self._profile_combo.setMinimumWidth(110)
         self._profile_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._profile_combo.setCompleter(None)   # no autocomplete / no filter while typing
         if self._profile_combo.lineEdit():
             le = self._profile_combo.lineEdit()
             le.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
             le.setPlaceholderText('Profile name…')
-        # Force item height via the popup list viewf
+        # Force item height via the popup list view
         combo_view = self._profile_combo.view()
         if combo_view:
             combo_view.setUniformItemSizes(True)
@@ -3225,25 +3243,64 @@ class EqPopup(QFrame):
         self._profile_combo.activated.connect(self._on_profile_activated)
         prof_layout.addWidget(self._profile_combo)
 
+        # Buttons sized to match the combo box height (min-height:30px from QComboBox style)
+        _btn_ss = ('QPushButton { font-size:10px; padding:2px 7px;'
+                   ' min-height:30px; max-height:30px; }')
         self._btn_save = QPushButton('Save')
+        self._btn_save.setStyleSheet(_btn_ss)
         self._btn_save.clicked.connect(self._save_profile)
         self._btn_del = QPushButton('Delete')
+        self._btn_del.setStyleSheet(_btn_ss)
         self._btn_del.clicked.connect(self._delete_profile)
+        self._btn_default = QPushButton('Set Default')
+        self._btn_default.setStyleSheet(_btn_ss)
+        self._btn_default.clicked.connect(self._set_as_default)
         prof_layout.addWidget(self._btn_save)
         prof_layout.addWidget(self._btn_del)
+        prof_layout.addWidget(self._btn_default)
         self._enable_sw = ToggleSwitch('EQ')
         self._enable_sw.setChecked(True)
         self._enable_sw.toggled.connect(self._on_enable_toggled)
         prof_layout.addWidget(self._enable_sw)
-        self._btn_default = QPushButton('Set Default')
-        self._btn_default.clicked.connect(self._set_as_default)
-        prof_layout.addWidget(self._btn_default)
+
+        # ── FX controls: Limiter + Stereo Enhance — inline, right of Set Default ─
+        prof_layout.addSpacing(12)
+
+        self._limiter_sw = ToggleSwitch('Limiter')
+        self._limiter_sw.setChecked(False)
+        self._limiter_sw.setToolTip('Hard brick-wall limiter at –0.9 dBFS\\n(prevents clipping on boosted EQ bands)')
+        self._limiter_sw.toggled.connect(self._on_limiter_toggled)
+        prof_layout.addWidget(self._limiter_sw)
+
+        self._stereo_sw = ToggleSwitch('Stereo Enhance')
+        self._stereo_sw.setChecked(False)
+        self._stereo_sw.setToolTip('Widen the stereo field')
+        self._stereo_sw.toggled.connect(self._on_stereo_toggled)
+        prof_layout.addWidget(self._stereo_sw)
+
+        stereo_lbl = QLabel('Width:')
+        stereo_lbl.setObjectName('setting_lbl')
+        prof_layout.addWidget(stereo_lbl)
+
+        self._stereo_slider = QSlider(Qt.Orientation.Horizontal)
+        self._stereo_slider.setRange(-100, 100)
+        self._stereo_slider.setValue(0)
+        self._stereo_slider.setFixedWidth(160)
+        self._stereo_slider.setToolTip('Stereo width (-100 = mono, 0 = normal, +100 = wide)')
+        self._stereo_slider.valueChanged.connect(self._on_stereo_width_changed)
+        prof_layout.addWidget(self._stereo_slider)
+
+        self._stereo_val_lbl = QLabel('0')
+        self._stereo_val_lbl.setFixedWidth(30)
+        prof_layout.addWidget(self._stereo_val_lbl)
         prof_layout.addStretch()
         main.addLayout(prof_layout)
 
+
+
         # Frequency response graph
         self._graph = EQGraph(self)
-        self._graph.setFixedHeight(200)
+        self._graph.setFixedHeight(160)
         main.addWidget(self._graph)
 
         # Band table
@@ -3258,9 +3315,9 @@ class EqPopup(QFrame):
         self._band_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._band_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._band_table.verticalHeader().setVisible(False)
-        self._band_table.verticalHeader().setDefaultSectionSize(46)
+        self._band_table.verticalHeader().setDefaultSectionSize(38)
         self._band_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._band_table.setMinimumHeight(240)
+        self._band_table.setMinimumHeight(160)
         self._band_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         QScroller.grabGesture(self._band_table.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
         _apply_scroller_properties(self._band_table.viewport(), touch=False)
@@ -3284,15 +3341,16 @@ class EqPopup(QFrame):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cr = _r(11)   # respect global corner-radius percentage
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         # Fill background
         p.setBrush(QBrush(QColor(BG)))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def _on_enable_toggled(self, on):
@@ -3300,7 +3358,6 @@ class EqPopup(QFrame):
         self._graph.set_enabled(on)
         self._apply_timer.stop()   # cancel any pending slider debounce
         self._apply()              # apply immediately — don't wait 300 ms
-
 
     def _add_band(self):
         if len(self._bands) >= MAX_EQ_BANDS:
@@ -3465,6 +3522,43 @@ class EqPopup(QFrame):
     def get_default(self):
         return self._default_bands, self._default_enabled
 
+    def _on_limiter_toggled(self, on: bool):
+        self.limiter_changed.emit(on)
+
+    def _on_stereo_toggled(self, on: bool):
+        self.stereo_changed.emit(on)
+
+    def _on_stereo_width_changed(self, v: int):
+        self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
+        self.stereo_width_changed.emit(v)
+
+    # FX getters
+    def limiter_enabled(self) -> bool:
+        return self._limiter_sw.isChecked()
+
+    def stereo_enabled(self) -> bool:
+        return self._stereo_sw.isChecked()
+
+    def stereo_width(self) -> int:
+        return self._stereo_slider.value()
+
+    # FX setters (used by config restore)
+    def set_limiter_enabled(self, on: bool):
+        self._limiter_sw.blockSignals(True)
+        self._limiter_sw.setChecked(on)
+        self._limiter_sw.blockSignals(False)
+
+    def set_stereo_enabled(self, on: bool):
+        self._stereo_sw.blockSignals(True)
+        self._stereo_sw.setChecked(on)
+        self._stereo_sw.blockSignals(False)
+
+    def set_stereo_width(self, v: int):
+        self._stereo_slider.blockSignals(True)
+        self._stereo_slider.setValue(v)
+        self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
+        self._stereo_slider.blockSignals(False)
+
     def show_above(self, btn: QWidget):
         gpos = btn.mapToGlobal(QPoint(0, 0))
         self.adjustSize()
@@ -3543,43 +3637,13 @@ class EQGraph(QWidget):
         if w < 10 or h < 10:
             return
 
-        # Background
-        p.fillRect(self.rect(), QColor(BG))
-
-        # Draw grid
-        p.setPen(QPen(QColor(BORD), 1))
-        # Horizontal lines (every 2 dB)
-        for db in range(-10, 11, 2):
-            y = h/2 - (db * (h/2) / EQ_GAIN_MAX_GRAPH)
-            if 0 <= y <= h:
-                p.drawLine(0, int(y), w, int(y))
-        # Vertical lines (decades)
-        for decade in range(1, 5):
-            freq = 10**decade  # 10,100,1000,10000
-            x = w * (math.log10(freq) - math.log10(20)) / (math.log10(22000)-math.log10(20))
-            if 0 <= x <= w:
-                p.drawLine(int(x), 0, int(x), h)
-
-        if not self._enabled:
-            # Draw bypass text
-            p.setPen(QColor(FG2))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'EQ disabled')
-            return
-
-        if not self._bands:
-            return
-
-        # Numpy-based curve computation — cache per-widget-size + bands state
-        # to avoid recomputing on every paintEvent when nothing changed.
+        # ── Compute curves first so we can auto-scale the amplitude axis ──────
         cache_key = (w, tuple(tuple(b) for b in self._bands))
         cached = self._eq_graph_cache
-        if cached is None or cached[0] != cache_key:
+        if self._bands and (cached is None or cached[0] != cache_key):
             steps = w
             xs_np = _np.arange(steps, dtype=_np.float32)
-            # Log-spaced frequencies across [20, 22000] Hz
             freqs_np = (20.0 * (22000.0 / 20.0) ** (xs_np / (steps - 1))).astype(_np.float32)
-
-            # Per-band gains: shape (n_bands, steps)
             n_bands = len(self._bands)
             band_gains_np = _np.zeros((n_bands, steps), dtype=_np.float32)
             for idx, (f0, g, q) in enumerate(self._bands):
@@ -3589,16 +3653,82 @@ class EQGraph(QWidget):
                 octave_diff = _np.log2(freqs_np / f0)
                 weight = _np.exp(-(octave_diff / bw) ** 2)
                 band_gains_np[idx] = g * weight
-
             total_gains_np = band_gains_np.sum(axis=0)
             self._eq_graph_cache = (cache_key, xs_np, band_gains_np, total_gains_np)
-        else:
+        elif cached is not None and cached[0] == cache_key:
             _, xs_np, band_gains_np, total_gains_np = cached
+        else:
+            xs_np = band_gains_np = total_gains_np = None
+
+        # ── Auto-scale: find peak absolute gain, snap to next even-dB ceiling ─
+        # Minimum range ±3 dB so the graph never looks absurd on tiny boosts.
+        if total_gains_np is not None:
+            peak = float(max(abs(total_gains_np.max()), abs(total_gains_np.min())))
+        else:
+            peak = 0.0
+        peak = max(peak, 3.0)                          # floor at ±3 dB
+        # Round up to the nearest even number of dB (gives clean 2-dB grid steps)
+        db_range = math.ceil(peak / 2) * 2
+        db_range = min(db_range, int(EQ_GAIN_MAX_GRAPH))  # hard cap at ±10 dB
+
+        # ── Grid step: choose 1 or 2 dB depending on available height ─────────
+        # Aim for roughly 20–30 px per grid line; fall back to 2-dB steps.
+        db_step = 1 if (h / (db_range * 2)) >= 18 else 2
+
+        # ── Background ────────────────────────────────────────────────────────
+        p.fillRect(self.rect(), QColor(BG))
+
+        # ── Horizontal dB grid lines + labels ─────────────────────────────────
+        lbl_font = QFont()
+        lbl_font.setPixelSize(9)
+        p.setFont(lbl_font)
+        fm = QFontMetrics(lbl_font)
+        lbl_h = fm.height()
 
         half_h = h / 2.0
-        scale  = half_h / EQ_GAIN_MAX_GRAPH
+        scale  = half_h / db_range          # pixels per dB
 
-        # Draw each band's curve
+        db_values = list(range(-db_range, db_range + 1, db_step))
+        for db in db_values:
+            y = half_h - db * scale
+            if not (0 <= y <= h):
+                continue
+            is_zero = (db == 0)
+            line_color = QColor(FG2) if is_zero else QColor(BORD)
+            p.setPen(QPen(line_color, 1 if not is_zero else 1))
+            p.drawLine(0, int(y), w, int(y))
+            # Label — skip 0 dB (centre line, obvious), skip labels too close to edges
+            if db != 0 and lbl_h / 2 < y < h - lbl_h / 2:
+                lbl = f'{db:+d}'
+                lbl_w = fm.horizontalAdvance(lbl)
+                # Place label at left edge, vertically centred on the line
+                txt_x = 3
+                txt_y = int(y - lbl_h / 2)
+                # Tiny translucent background pill so text stays readable over curves
+                pad = 2
+                bg_rect = QRect(txt_x - pad, txt_y, lbl_w + pad * 2, lbl_h)
+                p.fillRect(bg_rect, QColor(BG))
+                p.setPen(QColor(FG2))
+                p.drawText(txt_x, txt_y + fm.ascent(), lbl)
+
+        # ── Vertical frequency grid lines ──────────────────────────────────────
+        p.setPen(QPen(QColor(BORD), 1))
+        log_min, log_max = math.log10(20), math.log10(22000)
+        for decade in range(1, 5):
+            freq = 10 ** decade
+            x = w * (math.log10(freq) - log_min) / (log_max - log_min)
+            if 0 <= x <= w:
+                p.drawLine(int(x), 0, int(x), h)
+
+        if not self._enabled:
+            p.setPen(QColor(FG2))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'EQ disabled')
+            return
+
+        if total_gains_np is None:
+            return
+
+        # ── Per-band dashed curves ─────────────────────────────────────────────
         n_bands = len(self._bands)
         for idx in range(n_bands):
             gains = band_gains_np[idx]
@@ -3609,10 +3739,11 @@ class EQGraph(QWidget):
             pen   = QPen(color, 1.5)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - gains * scale))
+            ys_clipped = _np.clip(band_gains_np[idx], -db_range, db_range)
+            p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - ys_clipped * scale))
 
-        # Draw total curve
-        total_clipped = _np.clip(total_gains_np, -EQ_GAIN_MAX_GRAPH, EQ_GAIN_MAX_GRAPH)
+        # ── Total curve ────────────────────────────────────────────────────────
+        total_clipped = _np.clip(total_gains_np, -db_range, db_range)
         p.setPen(QPen(QColor(FG), 2))
         p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - total_clipped * scale))
 
@@ -3655,6 +3786,9 @@ class BlackoutOverlay(QWidget):
 
         # Scale factor (set from SettingsPopup overlay scale slider, 50–200 %)
         self._scale = 1.0
+        # Cached paint colors — rebuilt when ACC changes
+        self._ov_paint_key: str = ''
+        self._ov_colors: dict = {}
 
         # Fade animation (opacity effect on a child container)
         self._container = QWidget(self)
@@ -3832,14 +3966,29 @@ class BlackoutOverlay(QWidget):
             if sc != 1.0: p.restore()
             return
 
-        RED  = QColor(ACC)
-        GREY = QColor(BG3)
-        # Pre-built alpha variants of ACC — avoids per-frame QColor copy+mutate
-        _acc_a55  = QColor(ACC); _acc_a55.setAlpha(55)
-        _acc_a70  = QColor(ACC); _acc_a70.setAlpha(70)
-        _acc_a90  = QColor(ACC); _acc_a90.setAlpha(90)
-        _acc_a200 = QColor(ACC); _acc_a200.setAlpha(200)
-        _acc_a220 = QColor(ACC); _acc_a220.setAlpha(220)
+        # Rebuild paint colors only when ACC or BG3 changes (not every frame)
+        if self._ov_paint_key != (ACC, BG3):
+            _c = QColor(ACC)
+            _g = QColor(BG3)
+            _a55 = QColor(ACC); _a55.setAlpha(55)
+            _a70 = QColor(ACC); _a70.setAlpha(70)
+            _a90 = QColor(ACC); _a90.setAlpha(90)
+            _a200 = QColor(ACC); _a200.setAlpha(200)
+            _a220 = QColor(ACC); _a220.setAlpha(220)
+            self._ov_colors = {
+                'RED': _c, 'GREY': _g,
+                'a55': _a55, 'a70': _a70, 'a90': _a90,
+                'a200': _a200, 'a220': _a220,
+            }
+            self._ov_paint_key = (ACC, BG3)
+        _oc = self._ov_colors
+        RED       = _oc['RED']
+        GREY      = _oc['GREY']
+        _acc_a55  = _oc['a55']
+        _acc_a70  = _oc['a70']
+        _acc_a90  = _oc['a90']
+        _acc_a200 = _oc['a200']
+        _acc_a220 = _oc['a220']
         CENT = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -5878,6 +6027,112 @@ def peaking_coefficients(fs, f0, gain_db, Q):
 
     return (b0, b1, b2, a1, a2)
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Stereo Width Bin — M/S processing via numpy buffer manipulation
+#  PyGObject cannot set GstValueArray (mix-matrix) at runtime, so we
+#  implement the M/S stereo width matrix directly in Python on each audio buffer.
+#
+#  Algorithm (identical to the mix-matrix approach):
+#    w = width / 50.0   (0=mono, 1=unity, 2=max wide)
+#    a = 0.5 * (1 + w)  (on-axis gain)
+#    b = 0.5 * (1 - w)  (cross gain, negative = phase invert for widening)
+#    L_out = a*L + b*R
+#    R_out = b*L + a*R
+# ══════════════════════════════════════════════════════════════════════════════
+class _StereoWidthBin(Gst.Bin):
+    """A Gst.Bin that applies M/S stereo width processing to interleaved F32LE
+    stereo audio using a GStreamer appsrc→appsink pipeline internally.
+
+    Built as a Bin with ghost sink/src pads so it can be dropped into any
+    pipeline chain in place of a regular element.
+    """
+
+    def __init__(self, width: int = 50):
+        super().__init__()
+        self._width = max(-100, min(100, width))
+
+        # We need: audioconvert (to F32LE) → appsink (grab buffers) and
+        # appsrc (push processed buffers) → audioconvert (back to original fmt)
+        # But building a split pipeline inside a Bin is complex.
+        #
+        # Simpler: use a single identity element + GStreamer pad probe to
+        # intercept every buffer, process it in Python, and write it back.
+        self._identity = Gst.ElementFactory.make('identity', 'sw_identity')
+        self._conv_in  = Gst.ElementFactory.make('audioconvert', 'sw_conv_in')
+        self._conv_out = Gst.ElementFactory.make('audioconvert', 'sw_conv_out')
+
+        if not self._identity or not self._conv_in or not self._conv_out:
+            raise RuntimeError('_StereoWidthBin: required elements unavailable')
+
+        for el in (self._conv_in, self._identity, self._conv_out):
+            self.add(el)
+
+        self._conv_in.link_filtered(
+            self._identity,
+            Gst.Caps.from_string('audio/x-raw,format=F32LE,channels=2,layout=interleaved'))
+        self._identity.link(self._conv_out)
+
+        # Ghost pads
+        self.add_pad(Gst.GhostPad.new('sink', self._conv_in.get_static_pad('sink')))
+        self.add_pad(Gst.GhostPad.new('src',  self._conv_out.get_static_pad('src')))
+
+        # Attach buffer probe on identity src pad
+        src_pad = self._identity.get_static_pad('src')
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
+
+    def set_width(self, width: int):
+        self._width = max(-100, min(100, width))
+
+    def _on_buffer(self, pad, info):
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+
+        w = (self._width + 100) / 100.0   # -100→0(mono), 0→1(unity), +100→2(wide)
+        a = float(0.5 * (1.0 + w))
+        b = float(0.5 * (1.0 - w))
+
+        # unity — skip processing entirely
+        if abs(a - 1.0) < 1e-6 and abs(b) < 1e-6:
+            return Gst.PadProbeReturn.OK
+
+        # Read original buffer (may be read-only / shared)
+        result, info_map = buf.map(Gst.MapFlags.READ)
+        if not result:
+            return Gst.PadProbeReturn.OK
+
+        try:
+            arr = _np.frombuffer(bytes(info_map.data), dtype=_np.float32)
+            if arr.size < 2 or arr.size % 2 != 0:
+                return Gst.PadProbeReturn.OK
+
+            stereo = arr.reshape(-1, 2)
+            L = stereo[:, 0].copy()
+            R = stereo[:, 1].copy()
+            out = _np.empty_like(stereo)
+            out[:, 0] = a * L + b * R
+            out[:, 1] = b * L + a * R
+            out_bytes = out.astype(_np.float32).tobytes()
+        finally:
+            buf.unmap(info_map)
+
+        # Allocate a new writable buffer with the processed audio.
+        # Use new_wrapped() so we own the bytes object directly — avoids the
+        # wmap.data slice-assignment limitation (MapInfo.data is not mutable).
+        new_buf = Gst.Buffer.new_wrapped(out_bytes)
+        if new_buf is None:
+            return Gst.PadProbeReturn.OK
+
+        # Copy timing metadata from original buffer
+        new_buf.pts      = buf.pts
+        new_buf.dts      = buf.dts
+        new_buf.duration = buf.duration
+        new_buf.offset   = buf.offset
+
+        info.set_buffer(new_buf)
+        return Gst.PadProbeReturn.OK
+
+
 class Player(QObject):
     sig_pos       = pyqtSignal(int)
     sig_dur       = pyqtSignal(int)
@@ -5888,6 +6143,7 @@ class Player(QObject):
     sig_seek     = pyqtSignal()
     sig_busy      = pyqtSignal(bool)   # True = pipeline reloading; False = done
     sig_fs_changed = pyqtSignal(int)   # emitted when track sample rate changes (main thread)
+    sig_volume_changed = pyqtSignal(int)  # emitted when volume changes programmatically (0–100)
     _sig_drift_gst_ms = pyqtSignal(float, float)  # GLib thread → main thread: (gst_pos_ms, query_wall_t)
     _sig_dur_gst_ms   = pyqtSignal(int)           # GLib thread → main thread: confirmed duration (ms)
 
@@ -5963,6 +6219,14 @@ class Player(QObject):
         self._eq_bands = []               # list of (freq, gain, Q)
         self._eq_filters = []              # list of Gst.Element for each band (size MAX_EQ_BANDS)
         self._current_fs = 48000           # default sample rate, will update from track
+        # Limiter & stereo enhance
+        self._limiter_enabled  = False
+        self._stereo_enabled   = False
+        self._stereo_width     = 0         # -100 to +100; 0=unity, mapped to M/S mix-matrix width factor
+        self._limiter_el       = None      # audiodynamic element ref (updated per load)
+        self._stereo_el        = None      # audioconvert mix-matrix element ref (updated per load)
+        # ALSA auto-volume
+        self._alsa_auto_vol    = True
 
         self._chain, self._out = self._detect_chain()
         print(f'[Player] chain: "{self._chain or "(none)"}" → {self._out}  (pre-config default)')
@@ -6017,7 +6281,8 @@ class Player(QObject):
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
         self._pipe.set_property('uri', Path(filepath).as_uri())
-        self._pipe.set_property('volume', self._volume)
+        self._pipe.set_property('volume', self._effective_volume())
+        self._stream_restore_reset = False  # reset once on first ASYNC_DONE
 
         # Get sample rate from track metadata; emit sig_fs_changed so ControlBar
         # recomputes freq→bin mapping tables with the correct Nyquist frequency.
@@ -6216,7 +6481,7 @@ class Player(QObject):
         self._gst_pos_adv_ms   = -1.0
         self._gst_pos_adv_wt   = -1.0
 
-        if pos_ms > 200 and not silent:
+        if pos_ms > 200:
             self.load(filepath, paused=paused)
             # Mute immediately so the ~400 ms preroll window before the seek
             # fires is completely silent — user never hears the start of the track.
@@ -6229,7 +6494,7 @@ class Player(QObject):
                     # Restore volume only if pipeline is still alive and belongs
                     # to this reload (not superseded by another load()).
                     if self._pipe:
-                        self._pipe.set_property('volume', self._volume)
+                        self._pipe.set_property('volume', self._effective_volume())
                     if not _sil:
                         self.sig_busy.emit(False)
                     self._silent_recovery = False
@@ -6244,7 +6509,7 @@ class Player(QObject):
             def _after_preroll(_sil=silent):
                 self._anchor_from_gst()
                 if self._pipe:
-                    self._pipe.set_property('volume', self._volume)
+                    self._pipe.set_property('volume', self._effective_volume())
                 if not _sil:
                     self.sig_busy.emit(False)
                 self._silent_recovery = False
@@ -6328,14 +6593,14 @@ class Player(QObject):
                     def _finish():
                         self._anchor_from_gst()
                         if self._pipe:
-                            self._pipe.set_property('volume', self._volume)
+                            self._pipe.set_property('volume', self._effective_volume())
                         self._silent_recovery = False
                     QTimer.singleShot(350, _finish)
                 QTimer.singleShot(400, _do_seek_silent)
             else:
                 def _restore_vol_short():
                     if self._pipe:
-                        self._pipe.set_property('volume', self._volume)
+                        self._pipe.set_property('volume', self._effective_volume())
                     self._silent_recovery = False
                 QTimer.singleShot(500, _restore_vol_short)
         finally:
@@ -6403,8 +6668,23 @@ class Player(QObject):
         self.sig_seek.emit()
 
     def set_volume(self, v: float):
+        """Set playback volume. v is 0.0–1.0 (slider 0–100 mapped linearly)."""
         self._volume = max(0.0, min(1.0, v))
-        if self._pipe: self._pipe.set_property('volume', self._volume)
+        if self._pipe:
+            self._pipe.set_property('volume', self._effective_volume())
+
+    def _effective_volume(self) -> float:
+        """Return the volume value to set on the GStreamer playbin volume property.
+
+        playbin volume range is 0.0–10.0 on both backends (1.0 = unity gain).
+        self._volume is 0.0–1.0 (slider 0–100 / 100).
+
+          - PipeWire: pass through as-is (0.0–1.0 = unity, no distortion)
+          - ALSA:     divide by 7.5 (tuned)
+        """
+        if self._alsa_device and self._alsa_device != 'pipewire':
+            return self._volume / 7.5
+        return self._volume
 
     def set_viz_tables(self, ba, bb, bt, col_idx, smooth_entries, inertia,
                        overlay_cb=None):
@@ -6488,6 +6768,40 @@ class Player(QObject):
         self._eq_bands = bands[:MAX_EQ_BANDS]  # truncate if too many
         self._apply_eq_to_filters()
 
+    def set_limiter_enabled(self, enabled: bool):
+        if self._limiter_enabled == enabled:
+            return
+        self._limiter_enabled = enabled
+        if self._pipe:
+            _fb = int(self._pos_anchor_ms)
+            self._resume_with_reload(fallback_ms=_fb)
+
+    def set_stereo_enabled(self, enabled: bool):
+        if self._stereo_enabled == enabled:
+            return
+        self._stereo_enabled = enabled
+        if self._pipe:
+            _fb = int(self._pos_anchor_ms)
+            self._resume_with_reload(fallback_ms=_fb)
+
+    def set_stereo_width(self, width: int):
+        """width: -100 to +100.  0 = unity, -100 = mono, +100 = max wide.
+        Applied live via _StereoWidthBin.set_width() — no pipeline reload needed.
+        """
+        new_width = max(-100, min(100, width))
+        if new_width == self._stereo_width:
+            return
+        self._stereo_width = new_width
+        if self._stereo_el is not None:
+            self._stereo_el.set_width(new_width)
+
+    def _apply_stereo_width_glib(self):
+        """No-op: width is applied live via _StereoWidthBin.set_width()."""
+        return False
+
+    def set_alsa_auto_vol(self, enabled: bool):
+        self._alsa_auto_vol = enabled
+
     def _apply_eq_to_filters(self):
         """Update the properties of existing EQ filter elements (from GLib thread)."""
         if not self._eq_filters:
@@ -6529,8 +6843,14 @@ class Player(QObject):
         (startup restore) the device is stored silently and takes effect on first play."""
         if device_id == self._alsa_device:
             return
+        prev_device = self._alsa_device
         self._alsa_device = device_id
         print(f'[Player] output device -> {device_id}')
+
+        # Re-apply volume with new sink active.
+        if self._pipe:
+            self._pipe.set_property('volume', self._effective_volume())
+
         if self._last_filepath:
             pos_ms = int(self.position_ms())
             self._last_switch_pos_ms      = pos_ms         # consumed by ALSA probe
@@ -6570,13 +6890,85 @@ class Player(QObject):
         return self._out  # PipeWire (or autoaudiosink fallback)
 
     def _make_sink_bin(self):
-        """Create a bin containing EQ (if any) and sink.
+        """Create a bin containing EQ (if any), limiter (optional),
+           stereo enhancer (optional), and sink.
            The spectrum element is wired separately as audio-filter (pre-volume) in load().
            Returns (bin, list_of_eq_filter_elements)."""
         elements = []
         eq_bin, eq_filters = self._create_eq_bin()
         if eq_bin:
             elements.append(eq_bin)
+
+        # Limiter via audiodynamic (hard-limit mode, ratio=∞ approximated by 100)
+        self._limiter_el = None
+        if self._limiter_enabled:
+            lim = Gst.ElementFactory.find('audiodynamic')
+            if lim:
+                lim_el = Gst.ElementFactory.make('audiodynamic', 'limiter')
+                if lim_el:
+                    # audiodynamic enums are integers: mode 0=compressor 1=expander;
+                    # characteristics 0=hard-knee 1=soft-knee
+                    lim_el.set_property('mode', 0)             # compressor
+                    lim_el.set_property('characteristics', 0)  # hard-knee
+                    lim_el.set_property('ratio', 0.0)          # ratio=0.0 → ∞:1 hard limiter
+                    lim_el.set_property('threshold', 0.9)      # 0.9 ≈ −0.9 dBFS ceiling
+                    self._limiter_el = lim_el
+                    # wrap in a passthrough bin so caps are preserved
+                    lim_bin = Gst.Bin.new('limiter_bin')
+                    conv_in  = Gst.ElementFactory.make('audioconvert', 'lim_conv_in')
+                    conv_out = Gst.ElementFactory.make('audioconvert', 'lim_conv_out')
+                    lim_bin.add(conv_in); lim_bin.add(lim_el); lim_bin.add(conv_out)
+                    conv_in.link(lim_el); lim_el.link(conv_out)
+                    lim_bin.add_pad(Gst.GhostPad.new('sink', conv_in.get_static_pad('sink')))
+                    lim_bin.add_pad(Gst.GhostPad.new('src',  conv_out.get_static_pad('src')))
+                    elements.append(lim_bin)
+            else:
+                print('[Player] audiodynamic not found — limiter unavailable')
+
+        # Stereo width via M/S (mid-side) processing using volume elements.
+        # PyGObject cannot set GstValueArray properties at runtime, and
+        # parse_bin_from_description also rejects mix-matrix strings.
+        # Instead we implement M/S width purely with volume gain elements:
+        #
+        #   mid  = (L+R) — the mono/centre content
+        #   side = (L-R) — the stereo/difference content
+        #
+        # width < 50 (w<1): reduce side → narrower image
+        # width = 50 (w=1): unity, no change
+        # width > 50 (w>1): boost side → wider image (Poweramp-style)
+        #
+        # Implementation: audiopanorama in "matrix" method with panorama=0
+        # cannot do this directly.  We use a volume element whose gain is
+        # (w-1) on a difference signal — but that needs a tee/adder graph
+        # which parse_bin_from_description cannot do either.
+        #
+        # Simplest working approach with available elements:
+        # rgvolume has pre-amp + fallback-gain but not L/R independent.
+        #
+        # Final working approach: use a custom GStreamer pipeline with
+        # audiomixer + tee to implement the M/S matrix entirely via
+        # volume gains and channel-wise operations:
+        #
+        #   L' = mid_gain*L + mid_gain*R + side_gain*L - side_gain*R
+        #      = (mid_gain + side_gain)*L + (mid_gain - side_gain)*R
+        #   where mid_gain = 0.5, side_gain = 0.5*w
+        #   → a = mid_gain + side_gain = 0.5*(1+w)   [same as before]
+        #     b = mid_gain - side_gain = 0.5*(1-w)
+        #
+        # The only way to apply this without mix-matrix is a stereopan
+        # element that doesn't exist, or a custom element.
+        # Since all GStreamer property-based approaches fail for this,
+        # we implement it using a Python GStreamer BaseTransform element
+        # that processes audio buffers directly with numpy.
+        self._stereo_el = None
+        if self._stereo_enabled:
+            try:
+                st_bin = _StereoWidthBin(self._stereo_width)
+                self._stereo_el = st_bin
+                elements.append(st_bin)
+                print(f'[Player] stereo width bin OK (w={self._stereo_width})')
+            except Exception as e:
+                print(f'[Player] stereo width bin failed: {e}')
 
         try:
             sink = Gst.parse_bin_from_description(self._active_sink_desc(), True)
@@ -6912,6 +7304,29 @@ class Player(QObject):
 
     def _on_msg(self, _bus, msg):
         if msg.type == Gst.MessageType.ASYNC_DONE:
+            # On PipeWire, stream-restore may have saved a stale volume for this
+            # application and will silently override playbin's volume on stream open.
+            # Reset the sink-input volume to 100% once per pipeline so the slider
+            # is always in control.
+            if (not getattr(self, '_stream_restore_reset', True)
+                    and self._alsa_device == 'pipewire'):
+                self._stream_restore_reset = True
+                def _reset_stream_vol():
+                    try:
+                        out = subprocess.check_output(
+                            ['pactl', 'list', 'sink-inputs', 'short'],
+                            stderr=subprocess.DEVNULL)
+                        pid = str(os.getpid()).encode()
+                        for line in out.splitlines():
+                            if pid in line:
+                                idx = line.split()[0].decode()
+                                subprocess.run(
+                                    ['pactl', 'set-sink-input-volume', idx, '100%'],
+                                    stderr=subprocess.DEVNULL)
+                                break
+                    except Exception:
+                        pass
+                threading.Thread(target=_reset_stream_vol, daemon=True).start()
             # Preroll complete.  If load() was called with paused=True we started
             # PLAYING to avoid blocking the main thread on PipeWire node acquisition.
             # Now that the pipeline is prerolled, drop to PAUSED safely — this
@@ -9450,6 +9865,13 @@ class ControlBar(QFrame):
         if self._eq_popup is None:
             pop = EqPopup()
             pop.eq_changed.connect(self._on_eq_changed)
+            pop.limiter_changed.connect(self._player.set_limiter_enabled)
+            pop.stereo_changed.connect(self._player.set_stereo_enabled)
+            pop.stereo_width_changed.connect(self._player.set_stereo_width)
+            # Auto-save on FX changes
+            for sig in (pop.limiter_changed, pop.stereo_changed,
+                        pop.stereo_width_changed):
+                sig.connect(lambda *_: self.settings_changed.emit())
             self._eq_popup = pop
         return self._eq_popup
 
@@ -9461,6 +9883,10 @@ class ControlBar(QFrame):
             pop._hide_timestamp_ms = 0
             return
         pop.set_bands(self._player._eq_bands, self._player._eq_enabled)
+        # Sync FX switches from player state (in case they changed without UI)
+        pop.set_limiter_enabled(self._player._limiter_enabled)
+        pop.set_stereo_enabled(self._player._stereo_enabled)
+        pop.set_stereo_width(self._player._stereo_width)
         if pop.isVisible():
             pop.hide()
         else:
@@ -9511,6 +9937,8 @@ class ControlBar(QFrame):
             pop.radius_changed.connect(self._on_radius_change)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            # Sync volume slider when Player changes volume programmatically (e.g. ALSA auto-vol)
+            self._player.sig_volume_changed.connect(pop.set_volume)
             # Notify MainWindow to run the ALSA probe when the device changes.
             # Must be connected here (lazy popup creation) — MainWindow's __init__
             # guard `if _settings_popup is not None` always fails at startup.
@@ -9567,32 +9995,35 @@ class ControlBar(QFrame):
             fmt_str = '—'
         pop._info_fmt.setText(fmt_str)
 
-        # ── EQ ────────────────────────────────────────────────────────────────
-        eq_pop = self._eq_popup  # may be None if EQ popup was never opened
+        # ── DSP (EQ + Limiter + Stereo, separated by |) ────────────────
+        eq_pop = self._eq_popup
         eq_profile = getattr(eq_pop, '_current_profile', '') if eq_pop is not None else ''
-        if self._player._eq_enabled and self._player._eq_bands:
-            bands_str = f'{len(self._player._eq_bands)} bands'
+        dsp_parts = []
+        if self._player._eq_enabled:
+            bands_str = f'{len(self._player._eq_bands)}b' if self._player._eq_bands else ''
+            eq_str = f'EQ({bands_str})' if bands_str else 'EQ'
             if eq_profile:
-                pop._info_eq.setText(f'On  ·  {eq_profile}  ({bands_str})')
-            else:
-                pop._info_eq.setText(f'On  ({bands_str})')
-        elif self._player._eq_enabled:
-            if eq_profile:
-                pop._info_eq.setText(f'On  ·  {eq_profile}')
-            else:
-                pop._info_eq.setText('On')
-        else:
-            pop._info_eq.setText('Off')
+                eq_str += f' · {eq_profile}'
+            dsp_parts.append(eq_str)
+        if self._player._limiter_enabled:
+            dsp_parts.append('Lim')
+        # Stereo Expand — added to dsp_parts so | separates everything
+        if self._player._stereo_enabled:
+            width = self._player._stereo_width
+            width_str = f'+{width}' if width > 0 else str(width)
+            dsp_parts.append(f'Exp · {width_str}')
+        dsp_text = ' | '.join(dsp_parts) if dsp_parts else 'Off'
+        pop._info_eq.setText(dsp_text)
+        pop._info_stereo.setText('')   # now shown inside _info_eq
 
-        # ── Output / Device ───────────────────────────────────────────────────
+        # ── Output / Device ──────────────────────────────────────────
         dev = self._player._alsa_device
         if not dev or dev == 'pipewire':
             pop._info_dev.setText('PipeWire')
         else:
-            # Show human name from combo + the raw ALSA device string
             idx = pop._out_dev_combo.findData(dev)
             if idx >= 0:
-                pop._info_dev.setText(f'{pop._out_dev_combo.itemText(idx)}  ({dev})')
+                pop._info_dev.setText(pop._out_dev_combo.itemText(idx))
             else:
                 pop._info_dev.setText(dev)
 
@@ -10009,6 +10440,19 @@ class ControlBar(QFrame):
         self._player.set_eq_enabled(default_enabled)
         self._player.set_eq_bands(default_bands)
 
+        # Limiter, stereo enhance, ALSA auto-volume
+        _lim  = cfg.get('limiter_enabled', False)
+        _ste  = cfg.get('stereo_enabled',  False)
+        _stw  = int(float(cfg.get('stereo_width', 50)))
+        _aav  = cfg.get('alsa_auto_vol',   True)
+        eq_pop.set_limiter_enabled(_lim)
+        eq_pop.set_stereo_enabled(_ste)
+        eq_pop.set_stereo_width(_stw)
+        self._player._limiter_enabled = _lim
+        self._player._stereo_enabled  = _ste
+        self._player._stereo_width    = _stw
+        self._player._alsa_auto_vol   = _aav
+
     def _apply_view_settings(self, mode: str, list_scale: int, gallery_scale: int):
         """Emit view signals so MainWindow can propagate to all pages."""
         pop = self._ensure_settings_popup()
@@ -10044,6 +10488,10 @@ class ControlBar(QFrame):
         cfg['default_eq_bands'] = default_bands
         cfg['default_eq_enabled'] = default_enabled
         cfg['default_eq_profile'] = eq_pop.get_default_name()
+        cfg['limiter_enabled']    = eq_pop.limiter_enabled()
+        cfg['stereo_enabled']     = eq_pop.stereo_enabled()
+        cfg['stereo_width']       = eq_pop.stereo_width()
+        cfg['alsa_auto_vol']      = self._player._alsa_auto_vol
         return cfg
 
     def _precompute_bars(self):
@@ -12021,7 +12469,7 @@ class MainWindow(QMainWindow):
                 def _after_seek():
                     if not self._player.has_pipe:
                         return
-                    self._player._pipe.set_property('volume', self._player._volume)
+                    self._player._pipe.set_property('volume', self._player._effective_volume())
                     if not _probe_was_playing and self._player.playing:
                         self._player.play_pause()
                     self._ctrlbar.set_play_icon(self._player.playing)
