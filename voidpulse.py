@@ -6077,8 +6077,8 @@ class _StereoWidthBin(Gst.Bin):
         self.add_pad(Gst.GhostPad.new('src',  self._conv_out.get_static_pad('src')))
 
         # Attach buffer probe on identity src pad
-        src_pad = self._identity.get_static_pad('src')
-        src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
+        self._src_pad  = self._identity.get_static_pad('src')
+        self._probe_id = self._src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
 
     def set_width(self, width: int):
         self._width = max(-100, min(100, width))
@@ -6096,16 +6096,14 @@ class _StereoWidthBin(Gst.Bin):
         if abs(a - 1.0) < 1e-6 and abs(b) < 1e-6:
             return Gst.PadProbeReturn.OK
 
-        # Read original buffer (may be read-only / shared)
-        result, info_map = buf.map(Gst.MapFlags.READ)
+        # Read original samples
+        result, rmap = buf.map(Gst.MapFlags.READ)
         if not result:
             return Gst.PadProbeReturn.OK
-
         try:
-            arr = _np.frombuffer(bytes(info_map.data), dtype=_np.float32)
+            arr = _np.frombuffer(bytes(rmap.data), dtype=_np.float32)
             if arr.size < 2 or arr.size % 2 != 0:
                 return Gst.PadProbeReturn.OK
-
             stereo = arr.reshape(-1, 2)
             L = stereo[:, 0].copy()
             R = stereo[:, 1].copy()
@@ -6114,23 +6112,24 @@ class _StereoWidthBin(Gst.Bin):
             out[:, 1] = b * L + a * R
             out_bytes = out.astype(_np.float32).tobytes()
         finally:
-            buf.unmap(info_map)
+            buf.unmap(rmap)
 
-        # Allocate a new writable buffer with the processed audio.
-        # Use new_wrapped() so we own the bytes object directly — avoids the
-        # wmap.data slice-assignment limitation (MapInfo.data is not mutable).
+        # Build a new writable buffer with processed audio.
+        # Timing metadata is copied from the original buffer.
+        # We remove the probe before pushing so pad.push() doesn't re-trigger
+        # this callback (recursion), then re-add it immediately after.
         new_buf = Gst.Buffer.new_wrapped(out_bytes)
         if new_buf is None:
             return Gst.PadProbeReturn.OK
-
-        # Copy timing metadata from original buffer
         new_buf.pts      = buf.pts
         new_buf.dts      = buf.dts
         new_buf.duration = buf.duration
         new_buf.offset   = buf.offset
 
-        info.set_buffer(new_buf)
-        return Gst.PadProbeReturn.OK
+        self._src_pad.remove_probe(self._probe_id)
+        pad.push(new_buf)
+        self._probe_id = self._src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
+        return Gst.PadProbeReturn.DROP
 
 
 class Player(QObject):
