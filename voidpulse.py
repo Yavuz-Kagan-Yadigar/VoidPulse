@@ -216,9 +216,7 @@ MPRIS2 D-Bus  ·  Bit-perfect audio  ·  OLED blackout overlay
    main()                      L12484
 ═══════════════════════════════════════════════════════════════════
 """
-import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile
-if "/usr/lib/python3/dist-packages" not in sys.path:
-    sys.path.insert(0, "/usr/lib/python3/dist-packages")
+import sys, os, json, threading, enum, random, math, hashlib, bisect, gc as _gc, shutil, base64, tempfile, subprocess
 import re          as _re
 import html        as _html
 import urllib.request as _urlreq
@@ -785,7 +783,7 @@ class SliderRow(QWidget):
         self._sl = JumpSlider(Qt.Orientation.Horizontal)
         self._sl.setRange(lo, hi); self._sl.setValue(val)
         self._sl.setSingleStep(step); self._sl.setPageStep(step * 4)
-        self._sl.setFixedHeight(22)
+        self._sl.setFixedHeight(18)
         self._sl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._val_lbl = QLabel(fmt(val)); self._val_lbl.setObjectName('setting_lbl')
         self._val_lbl.setFixedWidth(46)
@@ -847,8 +845,8 @@ class SettingsPopup(QFrame):
 
         # ── Outer root: title + two-column body ──────────────────────────────
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 16)
-        root.setSpacing(6)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(4)
 
         hdr = QLabel('SETTINGS'); hdr.setObjectName('popup_title')
         hdr.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -885,7 +883,7 @@ class SettingsPopup(QFrame):
 
         # ── LEFT COLUMN: OVERLAY + VIEW ───────────────────────────────────────
         left = QVBoxLayout()
-        left.setSpacing(5)
+        left.setSpacing(3)
         left.setAlignment(Qt.AlignmentFlag.AlignTop)
         columns.addLayout(left)
 
@@ -985,28 +983,41 @@ class SettingsPopup(QFrame):
         left.addWidget(_hdivider())
         left.addWidget(_section('AUDIO INFO'))
 
-        def _info_row(label_text):
+        def _info_row(label_text, add_to_layout=True):
             row = QHBoxLayout(); row.setSpacing(4)
+            row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text); lbl.setObjectName('setting_lbl')
-            lbl.setFixedWidth(46)
+            lbl.setFixedWidth(52)
             lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             val = QLabel('—'); val.setObjectName('setting_lbl')
             val.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             val.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(lbl); row.addWidget(val, 1)
-            left.addLayout(row)
-            return val
+            if add_to_layout:
+                left.addLayout(row)
+            return val, row
 
-        self._info_fmt  = _info_row('Format')
-        self._info_eq   = _info_row('EQ')
-        self._info_dev  = _info_row('Device')
+        self._info_fmt, _ = _info_row('Format')
+
+        # DSP + Stereo Exp on one row, no DSP label
+        _dsp_stereo_row = QHBoxLayout(); _dsp_stereo_row.setSpacing(4)
+        _dsp_stereo_row.setContentsMargins(0, 0, 0, 0)
+        self._info_eq = QLabel('—'); self._info_eq.setObjectName('setting_lbl')
+        self._info_eq.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._info_stereo = QLabel('—'); self._info_stereo.setObjectName('setting_lbl')
+        self._info_stereo.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        _dsp_stereo_row.addWidget(self._info_eq, 1)
+        _dsp_stereo_row.addWidget(self._info_stereo, 1)
+        left.addLayout(_dsp_stereo_row)
+
+        self._info_dev, _ = _info_row('Device')
 
         # Vertical separator
         columns.addWidget(_vdivider())
 
         # ── RIGHT COLUMN: VISUALIZATION + FETCH + VOLUME ─────────────────────
         right = QVBoxLayout()
-        right.setSpacing(5)
+        right.setSpacing(3)
         right.setAlignment(Qt.AlignmentFlag.AlignTop)
         columns.addLayout(right)
 
@@ -1033,14 +1044,12 @@ class SettingsPopup(QFrame):
         self._viz_type_combo.addItem('Fill')
         self._viz_type_combo.addItem('Line')
         self._viz_type_combo.addItem('Line+Fill')
-        self._viz_type_combo.addItem('Fourier Notes')
         self._viz_type_combo.setStyleSheet(self._viz_combo_ss())
         self._viz_type_combo.currentTextChanged.connect(
             lambda t: self.viz_type_changed.emit(
-                'bars'          if t == 'Bars'          else
-                'fill'          if t == 'Fill'          else
-                'line+fill'     if t == 'Line+Fill'     else
-                'fourier_notes' if t == 'Fourier Notes' else
+                'bars' if t == 'Bars' else
+                'fill' if t == 'Fill' else
+                'line+fill' if t == 'Line+Fill' else
                 'line'))
         viz_type_row.addWidget(viz_type_lbl)
         viz_type_row.addWidget(self._viz_type_combo, 1)
@@ -1077,9 +1086,9 @@ class SettingsPopup(QFrame):
         self._btn_rename       = QPushButton('Rename')
         for b in (self._btn_fetch_covers, self._btn_fetch_lyrics,
                   self._btn_fetch_tags, self._btn_rename):
-            b.setMinimumHeight(28); b.setMaximumHeight(36)
+            b.setMinimumHeight(22); b.setMaximumHeight(26)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            b.setStyleSheet('font-size:11px; padding:2px 4px;')
+            b.setStyleSheet('font-size:10px; padding:1px 3px;')
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
         self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
@@ -1134,7 +1143,7 @@ class SettingsPopup(QFrame):
         out_row.addWidget(self._out_dev_combo, 1)   # stretch=1: fills full column width
         right.addLayout(out_row)
 
-        self.setFixedWidth(600)
+        self.setFixedWidth(580)
         self.adjustSize()
 
 
@@ -1239,14 +1248,15 @@ class SettingsPopup(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        cr = _r(11)   # respect global corner-radius percentage
         # Fill background
         p.setBrush(QBrush(QColor(BG)))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def volume(self)     -> int: return self._vol.value()
@@ -1277,14 +1287,12 @@ class SettingsPopup(QFrame):
     def set_log(self, v):    self._log_sw.setChecked(v)
     def viz_type(self)   -> str:
         t = self._viz_type_combo.currentText()
-        return ('bars'          if t == 'Bars'          else
-                'fill'          if t == 'Fill'          else
-                'line+fill'     if t == 'Line+Fill'     else
-                'fourier_notes' if t == 'Fourier Notes' else
+        return ('bars' if t == 'Bars' else
+                'fill' if t == 'Fill' else
+                'line+fill' if t == 'Line+Fill' else
                 'line')
     def set_viz_type(self, v: str):
-        mapping = {'bars': 'Bars', 'fill': 'Fill', 'line': 'Line', 'line+fill': 'Line+Fill',
-                   'fourier_notes': 'Fourier Notes'}
+        mapping = {'bars': 'Bars', 'fill': 'Fill', 'line': 'Line', 'line+fill': 'Line+Fill'}
         self._viz_type_combo.setCurrentText(mapping.get(v, 'Bars'))
     def dark_mode_on(self) -> bool: return not self._theme_sw.isChecked()
     def set_dark_mode(self, dark: bool):
@@ -1502,11 +1510,12 @@ class DeviceBusyPopup(QFrame):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         p.setBrush(QBrush(QColor(BG)))
+        cr = _r(11)   # respect global corner-radius percentage
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def show_error(self, gst_error: str) -> None:
@@ -3165,6 +3174,9 @@ class TouchComboBox(QComboBox):
 # ══════════════════════════════════════════════════════════════════════════════
 class EqPopup(QFrame):
     eq_changed = pyqtSignal(list, bool)   # bands, enabled
+    limiter_changed     = pyqtSignal(bool)
+    stereo_changed      = pyqtSignal(bool)
+    stereo_width_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3200,28 +3212,26 @@ class EqPopup(QFrame):
 
     def _build_ui(self):
         main = QVBoxLayout(self)
-        main.setContentsMargins(16, 10, 16, 12)
-        main.setSpacing(7)
+        main.setContentsMargins(12, 8, 12, 10)
+        main.setSpacing(4)
 
         hdr = QLabel('PARAMETRIC EQ'); hdr.setObjectName('popup_title')
         main.addWidget(hdr)
 
         # Profile management
         prof_layout = QHBoxLayout()
-        prof_label = QLabel('Profile:')
-        prof_layout.addWidget(prof_label)
 
         self._NEW = '＋ New'   # sentinel — always first item
         self._profile_combo = TouchComboBox()
         self._profile_combo.setEditable(True)
-        self._profile_combo.setMinimumWidth(150)
+        self._profile_combo.setMinimumWidth(110)
         self._profile_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._profile_combo.setCompleter(None)   # no autocomplete / no filter while typing
         if self._profile_combo.lineEdit():
             le = self._profile_combo.lineEdit()
             le.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
             le.setPlaceholderText('Profile name…')
-        # Force item height via the popup list viewf
+        # Force item height via the popup list view
         combo_view = self._profile_combo.view()
         if combo_view:
             combo_view.setUniformItemSizes(True)
@@ -3231,25 +3241,64 @@ class EqPopup(QFrame):
         self._profile_combo.activated.connect(self._on_profile_activated)
         prof_layout.addWidget(self._profile_combo)
 
+        # Buttons sized to match the combo box height (min-height:30px from QComboBox style)
+        _btn_ss = ('QPushButton { font-size:10px; padding:2px 7px;'
+                   ' min-height:30px; max-height:30px; }')
         self._btn_save = QPushButton('Save')
+        self._btn_save.setStyleSheet(_btn_ss)
         self._btn_save.clicked.connect(self._save_profile)
         self._btn_del = QPushButton('Delete')
+        self._btn_del.setStyleSheet(_btn_ss)
         self._btn_del.clicked.connect(self._delete_profile)
+        self._btn_default = QPushButton('Set Default')
+        self._btn_default.setStyleSheet(_btn_ss)
+        self._btn_default.clicked.connect(self._set_as_default)
         prof_layout.addWidget(self._btn_save)
         prof_layout.addWidget(self._btn_del)
+        prof_layout.addWidget(self._btn_default)
         self._enable_sw = ToggleSwitch('EQ')
         self._enable_sw.setChecked(True)
         self._enable_sw.toggled.connect(self._on_enable_toggled)
         prof_layout.addWidget(self._enable_sw)
-        self._btn_default = QPushButton('Set Default')
-        self._btn_default.clicked.connect(self._set_as_default)
-        prof_layout.addWidget(self._btn_default)
+
+        # ── FX controls: Limiter + Stereo Enhance — inline, right of Set Default ─
+        prof_layout.addSpacing(12)
+
+        self._limiter_sw = ToggleSwitch('Limiter')
+        self._limiter_sw.setChecked(False)
+        self._limiter_sw.setToolTip('Hard brick-wall limiter at –0.9 dBFS\\n(prevents clipping on boosted EQ bands)')
+        self._limiter_sw.toggled.connect(self._on_limiter_toggled)
+        prof_layout.addWidget(self._limiter_sw)
+
+        self._stereo_sw = ToggleSwitch('Stereo Enhance')
+        self._stereo_sw.setChecked(False)
+        self._stereo_sw.setToolTip('Widen the stereo field')
+        self._stereo_sw.toggled.connect(self._on_stereo_toggled)
+        prof_layout.addWidget(self._stereo_sw)
+
+        stereo_lbl = QLabel('Width:')
+        stereo_lbl.setObjectName('setting_lbl')
+        prof_layout.addWidget(stereo_lbl)
+
+        self._stereo_slider = QSlider(Qt.Orientation.Horizontal)
+        self._stereo_slider.setRange(-100, 100)
+        self._stereo_slider.setValue(0)
+        self._stereo_slider.setFixedWidth(160)
+        self._stereo_slider.setToolTip('Stereo width (-100 = mono, 0 = normal, +100 = wide)')
+        self._stereo_slider.valueChanged.connect(self._on_stereo_width_changed)
+        prof_layout.addWidget(self._stereo_slider)
+
+        self._stereo_val_lbl = QLabel('0')
+        self._stereo_val_lbl.setFixedWidth(30)
+        prof_layout.addWidget(self._stereo_val_lbl)
         prof_layout.addStretch()
         main.addLayout(prof_layout)
 
+
+
         # Frequency response graph
         self._graph = EQGraph(self)
-        self._graph.setFixedHeight(200)
+        self._graph.setFixedHeight(160)
         main.addWidget(self._graph)
 
         # Band table
@@ -3264,9 +3313,9 @@ class EqPopup(QFrame):
         self._band_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._band_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._band_table.verticalHeader().setVisible(False)
-        self._band_table.verticalHeader().setDefaultSectionSize(46)
+        self._band_table.verticalHeader().setDefaultSectionSize(38)
         self._band_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._band_table.setMinimumHeight(240)
+        self._band_table.setMinimumHeight(160)
         self._band_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         QScroller.grabGesture(self._band_table.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
         _apply_scroller_properties(self._band_table.viewport(), touch=False)
@@ -3286,19 +3335,19 @@ class EqPopup(QFrame):
         self.setFixedWidth(960)
         self.setMinimumHeight(640)
         self.adjustSize()
-
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cr = _r(11)   # respect global corner-radius percentage
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         # Fill background
         p.setBrush(QBrush(QColor(BG)))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
-        p.drawRoundedRect(r, 11, 11)
+        p.drawRoundedRect(r, cr, cr)
         p.end()
 
     def _on_enable_toggled(self, on):
@@ -3471,6 +3520,43 @@ class EqPopup(QFrame):
     def get_default(self):
         return self._default_bands, self._default_enabled
 
+    def _on_limiter_toggled(self, on: bool):
+        self.limiter_changed.emit(on)
+
+    def _on_stereo_toggled(self, on: bool):
+        self.stereo_changed.emit(on)
+
+    def _on_stereo_width_changed(self, v: int):
+        self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
+        self.stereo_width_changed.emit(v)
+
+    # FX getters
+    def limiter_enabled(self) -> bool:
+        return self._limiter_sw.isChecked()
+
+    def stereo_enabled(self) -> bool:
+        return self._stereo_sw.isChecked()
+
+    def stereo_width(self) -> int:
+        return self._stereo_slider.value()
+
+    # FX setters (used by config restore)
+    def set_limiter_enabled(self, on: bool):
+        self._limiter_sw.blockSignals(True)
+        self._limiter_sw.setChecked(on)
+        self._limiter_sw.blockSignals(False)
+
+    def set_stereo_enabled(self, on: bool):
+        self._stereo_sw.blockSignals(True)
+        self._stereo_sw.setChecked(on)
+        self._stereo_sw.blockSignals(False)
+
+    def set_stereo_width(self, v: int):
+        self._stereo_slider.blockSignals(True)
+        self._stereo_slider.setValue(v)
+        self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
+        self._stereo_slider.blockSignals(False)
+
     def show_above(self, btn: QWidget):
         gpos = btn.mapToGlobal(QPoint(0, 0))
         self.adjustSize()
@@ -3549,43 +3635,13 @@ class EQGraph(QWidget):
         if w < 10 or h < 10:
             return
 
-        # Background
-        p.fillRect(self.rect(), QColor(BG))
-
-        # Draw grid
-        p.setPen(QPen(QColor(BORD), 1))
-        # Horizontal lines (every 2 dB)
-        for db in range(-10, 11, 2):
-            y = h/2 - (db * (h/2) / EQ_GAIN_MAX_GRAPH)
-            if 0 <= y <= h:
-                p.drawLine(0, int(y), w, int(y))
-        # Vertical lines (decades)
-        for decade in range(1, 5):
-            freq = 10**decade  # 10,100,1000,10000
-            x = w * (math.log10(freq) - math.log10(20)) / (math.log10(22000)-math.log10(20))
-            if 0 <= x <= w:
-                p.drawLine(int(x), 0, int(x), h)
-
-        if not self._enabled:
-            # Draw bypass text
-            p.setPen(QColor(FG2))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'EQ disabled')
-            return
-
-        if not self._bands:
-            return
-
-        # Numpy-based curve computation — cache per-widget-size + bands state
-        # to avoid recomputing on every paintEvent when nothing changed.
+        # ── Compute curves first so we can auto-scale the amplitude axis ──────
         cache_key = (w, tuple(tuple(b) for b in self._bands))
         cached = self._eq_graph_cache
-        if cached is None or cached[0] != cache_key:
+        if self._bands and (cached is None or cached[0] != cache_key):
             steps = w
             xs_np = _np.arange(steps, dtype=_np.float32)
-            # Log-spaced frequencies across [20, 22000] Hz
             freqs_np = (20.0 * (22000.0 / 20.0) ** (xs_np / (steps - 1))).astype(_np.float32)
-
-            # Per-band gains: shape (n_bands, steps)
             n_bands = len(self._bands)
             band_gains_np = _np.zeros((n_bands, steps), dtype=_np.float32)
             for idx, (f0, g, q) in enumerate(self._bands):
@@ -3595,16 +3651,83 @@ class EQGraph(QWidget):
                 octave_diff = _np.log2(freqs_np / f0)
                 weight = _np.exp(-(octave_diff / bw) ** 2)
                 band_gains_np[idx] = g * weight
-
             total_gains_np = band_gains_np.sum(axis=0)
             self._eq_graph_cache = (cache_key, xs_np, band_gains_np, total_gains_np)
-        else:
+        elif cached is not None and cached[0] == cache_key:
             _, xs_np, band_gains_np, total_gains_np = cached
+        else:
+            xs_np = band_gains_np = total_gains_np = None
+
+        # ── Auto-scale: find peak absolute gain, snap to next even-dB ceiling ─
+        # Minimum range ±3 dB so the graph never looks absurd on tiny boosts.
+        if total_gains_np is not None:
+            peak = float(max(abs(total_gains_np.max()), abs(total_gains_np.min())))
+        else:
+            peak = 0.0
+        peak = max(peak, 3.0)                          # floor at ±3 dB
+        # Round up to the nearest even number of dB (gives clean 2-dB grid steps)
+        db_range = math.ceil(peak / 2) * 2
+        db_range = min(db_range, int(EQ_GAIN_MAX_GRAPH))  # hard cap at ±10 dB
+
+        # ── Grid step: choose 1 or 2 dB depending on available height ─────────
+        # Aim for roughly 20–30 px per grid line; fall back to 2-dB steps.
+        db_step = 1 if (h / (db_range * 2)) >= 18 else 2
+
+        # ── Background ────────────────────────────────────────────────────────
+        p.fillRect(self.rect(), QColor(BG))
+
+        # ── Horizontal dB grid lines + labels ─────────────────────────────────
+        lbl_font = QFont()
+        lbl_font.setPixelSize(9)
+        p.setFont(lbl_font)
+        fm = QFontMetrics(lbl_font)
+        lbl_h = fm.height()
 
         half_h = h / 2.0
-        scale  = half_h / EQ_GAIN_MAX_GRAPH
+        scale  = half_h / db_range          # pixels per dB
 
-        # Draw each band's curve
+        db_values = list(range(-db_range, db_range + 1, db_step))
+        for db in db_values:
+            y = half_h - db * scale
+            if not (0 <= y <= h):
+                continue
+            is_zero = (db == 0)
+            line_color = QColor(FG2) if is_zero else QColor(BORD)
+            p.setPen(QPen(line_color, 1 if not is_zero else 1))
+            p.drawLine(0, int(y), w, int(y))
+            # Label — skip 0 dB (centre line, obvious), skip labels too close to edges
+            if db != 0 and lbl_h / 2 < y < h - lbl_h / 2:
+                lbl = f'{db:+d}'
+                lbl_w = fm.horizontalAdvance(lbl)
+                # Place label at left edge, vertically centred on the line
+                txt_x = 3
+                txt_y = int(y - lbl_h / 2)
+                # Tiny translucent background pill so text stays readable over curves
+                pad = 2
+                bg_rect = QRect(txt_x - pad, txt_y, lbl_w + pad * 2, lbl_h)
+                p.fillRect(bg_rect, QColor(BG if is_zero else BG))
+                p.setPen(QColor(FG2))
+                p.drawText(txt_x, txt_y + fm.ascent(), lbl)
+
+        # ── Vertical frequency grid lines ──────────────────────────────────────
+        p.setPen(QPen(QColor(BORD), 1))
+        freq_labels = {100: '100', 1000: '1k', 10000: '10k'}
+        log_min, log_max = math.log10(20), math.log10(22000)
+        for decade in range(1, 5):
+            freq = 10 ** decade
+            x = w * (math.log10(freq) - log_min) / (log_max - log_min)
+            if 0 <= x <= w:
+                p.drawLine(int(x), 0, int(x), h)
+
+        if not self._enabled:
+            p.setPen(QColor(FG2))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'EQ disabled')
+            return
+
+        if total_gains_np is None:
+            return
+
+        # ── Per-band dashed curves ─────────────────────────────────────────────
         n_bands = len(self._bands)
         for idx in range(n_bands):
             gains = band_gains_np[idx]
@@ -3615,10 +3738,11 @@ class EQGraph(QWidget):
             pen   = QPen(color, 1.5)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - gains * scale))
+            ys_clipped = _np.clip(band_gains_np[idx], -db_range, db_range)
+            p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - ys_clipped * scale))
 
-        # Draw total curve
-        total_clipped = _np.clip(total_gains_np, -EQ_GAIN_MAX_GRAPH, EQ_GAIN_MAX_GRAPH)
+        # ── Total curve ────────────────────────────────────────────────────────
+        total_clipped = _np.clip(total_gains_np, -db_range, db_range)
         p.setPen(QPen(QColor(FG), 2))
         p.drawPolyline(_np_to_qpolygonf(xs_np, half_h - total_clipped * scale))
 
@@ -5884,6 +6008,112 @@ def peaking_coefficients(fs, f0, gain_db, Q):
 
     return (b0, b1, b2, a1, a2)
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Stereo Width Bin — M/S processing via numpy buffer manipulation
+#  PyGObject cannot set GstValueArray (mix-matrix) at runtime, so we
+#  implement the M/S stereo width matrix directly in Python on each audio buffer.
+#
+#  Algorithm (identical to the mix-matrix approach):
+#    w = width / 50.0   (0=mono, 1=unity, 2=max wide)
+#    a = 0.5 * (1 + w)  (on-axis gain)
+#    b = 0.5 * (1 - w)  (cross gain, negative = phase invert for widening)
+#    L_out = a*L + b*R
+#    R_out = b*L + a*R
+# ══════════════════════════════════════════════════════════════════════════════
+class _StereoWidthBin(Gst.Bin):
+    """A Gst.Bin that applies M/S stereo width processing to interleaved F32LE
+    stereo audio using a GStreamer appsrc→appsink pipeline internally.
+
+    Built as a Bin with ghost sink/src pads so it can be dropped into any
+    pipeline chain in place of a regular element.
+    """
+
+    def __init__(self, width: int = 50):
+        super().__init__()
+        self._width = max(-100, min(100, width))
+
+        # We need: audioconvert (to F32LE) → appsink (grab buffers) and
+        # appsrc (push processed buffers) → audioconvert (back to original fmt)
+        # But building a split pipeline inside a Bin is complex.
+        #
+        # Simpler: use a single identity element + GStreamer pad probe to
+        # intercept every buffer, process it in Python, and write it back.
+        self._identity = Gst.ElementFactory.make('identity', 'sw_identity')
+        self._conv_in  = Gst.ElementFactory.make('audioconvert', 'sw_conv_in')
+        self._conv_out = Gst.ElementFactory.make('audioconvert', 'sw_conv_out')
+
+        if not self._identity or not self._conv_in or not self._conv_out:
+            raise RuntimeError('_StereoWidthBin: required elements unavailable')
+
+        for el in (self._conv_in, self._identity, self._conv_out):
+            self.add(el)
+
+        self._conv_in.link_filtered(
+            self._identity,
+            Gst.Caps.from_string('audio/x-raw,format=F32LE,channels=2,layout=interleaved'))
+        self._identity.link(self._conv_out)
+
+        # Ghost pads
+        self.add_pad(Gst.GhostPad.new('sink', self._conv_in.get_static_pad('sink')))
+        self.add_pad(Gst.GhostPad.new('src',  self._conv_out.get_static_pad('src')))
+
+        # Attach buffer probe on identity src pad
+        src_pad = self._identity.get_static_pad('src')
+        src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_buffer)
+
+    def set_width(self, width: int):
+        self._width = max(-100, min(100, width))
+
+    def _on_buffer(self, pad, info):
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+
+        w = (self._width + 100) / 100.0   # -100→0(mono), 0→1(unity), +100→2(wide)
+        a = float(0.5 * (1.0 + w))
+        b = float(0.5 * (1.0 - w))
+
+        # unity — skip processing entirely
+        if abs(a - 1.0) < 1e-6 and abs(b) < 1e-6:
+            return Gst.PadProbeReturn.OK
+
+        # Read original buffer (may be read-only / shared)
+        result, info_map = buf.map(Gst.MapFlags.READ)
+        if not result:
+            return Gst.PadProbeReturn.OK
+
+        try:
+            arr = _np.frombuffer(bytes(info_map.data), dtype=_np.float32)
+            if arr.size < 2 or arr.size % 2 != 0:
+                return Gst.PadProbeReturn.OK
+
+            stereo = arr.reshape(-1, 2)
+            L = stereo[:, 0].copy()
+            R = stereo[:, 1].copy()
+            out = _np.empty_like(stereo)
+            out[:, 0] = a * L + b * R
+            out[:, 1] = b * L + a * R
+            out_bytes = out.astype(_np.float32).tobytes()
+        finally:
+            buf.unmap(info_map)
+
+        # Allocate a new writable buffer with the processed audio.
+        # Use new_wrapped() so we own the bytes object directly — avoids the
+        # wmap.data slice-assignment limitation (MapInfo.data is not mutable).
+        new_buf = Gst.Buffer.new_wrapped(out_bytes)
+        if new_buf is None:
+            return Gst.PadProbeReturn.OK
+
+        # Copy timing metadata from original buffer
+        new_buf.pts      = buf.pts
+        new_buf.dts      = buf.dts
+        new_buf.duration = buf.duration
+        new_buf.offset   = buf.offset
+
+        info.set_buffer(new_buf)
+        return Gst.PadProbeReturn.OK
+
+
 class Player(QObject):
     sig_pos       = pyqtSignal(int)
     sig_dur       = pyqtSignal(int)
@@ -5894,6 +6124,7 @@ class Player(QObject):
     sig_seek     = pyqtSignal()
     sig_busy      = pyqtSignal(bool)   # True = pipeline reloading; False = done
     sig_fs_changed = pyqtSignal(int)   # emitted when track sample rate changes (main thread)
+    sig_volume_changed = pyqtSignal(int)  # emitted when volume changes programmatically (0–100)
     _sig_drift_gst_ms = pyqtSignal(float, float)  # GLib thread → main thread: (gst_pos_ms, query_wall_t)
     _sig_dur_gst_ms   = pyqtSignal(int)           # GLib thread → main thread: confirmed duration (ms)
 
@@ -5969,6 +6200,14 @@ class Player(QObject):
         self._eq_bands = []               # list of (freq, gain, Q)
         self._eq_filters = []              # list of Gst.Element for each band (size MAX_EQ_BANDS)
         self._current_fs = 48000           # default sample rate, will update from track
+        # Limiter & stereo enhance
+        self._limiter_enabled  = False
+        self._stereo_enabled   = False
+        self._stereo_width     = 0         # -100 to +100; 0=unity, mapped to M/S mix-matrix width factor
+        self._limiter_el       = None      # audiodynamic element ref (updated per load)
+        self._stereo_el        = None      # audioconvert mix-matrix element ref (updated per load)
+        # ALSA auto-volume
+        self._alsa_auto_vol    = True
 
         self._chain, self._out = self._detect_chain()
         print(f'[Player] chain: "{self._chain or "(none)"}" → {self._out}  (pre-config default)')
@@ -6023,7 +6262,8 @@ class Player(QObject):
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
         self._pipe.set_property('uri', Path(filepath).as_uri())
-        self._pipe.set_property('volume', self._volume)
+        self._pipe.set_property('volume', self._effective_volume())
+        self._stream_restore_reset = False  # reset once on first ASYNC_DONE
 
         # Get sample rate from track metadata; emit sig_fs_changed so ControlBar
         # recomputes freq→bin mapping tables with the correct Nyquist frequency.
@@ -6060,12 +6300,11 @@ class Player(QObject):
         # when tracks are switched or focus is lost.
         self._spec_el = None
         if self._has_spec:
-            # Use direct FFT on audio signal with higher resolution for better note detection
             spec_desc = (
                 f'audioconvert ! audio/x-raw,format=F32LE '
                 f'! spectrum name=bp_spec bands={GST_BANDS} '
                 f'threshold={int(MIN_DB)} interval={self._SPEC_INTERVAL_NS} '
-                f'message-magnitude=true message-phase=false'
+                f'post-messages=false message-magnitude=true message-phase=false'
                 f' ! audioconvert'   # passthrough: restore caps flexibility for playsink
             )
             try:
@@ -6223,7 +6462,7 @@ class Player(QObject):
         self._gst_pos_adv_ms   = -1.0
         self._gst_pos_adv_wt   = -1.0
 
-        if pos_ms > 200 and not silent:
+        if pos_ms > 200:
             self.load(filepath, paused=paused)
             # Mute immediately so the ~400 ms preroll window before the seek
             # fires is completely silent — user never hears the start of the track.
@@ -6236,7 +6475,7 @@ class Player(QObject):
                     # Restore volume only if pipeline is still alive and belongs
                     # to this reload (not superseded by another load()).
                     if self._pipe:
-                        self._pipe.set_property('volume', self._volume)
+                        self._pipe.set_property('volume', self._effective_volume())
                     if not _sil:
                         self.sig_busy.emit(False)
                     self._silent_recovery = False
@@ -6251,7 +6490,7 @@ class Player(QObject):
             def _after_preroll(_sil=silent):
                 self._anchor_from_gst()
                 if self._pipe:
-                    self._pipe.set_property('volume', self._volume)
+                    self._pipe.set_property('volume', self._effective_volume())
                 if not _sil:
                     self.sig_busy.emit(False)
                 self._silent_recovery = False
@@ -6335,14 +6574,14 @@ class Player(QObject):
                     def _finish():
                         self._anchor_from_gst()
                         if self._pipe:
-                            self._pipe.set_property('volume', self._volume)
+                            self._pipe.set_property('volume', self._effective_volume())
                         self._silent_recovery = False
                     QTimer.singleShot(350, _finish)
                 QTimer.singleShot(400, _do_seek_silent)
             else:
                 def _restore_vol_short():
                     if self._pipe:
-                        self._pipe.set_property('volume', self._volume)
+                        self._pipe.set_property('volume', self._effective_volume())
                     self._silent_recovery = False
                 QTimer.singleShot(500, _restore_vol_short)
         finally:
@@ -6410,8 +6649,23 @@ class Player(QObject):
         self.sig_seek.emit()
 
     def set_volume(self, v: float):
+        """Set playback volume. v is 0.0–1.0 (slider 0–100 mapped linearly)."""
         self._volume = max(0.0, min(1.0, v))
-        if self._pipe: self._pipe.set_property('volume', self._volume)
+        if self._pipe:
+            self._pipe.set_property('volume', self._effective_volume())
+
+    def _effective_volume(self) -> float:
+        """Return the volume value to set on the GStreamer playbin volume property.
+
+        playbin volume range is 0.0–10.0 on both backends (1.0 = unity gain).
+        self._volume is 0.0–1.0 (slider 0–100 / 100).
+
+          - PipeWire: pass through as-is (0.0–1.0 = unity, no distortion)
+          - ALSA:     divide by 7.5 (tuned)
+        """
+        if self._alsa_device and self._alsa_device != 'pipewire':
+            return self._volume / 7.5
+        return self._volume
 
     def set_viz_tables(self, ba, bb, bt, col_idx, smooth_entries, inertia,
                        overlay_cb=None):
@@ -6495,6 +6749,40 @@ class Player(QObject):
         self._eq_bands = bands[:MAX_EQ_BANDS]  # truncate if too many
         self._apply_eq_to_filters()
 
+    def set_limiter_enabled(self, enabled: bool):
+        if self._limiter_enabled == enabled:
+            return
+        self._limiter_enabled = enabled
+        if self._pipe:
+            _fb = int(self._pos_anchor_ms)
+            self._resume_with_reload(fallback_ms=_fb)
+
+    def set_stereo_enabled(self, enabled: bool):
+        if self._stereo_enabled == enabled:
+            return
+        self._stereo_enabled = enabled
+        if self._pipe:
+            _fb = int(self._pos_anchor_ms)
+            self._resume_with_reload(fallback_ms=_fb)
+
+    def set_stereo_width(self, width: int):
+        """width: -100 to +100.  0 = unity, -100 = mono, +100 = max wide.
+        Applied live via _StereoWidthBin.set_width() — no pipeline reload needed.
+        """
+        new_width = max(-100, min(100, width))
+        if new_width == self._stereo_width:
+            return
+        self._stereo_width = new_width
+        if self._stereo_el is not None:
+            self._stereo_el.set_width(new_width)
+
+    def _apply_stereo_width_glib(self):
+        """No-op: width is applied live via _StereoWidthBin.set_width()."""
+        return False
+
+    def set_alsa_auto_vol(self, enabled: bool):
+        self._alsa_auto_vol = enabled
+
     def _apply_eq_to_filters(self):
         """Update the properties of existing EQ filter elements (from GLib thread)."""
         if not self._eq_filters:
@@ -6536,8 +6824,14 @@ class Player(QObject):
         (startup restore) the device is stored silently and takes effect on first play."""
         if device_id == self._alsa_device:
             return
+        prev_device = self._alsa_device
         self._alsa_device = device_id
         print(f'[Player] output device -> {device_id}')
+
+        # Re-apply volume with new sink active.
+        if self._pipe:
+            self._pipe.set_property('volume', self._effective_volume())
+
         if self._last_filepath:
             pos_ms = int(self.position_ms())
             self._last_switch_pos_ms      = pos_ms         # consumed by ALSA probe
@@ -6577,13 +6871,85 @@ class Player(QObject):
         return self._out  # PipeWire (or autoaudiosink fallback)
 
     def _make_sink_bin(self):
-        """Create a bin containing EQ (if any) and sink.
+        """Create a bin containing EQ (if any), limiter (optional),
+           stereo enhancer (optional), and sink.
            The spectrum element is wired separately as audio-filter (pre-volume) in load().
            Returns (bin, list_of_eq_filter_elements)."""
         elements = []
         eq_bin, eq_filters = self._create_eq_bin()
         if eq_bin:
             elements.append(eq_bin)
+
+        # Limiter via audiodynamic (hard-limit mode, ratio=∞ approximated by 100)
+        self._limiter_el = None
+        if self._limiter_enabled:
+            lim = Gst.ElementFactory.find('audiodynamic')
+            if lim:
+                lim_el = Gst.ElementFactory.make('audiodynamic', 'limiter')
+                if lim_el:
+                    # audiodynamic enums are integers: mode 0=compressor 1=expander;
+                    # characteristics 0=hard-knee 1=soft-knee
+                    lim_el.set_property('mode', 0)             # compressor
+                    lim_el.set_property('characteristics', 0)  # hard-knee
+                    lim_el.set_property('ratio', 0.0)          # ratio=0.0 → ∞:1 hard limiter
+                    lim_el.set_property('threshold', 0.9)      # 0.9 ≈ −0.9 dBFS ceiling
+                    self._limiter_el = lim_el
+                    # wrap in a passthrough bin so caps are preserved
+                    lim_bin = Gst.Bin.new('limiter_bin')
+                    conv_in  = Gst.ElementFactory.make('audioconvert', 'lim_conv_in')
+                    conv_out = Gst.ElementFactory.make('audioconvert', 'lim_conv_out')
+                    lim_bin.add(conv_in); lim_bin.add(lim_el); lim_bin.add(conv_out)
+                    conv_in.link(lim_el); lim_el.link(conv_out)
+                    lim_bin.add_pad(Gst.GhostPad.new('sink', conv_in.get_static_pad('sink')))
+                    lim_bin.add_pad(Gst.GhostPad.new('src',  conv_out.get_static_pad('src')))
+                    elements.append(lim_bin)
+            else:
+                print('[Player] audiodynamic not found — limiter unavailable')
+
+        # Stereo width via M/S (mid-side) processing using volume elements.
+        # PyGObject cannot set GstValueArray properties at runtime, and
+        # parse_bin_from_description also rejects mix-matrix strings.
+        # Instead we implement M/S width purely with volume gain elements:
+        #
+        #   mid  = (L+R) — the mono/centre content
+        #   side = (L-R) — the stereo/difference content
+        #
+        # width < 50 (w<1): reduce side → narrower image
+        # width = 50 (w=1): unity, no change
+        # width > 50 (w>1): boost side → wider image (Poweramp-style)
+        #
+        # Implementation: audiopanorama in "matrix" method with panorama=0
+        # cannot do this directly.  We use a volume element whose gain is
+        # (w-1) on a difference signal — but that needs a tee/adder graph
+        # which parse_bin_from_description cannot do either.
+        #
+        # Simplest working approach with available elements:
+        # rgvolume has pre-amp + fallback-gain but not L/R independent.
+        #
+        # Final working approach: use a custom GStreamer pipeline with
+        # audiomixer + tee to implement the M/S matrix entirely via
+        # volume gains and channel-wise operations:
+        #
+        #   L' = mid_gain*L + mid_gain*R + side_gain*L - side_gain*R
+        #      = (mid_gain + side_gain)*L + (mid_gain - side_gain)*R
+        #   where mid_gain = 0.5, side_gain = 0.5*w
+        #   → a = mid_gain + side_gain = 0.5*(1+w)   [same as before]
+        #     b = mid_gain - side_gain = 0.5*(1-w)
+        #
+        # The only way to apply this without mix-matrix is a stereopan
+        # element that doesn't exist, or a custom element.
+        # Since all GStreamer property-based approaches fail for this,
+        # we implement it using a Python GStreamer BaseTransform element
+        # that processes audio buffers directly with numpy.
+        self._stereo_el = None
+        if self._stereo_enabled:
+            try:
+                st_bin = _StereoWidthBin(self._stereo_width)
+                self._stereo_el = st_bin
+                elements.append(st_bin)
+                print(f'[Player] stereo width bin OK (w={self._stereo_width})')
+            except Exception as e:
+                print(f'[Player] stereo width bin failed: {e}')
 
         try:
             sink = Gst.parse_bin_from_description(self._active_sink_desc(), True)
@@ -6919,6 +7285,29 @@ class Player(QObject):
 
     def _on_msg(self, _bus, msg):
         if msg.type == Gst.MessageType.ASYNC_DONE:
+            # On PipeWire, stream-restore may have saved a stale volume for this
+            # application and will silently override playbin's volume on stream open.
+            # Reset the sink-input volume to 100% once per pipeline so the slider
+            # is always in control.
+            if (not getattr(self, '_stream_restore_reset', True)
+                    and self._alsa_device == 'pipewire'):
+                self._stream_restore_reset = True
+                def _reset_stream_vol():
+                    try:
+                        out = subprocess.check_output(
+                            ['pactl', 'list', 'sink-inputs', 'short'],
+                            stderr=subprocess.DEVNULL)
+                        pid = str(os.getpid()).encode()
+                        for line in out.splitlines():
+                            if pid in line:
+                                idx = line.split()[0].decode()
+                                subprocess.run(
+                                    ['pactl', 'set-sink-input-volume', idx, '100%'],
+                                    stderr=subprocess.DEVNULL)
+                                break
+                    except Exception:
+                        pass
+                threading.Thread(target=_reset_stream_vol, daemon=True).start()
             # Preroll complete.  If load() was called with paused=True we started
             # PLAYING to avoid blocking the main thread on PipeWire node acquisition.
             # Now that the pipeline is prerolled, drop to PAUSED safely — this
@@ -9457,6 +9846,13 @@ class ControlBar(QFrame):
         if self._eq_popup is None:
             pop = EqPopup()
             pop.eq_changed.connect(self._on_eq_changed)
+            pop.limiter_changed.connect(self._player.set_limiter_enabled)
+            pop.stereo_changed.connect(self._player.set_stereo_enabled)
+            pop.stereo_width_changed.connect(self._player.set_stereo_width)
+            # Auto-save on FX changes
+            for sig in (pop.limiter_changed, pop.stereo_changed,
+                        pop.stereo_width_changed):
+                sig.connect(lambda *_: self.settings_changed.emit())
             self._eq_popup = pop
         return self._eq_popup
 
@@ -9468,6 +9864,10 @@ class ControlBar(QFrame):
             pop._hide_timestamp_ms = 0
             return
         pop.set_bands(self._player._eq_bands, self._player._eq_enabled)
+        # Sync FX switches from player state (in case they changed without UI)
+        pop.set_limiter_enabled(self._player._limiter_enabled)
+        pop.set_stereo_enabled(self._player._stereo_enabled)
+        pop.set_stereo_width(self._player._stereo_width)
         if pop.isVisible():
             pop.hide()
         else:
@@ -9518,6 +9918,8 @@ class ControlBar(QFrame):
             pop.radius_changed.connect(self._on_radius_change)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            # Sync volume slider when Player changes volume programmatically (e.g. ALSA auto-vol)
+            self._player.sig_volume_changed.connect(pop.set_volume)
             # Notify MainWindow to run the ALSA probe when the device changes.
             # Must be connected here (lazy popup creation) — MainWindow's __init__
             # guard `if _settings_popup is not None` always fails at startup.
@@ -9574,32 +9976,35 @@ class ControlBar(QFrame):
             fmt_str = '—'
         pop._info_fmt.setText(fmt_str)
 
-        # ── EQ ────────────────────────────────────────────────────────────────
-        eq_pop = self._eq_popup  # may be None if EQ popup was never opened
+        # ── DSP (EQ + Limiter + Stereo, separated by |) ────────────────
+        eq_pop = self._eq_popup
         eq_profile = getattr(eq_pop, '_current_profile', '') if eq_pop is not None else ''
-        if self._player._eq_enabled and self._player._eq_bands:
-            bands_str = f'{len(self._player._eq_bands)} bands'
+        dsp_parts = []
+        if self._player._eq_enabled:
+            bands_str = f'{len(self._player._eq_bands)}b' if self._player._eq_bands else ''
+            eq_str = f'EQ({bands_str})' if bands_str else 'EQ'
             if eq_profile:
-                pop._info_eq.setText(f'On  ·  {eq_profile}  ({bands_str})')
-            else:
-                pop._info_eq.setText(f'On  ({bands_str})')
-        elif self._player._eq_enabled:
-            if eq_profile:
-                pop._info_eq.setText(f'On  ·  {eq_profile}')
-            else:
-                pop._info_eq.setText('On')
-        else:
-            pop._info_eq.setText('Off')
+                eq_str += f' · {eq_profile}'
+            dsp_parts.append(eq_str)
+        if self._player._limiter_enabled:
+            dsp_parts.append('Lim')
+        # Stereo Expand — added to dsp_parts so | separates everything
+        if self._player._stereo_enabled:
+            width = self._player._stereo_width
+            width_str = f'+{width}' if width > 0 else str(width)
+            dsp_parts.append(f'Exp · {width_str}')
+        dsp_text = ' | '.join(dsp_parts) if dsp_parts else 'Off'
+        pop._info_eq.setText(dsp_text)
+        pop._info_stereo.setText('')   # now shown inside _info_eq
 
-        # ── Output / Device ───────────────────────────────────────────────────
+        # ── Output / Device ──────────────────────────────────────────
         dev = self._player._alsa_device
         if not dev or dev == 'pipewire':
             pop._info_dev.setText('PipeWire')
         else:
-            # Show human name from combo + the raw ALSA device string
             idx = pop._out_dev_combo.findData(dev)
             if idx >= 0:
-                pop._info_dev.setText(f'{pop._out_dev_combo.itemText(idx)}  ({dev})')
+                pop._info_dev.setText(pop._out_dev_combo.itemText(idx))
             else:
                 pop._info_dev.setText(dev)
 
@@ -10016,6 +10421,19 @@ class ControlBar(QFrame):
         self._player.set_eq_enabled(default_enabled)
         self._player.set_eq_bands(default_bands)
 
+        # Limiter, stereo enhance, ALSA auto-volume
+        _lim  = cfg.get('limiter_enabled', False)
+        _ste  = cfg.get('stereo_enabled',  False)
+        _stw  = int(float(cfg.get('stereo_width', 50)))
+        _aav  = cfg.get('alsa_auto_vol',   True)
+        eq_pop.set_limiter_enabled(_lim)
+        eq_pop.set_stereo_enabled(_ste)
+        eq_pop.set_stereo_width(_stw)
+        self._player._limiter_enabled = _lim
+        self._player._stereo_enabled  = _ste
+        self._player._stereo_width    = _stw
+        self._player._alsa_auto_vol   = _aav
+
     def _apply_view_settings(self, mode: str, list_scale: int, gallery_scale: int):
         """Emit view signals so MainWindow can propagate to all pages."""
         pop = self._ensure_settings_popup()
@@ -10051,6 +10469,10 @@ class ControlBar(QFrame):
         cfg['default_eq_bands'] = default_bands
         cfg['default_eq_enabled'] = default_enabled
         cfg['default_eq_profile'] = eq_pop.get_default_name()
+        cfg['limiter_enabled']    = eq_pop.limiter_enabled()
+        cfg['stereo_enabled']     = eq_pop.stereo_enabled()
+        cfg['stereo_width']       = eq_pop.stereo_width()
+        cfg['alsa_auto_vol']      = self._player._alsa_auto_vol
         return cfg
 
     def _precompute_bars(self):
@@ -10700,153 +11122,6 @@ class ControlBar(QFrame):
                         buf[y0:y1 + 1, idx + 1] = px_bar
 
                     p.drawImage(0, 0, self._px_qimg)
-                    p.setPen(self._paint_bord_pen)
-                    p.drawLine(0, 0, iw, 0)
-                    p.end()
-                    return
-
-                if self._viz_type == 'fourier_notes':
-                    # ── FOURIER NOTES MODE ─────────────────────────────────────
-                    # Direct FFT analysis: reads RAW magnitude data from spectrum
-                    # Maps each musical note (C2–B7, 72 notes) to its FFT bin,
-                    # draws a bar per note ONLY if amplitude exceeds threshold,
-                    # colored by accent hue with saturation proportional to amplitude.
-                    import math as _math
-
-                    # Musical note → frequency: A4 = 440 Hz, equal temperament
-                    # Note names: index 0 = C
-                    _NOTE_NAMES_EN = ['C', 'C#', 'D', 'D#', 'E', 'F',
-                                      'F#', 'G', 'G#', 'A', 'A#', 'B']
-                    _NOTE_NAMES_TR = ['Do', 'Do#', 'Re', 'Re#', 'Mi', 'Fa',
-                                      'Fa#', 'Sol', 'Sol#', 'La', 'La#', 'Si']
-
-                    # Notes from C2 (MIDI 36) to B7 (MIDI 107) = 72 notes
-                    _MIDI_START = 36
-                    _MIDI_END   = 107
-                    _N_NOTES    = _MIDI_END - _MIDI_START + 1  # 72
-
-                    fs        = getattr(self._player, '_current_fs', 48000)
-                    fft_size  = GST_BANDS * 2  # GStreamer spectrum: bands = fft_size/2
-
-                    # Hz per FFT bin
-                    hz_per_bin = fs / fft_size  # = fs / (2*GST_BANDS)
-
-                    # Get RAW magnitude data directly from player's spectrum buffer
-                    # Use _viz_spec which contains the inertia-smoothed FFT magnitudes
-                    # (_viz_mag_buf gets reset after each frame, so we use the persistent buffer)
-                    spec_buf = getattr(self._player, '_viz_spec', None)
-                    if spec_buf is None:
-                        # Fallback to processed data if spectrum not available
-                        raw_mags = bh
-                    else:
-                        raw_mags = spec_buf
-                    
-                    # Convert raw dB magnitudes to linear [0,1] scale
-                    # MIN_DB = -70.0, so: linear = (mag - MIN_DB) / (-MIN_DB), clipped to [0,1]
-                    mag_linear = _np.clip((raw_mags - MIN_DB) / (-MIN_DB), 0.0, 1.0)
-                    
-                    # For each note: find the exact FFT bin and read RAW magnitude
-                    # No interpolation between bins - use the closest bin only
-                    note_heights = _np.zeros(_N_NOTES, dtype=_np.float32)
-                    
-                    for ni in range(_N_NOTES):
-                        midi  = _MIDI_START + ni
-                        freq  = 440.0 * (2.0 ** ((midi - 69) / 12.0))
-                        bin_f = freq / hz_per_bin
-                        b0    = int(round(bin_f))  # Use closest bin, no interpolation
-                        
-                        if b0 < 0 or b0 >= len(mag_linear):
-                            note_heights[ni] = 0.0
-                        else:
-                            note_heights[ni] = float(mag_linear[b0])
-
-                    # Aggressive peak detection: suppress notes that are not clear local maxima
-                    # A note is "real" only if it stands significantly above ALL neighbors
-                    _PEAK_THRESHOLD_MULT = 1.5  # must be 1.5x higher than neighbors
-                    for ni in range(1, _N_NOTES - 1):
-                        left  = note_heights[ni - 1]
-                        right = note_heights[ni + 1]
-                        center = note_heights[ni]
-                        
-                        # Check if center is a true local maximum
-                        max_neighbor = max(left, right)
-                        if center < max_neighbor * _PEAK_THRESHOLD_MULT:
-                            # Not a clear peak - likely spectral leakage
-                            note_heights[ni] = 0.0
-
-                    # ── Layout ─────────────────────────────────────────────────
-                    label_area = 36     # px at top reserved for note labels
-                    bar_area   = ih - label_area
-                    if bar_area < 4:
-                        bar_area = 4
-                    bar_total_w = iw / _N_NOTES
-                    gap         = max(1.0, bar_total_w * 0.15)
-                    bar_w       = max(1.0, bar_total_w - gap)
-
-                    # Get accent color HSV for saturation-based coloring
-                    acc_qcolor = QColor(ACC)
-                    acc_h, acc_s, acc_v, _ = acc_qcolor.getHsvF()
-                    # Ensure we have valid HSV values
-                    if acc_h < 0: acc_h = 0.0
-                    if acc_s < 0: acc_s = 0.5
-
-                    # Background fill
-                    p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
-
-                    # Minimum amplitude threshold to draw a note bar (reduces false detections)
-                    _AMP_THRESH = 0.15  # Threshold for note detection
-
-                    txt_font = QFont()
-                    txt_font.setPixelSize(max(8, min(13, int(bar_total_w * 1.2))))
-                    txt_font.setWeight(QFont.Weight.Bold)
-                    p.setFont(txt_font)
-
-                    for ni in range(_N_NOTES):
-                        midi      = _MIDI_START + ni
-                        octave    = (midi // 12) - 1        # C2 → oct 2
-                        semitone  = midi % 12
-                        h_norm    = float(note_heights[ni])
-                        
-                        # Skip notes below amplitude threshold (prevents false detections)
-                        if h_norm < _AMP_THRESH:
-                            continue
-                        
-                        # Rescale magnitude for better visual differentiation (0.15-1.0 -> 0.0-1.0)
-                        rescaled_mag = min(1.0, (h_norm - _AMP_THRESH) / (1.0 - _AMP_THRESH))
-                        
-                        bar_h_px  = int(rescaled_mag * bar_area)
-                        if bar_h_px < 1:
-                            continue
-
-                        x0 = ni * bar_total_w + gap * 0.5
-                        y0 = label_area + (bar_area - bar_h_px)
-
-                        # Color: accent hue with saturation proportional to rescaled amplitude
-                        # Higher amplitude = higher saturation (more vivid)
-                        # Lower amplitude = lower saturation (more muted/gray)
-                        # Saturation scales from 0.3 (quiet) to acc_s (loud) for better differentiation
-                        note_sat = 0.3 + (acc_s - 0.3) * rescaled_mag
-                        note_val = acc_v if acc_v > 0 else 0.8
-                        bar_col = QColor()
-                        bar_col.setHsvF(acc_h, max(0.3, min(acc_s, note_sat)), note_val)
-
-                        p.fillRect(QRectF(x0, y0, bar_w, bar_h_px), QBrush(bar_col))
-
-                        # Label: always show if bar is visible and wide enough (no discrete threshold)
-                        if bar_w >= 6:
-                            name_en = _NOTE_NAMES_EN[semitone]
-                            name_tr = _NOTE_NAMES_TR[semitone]
-                            label   = f'{name_tr}\n{name_en}'
-
-                            # Text colour: white on dark BG
-                            p.setPen(QColor(240, 240, 240))
-                            label_rect = QRectF(x0, 0, bar_w, label_area - 2)
-                            p.drawText(label_rect,
-                                       Qt.AlignmentFlag.AlignHCenter |
-                                       Qt.AlignmentFlag.AlignVCenter,
-                                       label)
-
-                    # Border line at top
                     p.setPen(self._paint_bord_pen)
                     p.drawLine(0, 0, iw, 0)
                     p.end()
@@ -12175,7 +12450,7 @@ class MainWindow(QMainWindow):
                 def _after_seek():
                     if not self._player.has_pipe:
                         return
-                    self._player._pipe.set_property('volume', self._player._volume)
+                    self._player._pipe.set_property('volume', self._player._effective_volume())
                     if not _probe_was_playing and self._player.playing:
                         self._player.play_pause()
                     self._ctrlbar.set_play_icon(self._player.playing)
