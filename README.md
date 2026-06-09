@@ -15,7 +15,7 @@ Advanced Music Player for OLED and Touchscreens on Linux
 - Optimized for touch scrolling and hold context menu
 - Toggleable spectrum visualization with custom inertia, multpiple styles and standart logarithmic/linear scale
 - Visualization delay to match timing with bluetooth headphones / DACs
-- Toggleable cover art
+- Toggleable cover art with optional accent colored cover
 - MPRIS2 desktop environment integration
 - Basic tag and lyrics editing
 - M3u8 and folder playlist support
@@ -35,7 +35,10 @@ Disclaimer: Entire code is written by AI, I do not suggest to use as referance c
 
 <img width="464" height="613" alt="2026-05-19_15-15_1" src="https://github.com/user-attachments/assets/a52907f4-c7a6-4ab9-a262-f51c592ca142" /> <img width="668" height="670" alt="2026-05-19_15-16" src="https://github.com/user-attachments/assets/cf6c26e4-e2c1-4308-b337-3148c39fb1d8" />
 
-
+Light mode voilet accent cover:
+<img width="200" height="201" alt="2026-06-09_14-12_1" src="https://github.com/user-attachments/assets/512ed43d-e029-4866-885c-2fc831ec862a" />
+Dark mode red accent cover:
+<img width="200" height="200" alt="2026-06-09_14-12" src="https://github.com/user-attachments/assets/7f2c4fa2-4c6f-451e-a509-30f5c9cd3fbf" />
 
 
 
