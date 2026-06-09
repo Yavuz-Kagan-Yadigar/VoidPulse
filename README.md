@@ -20,6 +20,7 @@ Advanced Music Player for OLED and Touchscreens on Linux
 - Basic tag and lyrics editing
 - M3u8 and folder playlist support
 - Visualization stops when overlay is active or focus lost to reduce CPU usage
+- Ability to use system window decorations or custom OLED friendly one with config
 
 Dependencies (You can use Flatpak from releases for ease of installation->):
 
@@ -27,7 +28,7 @@ Python 3, PyQt6 (PyQt6.QtWidgets, PyQt6.QtCore, PyQt6.QtGui), gobject-introspect
 
 Disclaimer: Entire code is written by AI, I do not suggest to use as referance code. It might have inefficiencies, bugs, vulnabilities. Just sharing in case somebody wantto use it since most of music players does not go well with touchscreen.
 
-<img width="1920" height="1173" alt="2026-05-19_15-10" src="https://github.com/user-attachments/assets/3597a5ef-f3b8-4184-8444-b40df8f188cf" />
+<img width="1920" height="1170" alt="image" src="https://github.com/user-attachments/assets/c3200906-dd61-4cb3-8732-296ac24ae8f6" />
 <img width="1920" height="1169" alt="2026-05-19_15-11" src="https://github.com/user-attachments/assets/6b527098-a242-465b-aec9-4bbc7509bccb" />
 <img width="713" height="377" alt="2026-05-19_15-12" src="https://github.com/user-attachments/assets/38624580-c39c-41c8-9526-94b1da623e28" />
 <img width="611" height="449" alt="2026-05-19_15-14" src="https://github.com/user-attachments/assets/379be352-aa17-4130-8c79-367e412c5712" />
