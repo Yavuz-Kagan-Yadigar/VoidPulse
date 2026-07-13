@@ -432,9 +432,11 @@ class TrackTable(QTableWidget):
         widths[-1] = max(30, widths[-1] + diff)
         hh = self.horizontalHeader()
         hh.sectionResized.disconnect(self._on_section_resized)
-        for col, w in enumerate(widths):
-            self.setColumnWidth(col, w)
-        hh.sectionResized.connect(self._on_section_resized)
+        try:
+            for col, w in enumerate(widths):
+                self.setColumnWidth(col, w)
+        finally:
+            hh.sectionResized.connect(self._on_section_resized)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -643,6 +645,9 @@ class GalleryView(QWidget):
             self._sort_btns[key] = btn
             sbl.addWidget(btn)
         sbl.addStretch()
+        self._count_lbl = QLabel('')
+        self._count_lbl.setStyleSheet(f'color:{FG2}; font-size:11px; background:transparent;')
+        sbl.addWidget(self._count_lbl)
         outer.addWidget(sort_bar)
 
         # ── Canvas inside QScrollArea ─────────────────────────────────────────
@@ -1088,6 +1093,7 @@ class GalleryView(QWidget):
         """Re-apply all palette globals after a dark/light switch."""
         self._sort_bar.setStyleSheet(f'background:{BG2}; border-bottom:1px solid {BORD};')
         self._sort_lbl.setStyleSheet(f'color:{FG2}; font-size:11px; background:transparent;')
+        self._count_lbl.setStyleSheet(f'color:{FG2}; font-size:11px; background:transparent;')
         self._canvas.setStyleSheet(f'background:{BG};')
         self.update_accent()   # refresh sort buttons too
         self._canvas.update()
@@ -1128,7 +1134,7 @@ class GalleryView(QWidget):
             # reflects the new sort order if the user switches to classic view.
             # Do NOT call page.set_tracks() — it would re-run gallery.populate()
             # on an already-sorted gallery, causing a redundant full relayout.
-            page._tracks = list(self._tracks)
+            page._tracks = self._tracks  # already a fresh list from sorted(), no need to copy again
             page._playing_idx = new_playing
             page.table.populate(page._tracks, new_playing)
 
@@ -1179,6 +1185,11 @@ class PlaylistPage(QWidget):
         self._tracks = list(tracks); self._playing_idx = playing_idx
         self.table.populate(self._tracks, playing_idx)
         self.gallery.populate(self._tracks, playing_idx)
+        self.set_track_count(len(self._tracks))
+
+    def set_track_count(self, n: int):
+        """Update the track-count label embedded in the sort bar."""
+        self.gallery._count_lbl.setText(f'{n} tracks' if n != 1 else '1 track')
 
     def set_playing(self, idx):
         self._playing_idx = idx
