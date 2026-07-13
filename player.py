@@ -12,6 +12,8 @@ import re as _re
 import urllib.parse as _urlparse
 from time import monotonic as _monotonic
 import numpy as _np
+
+_DIAG = False  # ponytail: profiling-only prints, flip to True when diagnosing timer drift
 from eq import (
     EQ_TYPE_PEAK, eq_band_coefficients,
 )
@@ -1273,7 +1275,7 @@ class Player(QObject):
         _interval = self._pos_timer.interval()
         if _last >= 0.0:
             _actual_gap_ms = (_t1 - _last) * 1000.0
-            if _actual_gap_ms > _interval + 60:
+            if _DIAG and _actual_gap_ms > _interval + 60:
                 _pt = (_t1 - self._play_start_wt)
                 print(f'[DIAG][tick] play+{_pt:.3f}s  LATE FIRE: expected={_interval}ms actual={_actual_gap_ms:.1f}ms'
                       f'  tick_work={_tick_ms:.2f}ms  pos={pos}ms', flush=True)
@@ -1315,15 +1317,16 @@ class Player(QObject):
                     _query_wt = _monotonic()
                     if ok and p >= 0:
                         _qms = (_query_wt - _t0) * 1000.0
-                        if _qms > 30:
+                        if _DIAG and _qms > 30:
                             _pt = _query_wt - self._play_start_wt
                             print(f'[DIAG][drift_glib] play+{_pt:.3f}s  SLOW query={_qms:.1f}ms', flush=True)
                         self._sig_drift_gst_ms.emit(p / Gst.MSECOND, _query_wt)
         except Exception as _e:
-            print(f'[DIAG][drift_glib] exception: {_e}')
+            if _DIAG:
+                print(f'[DIAG][drift_glib] exception: {_e}')
         finally:
             _total = (_monotonic() - _t0) * 1000.0
-            if _total > 50:
+            if _DIAG and _total > 50:
                 print(f'[DIAG][drift_glib] TOTAL BLOCKED={_total:.1f}ms')
             self._drift_pending = False
         return False
