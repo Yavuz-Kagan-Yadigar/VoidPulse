@@ -5,9 +5,12 @@ cover/theme reload, tag editing orchestration, "Open With" support.
 """
 from constants import *
 
-from constants import ACC, ACCH, BG2, BG3, BG4, BORD, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _lastfm_api_key, _open_audio, _r
+from constants import ACC, ACCH, BG2, BG3, BG4, BORD, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r
+import constants as _const_mod
+from constants import is_system_qt_theme_active, resync_system_qt_theme, is_applying_own_palette, start_qt6ct_live_reload
+from metadata_online import embed_cover_bytes
 from cover_art import (
-    Track, read_metadata, get_cover_pixmap, draw_default_cover,
+    Track, read_metadata, draw_default_cover,
     _ensure_async_cover_loader, _trim_cover_cache,
     _square_pixmap, _COVER_MASTER_SIZE, _cover_disk_key,
     _COVER_JPEG_QUALITY, _cover_disk_write_mtime, _COVER_DISK_DIR,
@@ -19,7 +22,6 @@ from views import TrackTable, PlaylistPage, Sidebar, COLS, C_TIT
 from controlbar import ControlBar, BlackTitleBar, _TB_H
 from lyrics import LyricsPanel
 from dialogs_edit import TagEditDialog
-from fetch_popups import TagFetchPopup, LyricsFetchPopup
 from library import ConfigPlaylistLoader, ScanThread, _recover_rename_temps, _sanitize_filename_part
 from blackout_overlay import BlackoutOverlay
 # SettingsPopup is instantiated lazily inside ControlBar._ensure_settings_popup
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._open_with_path = open_with   # file passed via "Open With" / CLI arg
         self._use_system_decorations = False  # overridden by _load_config if set
+        self._use_system_qt_theme = False     # overridden by _load_config if set
         # Remove native decoration; draw our own black titlebar (default)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -80,15 +83,6 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(0)
-
-        cbar = QWidget(); cbar.setStyleSheet(f'background:{BG2}; border-bottom:1px solid {BORD};')
-        self._cbar_widget = cbar
-        cbar.setFixedHeight(28)
-        cbl = QHBoxLayout(cbar); cbl.setContentsMargins(12,0,12,0)
-        self._count_lbl = QLabel('')
-        self._count_lbl.setStyleSheet(f'color:{FG2}; font-size:11px; background:transparent;')
-        cbl.addStretch(); cbl.addWidget(self._count_lbl)
-        rl.addWidget(cbar)
 
         self._tabs = QTabWidget()
         self._tabs.setTabsClosable(False)   # Tabs are never shown for playlists
@@ -178,7 +172,93 @@ class MainWindow(QMainWindow):
             else:
                 self.show()
 
+    def _on_system_palette_changed(self, new_palette=None):
+        """Fired by QGuiApplication.paletteChanged whenever the platform theme
+        plugin reports a new palette — e.g. the color scheme was switched in
+        qt6ct, KDE System Settings, or any other desktop reachable through
+        xdg-desktop-portal.
+
+        Coalesced, not just debounced: every extra signal within the window
+        restarts the timer instead of being dropped, so a burst of several
+        paletteChanged emissions for one logical theme change (common with
+        some platform themes / portal backends) still only triggers exactly
+        one _refresh_all_theme_widgets() pass — the expensive part (walking
+        every playlist page's widgets). The window is intentionally generous
+        (600ms) since instant reaction isn't a goal here; avoiding redundant
+        refresh passes is. No disk I/O and no polling are involved anywhere
+        in this path — it only runs at all when Qt itself reports a change.
+
+        `new_palette` is the QPalette Qt passes as the signal argument — we
+        must use that directly rather than re-querying
+        QApplication.instance().palette() later, since by the time the
+        debounce timer fires, VoidPulse's own app.setPalette() call (from a
+        previous theme refresh) may already have overwritten it.
+
+        Does nothing unless "use system Qt theme" is currently enabled, and
+        does nothing DE-specific — it only reacts to Qt's own palette signal,
+        so it works the same way under Hyprland+qt6ct, KDE Plasma, or any
+        other portal-backed desktop.
+        """
+        if not is_system_qt_theme_active():
+            return
+        if is_applying_own_palette():
+            # This paletteChanged came from our own app.setPalette() call
+            # inside _apply_app_palette() (Qt fires the signal for ANY
+            # setPalette(), not just external ones) — not a real desktop
+            # theme change. Ignoring it here is what breaks the feedback
+            # loop that otherwise made colors flicker/chase continuously.
+            return
+        if new_palette is not None:
+            self._pending_system_palette = QPalette(new_palette)
+
+        timer = getattr(self, '_palette_resync_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._do_system_palette_resync)
+            self._palette_resync_timer = timer
+        timer.start(600)   # (re)start — coalesces bursts into a single resync
+
+    def _do_system_palette_resync(self):
+        pal = getattr(self, '_pending_system_palette', None)
+        resync_system_qt_theme(pal)
+        self._refresh_theme_no_overlay()
+
+    def _on_qt6ct_file_changed(self):
+        """Called (via QFileSystemWatcher, inotify-backed — no polling) when
+        qt6ct's config or active color-scheme file changes on disk. This
+        covers tools like matugen or wallust-driven Hyprland scripts that
+        rewrite the color-scheme file directly: qt6ct's own platform plugin
+        never re-reads that file once running, so there's no Qt-level
+        paletteChanged to catch here — watching the file ourselves is the
+        only way to react without restarting VoidPulse. Coalesced the same
+        way as the palette-changed path: rapid repeated writes (e.g. an
+        editor's atomic save, or a generator script touching several files
+        in a row) collapse into a single refresh.
+        """
+        if not is_system_qt_theme_active():
+            return
+        timer = getattr(self, '_qt6ct_file_resync_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._do_qt6ct_file_resync)
+            self._qt6ct_file_resync_timer = timer
+        timer.start(600)
+
+    def _do_qt6ct_file_resync(self):
+        # apply_theme() already prefers a freshly-parsed qt6ct color-scheme
+        # file over the QPalette snapshot (see constants.apply_theme) —
+        # nothing else needs to change here.
+        from constants import apply_theme, _DARK_MODE
+        apply_theme(_DARK_MODE)
+        self._refresh_theme_no_overlay()
+
     def _connect_signals(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.paletteChanged.connect(self._on_system_palette_changed)
+        start_qt6ct_live_reload(self._on_qt6ct_file_changed)
         self._sidebar.add_folder_req.connect(self._add_folder_dialog)
         self._sidebar.add_m3u_req.connect(self._import_m3u_dialog)
         self._sidebar.new_playlist_req.connect(self._new_playlist_dialog)
@@ -346,8 +426,8 @@ class MainWindow(QMainWindow):
         # Step 1: critical fast widgets — synchronous, immediately visible
         for lbl in (self._ctrlbar._lbl_title, self._ctrlbar._lbl_artist):
             lbl.setStyleSheet('background:transparent;')
-        self._cbar_widget.setStyleSheet(f'background:{BG2}; border-bottom:1px solid {BORD};')
-        self._count_lbl.setStyleSheet(f'color:{FG2}; font-size:11px; background:transparent;')
+        if self._cur_page is not None:
+            self._cur_page.refresh_theme()
         self._ctrlbar._seek.update_accent(ACC, ACCH)
         self._ctrlbar._on_brightness_change(self._ctrlbar._brightness_v)
         _play_ss = (
@@ -1413,7 +1493,7 @@ class MainWindow(QMainWindow):
     def _update_count(self, page=None):
         if page is None: page = self._tabs.currentWidget()
         if isinstance(page, PlaylistPage):
-            self._count_lbl.setText(f'{len(page.tracks)} tracks')
+            page.set_track_count(len(page.tracks))
 
     # --- Config ---
     def _on_col_widths_changed(self, widths: list, source_page=None):
@@ -1442,8 +1522,9 @@ class MainWindow(QMainWindow):
             cfg = {
                 'lyrics_panel_open':             self._lyrics_panel.isVisible(),
                 'cover_locked_paths':            list(self._cover_locked_paths),
-                'lastfm_api_key':                _lastfm_api_key,
+                'lastfm_api_key':                _const_mod._lastfm_api_key,
                 'use_system_window_decorations': getattr(self, '_use_system_decorations', False),
+                'use_system_qt_theme':           getattr(self, '_use_system_qt_theme', False),
             }
             cfg.update(self._ctrlbar.config_state())
             cfg['playlists'] = [{'label': pl.label, 'tracks': [t.filepath for t in pl.tracks]}
@@ -1580,13 +1661,17 @@ class MainWindow(QMainWindow):
             _cover_locked_set.update(self._cover_locked_paths)
             global _cover_fetch_on
             _cover_fetch_on = data.get('cover_fetch_on', True)
-            global _lastfm_api_key
-            _lastfm_api_key = data.get('lastfm_api_key', '')
+            _const_mod._lastfm_api_key = data.get('lastfm_api_key', '')
+            # Must run before init_from_config() applies dark/light theme, so
+            # apply_theme() picks system-derived colors when this is enabled.
+            self._use_system_qt_theme = data.get('use_system_qt_theme', False)
+            if self._use_system_qt_theme:
+                apply_system_qt_theme(True)
             self._ctrlbar.init_from_config(data)
             # If light mode was restored from config, widget inline stylesheets
             # were baked with dark values during _build_ui. Re-apply now so
             # cbar_widget, play button, seek handle etc. pick up light colours.
-            if not data.get('dark_mode', True):
+            if not data.get('dark_mode', True) or self._use_system_qt_theme:
                 QTimer.singleShot(0, self._refresh_theme_no_overlay)
             # Window decoration mode — applied before showMaximized() so no flicker
             if data.get('use_system_window_decorations', False):
