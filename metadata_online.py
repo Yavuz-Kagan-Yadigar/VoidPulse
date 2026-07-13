@@ -3,7 +3,8 @@ VoidPulse — online metadata: cover art fetching (iTunes/Deezer/MusicBrainz/Las
 tag lookup (MusicBrainz/iTunes/LastFM), and mutagen tag/cover/lyrics writers.
 """
 from constants import *
-from constants import _open_audio, _lastfm_api_key
+from constants import _open_audio
+import constants as _const_mod
 from lyrics import _get, _get_json
 import urllib.request as _urlreq
 import urllib.parse as _urlparse
@@ -58,7 +59,7 @@ def _fetch_cover_musicbrainz(artist: str, album: str) -> Optional[bytes]:
 
 def _fetch_cover_lastfm(artist: str, album: str) -> Optional[bytes]:
     try:
-        key = _lastfm_api_key.strip()
+        key = _const_mod._lastfm_api_key.strip()
         if not key:
             return None
         a = _urlparse.quote(artist); al = _urlparse.quote(album)
@@ -173,7 +174,7 @@ def _lookup_tags_itunes(artist: str, title: str) -> dict:
 def _lookup_tags_lastfm(artist: str, title: str) -> dict:
     """Query Last.fm track.getInfo for metadata."""
     try:
-        key = _lastfm_api_key.strip()
+        key = _const_mod._lastfm_api_key.strip()
         if not key:
             return {}
         a = _urlparse.quote(artist); t = _urlparse.quote(title)
