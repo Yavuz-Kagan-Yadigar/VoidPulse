@@ -5,6 +5,10 @@ LyricsFetcher worker, LyricsPanel display widget.
 """
 from constants import *
 from constants import ACC, B2, BG, BG2, BORD, FG2, _open_audio
+# embed_lyrics is imported lazily inside the function that uses it (below) to
+# avoid a circular import: metadata_online imports _get/_get_json from this
+# module at load time, so importing metadata_online back here at module level
+# fails depending on which module happens to be imported first.
 import re as _re
 import html as _html
 import urllib.request as _urlreq
@@ -568,6 +572,7 @@ class LyricsPanel(QWidget):
         # Embed into file if fetched from network (fetcher flag) and not already embedded
         if fetcher and fetcher.was_online and self._track:
             fp = self._track.filepath
+            from metadata_online import embed_lyrics
             threading.Thread(
                 target=embed_lyrics, args=(fp, synced, plain or ''),
                 daemon=True).start()
