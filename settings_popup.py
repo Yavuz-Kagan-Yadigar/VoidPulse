@@ -5,7 +5,7 @@ from constants import *
 
 from player import Player
 from eq import TouchComboBox
-from constants import ACC, RAD_PCT, _r, apply_theme
+from constants import ACC, RAD_PCT, _r, apply_theme, apply_system_qt_theme
 import constants as _c   # live module reference — paintEvent/refresh_theme read _c.ACC etc.
 import re as _re
 from widgets_base import ToggleSwitch, TriSwitch, JumpSlider, SliderRow, _SpinningOverlay
@@ -181,12 +181,26 @@ class SettingsPopup(QFrame):
         self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True, label_point_size=7)
         self._theme_sw.setChecked(False)
         self._theme_sw.toggled.connect(self._on_theme_toggle)
+        # System Qt theme: when on, colors are sampled from the desktop's
+        # live Qt palette (via qt6ct / xdg-desktop-portal) instead of
+        # VoidPulse's built-in DARK/LIGHT palettes. DE-agnostic — works
+        # under any Qt-aware desktop, not just KDE/Plasma.
+        self._system_theme_sw = ToggleSwitch('', 'SYS', self, muted_labels=True, label_point_size=7)
+        self._system_theme_sw.setChecked(False)
+        self._system_theme_sw.toggled.connect(self._on_system_theme_toggle)
+        self._system_theme_sw.setToolTip(
+            'SYS: follow the desktop\'s live Qt theme (colors, accent, live updates)\n'
+            'Works via qt6ct (Hyprland, or any WM/DE) and xdg-desktop-portal\n'
+            '(KDE Plasma, GNOME, etc.) — updates automatically if you change\n'
+            'the system color scheme while VoidPulse is running.'
+        )
         # 3-position cover switch: 0=no cover · 1=cover · 2=cover+accent
         self._cover_tri = TriSwitch(self)
         self._cover_tri.setState(1)   # default: cover on, no accent
         self._cover_tri.stateChanged.connect(self._on_cover_tri_changed)
         acc_row.addWidget(self._accent_btn)
         acc_row.addWidget(self._theme_sw)
+        acc_row.addWidget(self._system_theme_sw)
         acc_row.addWidget(self._cover_tri)
         left.addLayout(acc_row)
 
@@ -316,7 +330,6 @@ class SettingsPopup(QFrame):
         right.addLayout(action_row)
 
         # VOLUME (bottom of right column)
-        right.addWidget(_hdivider())
         vol_row = QHBoxLayout(); vol_row.setSpacing(6)
         vol_lbl = QLabel('Volume'); vol_lbl.setObjectName('setting_lbl')
         vol_lbl.setFixedWidth(55)
@@ -420,6 +433,28 @@ class SettingsPopup(QFrame):
             overlay.show(); overlay.raise_()
             # Defer work until after the overlay's first paint so it is
             # visible before the (blocking) stylesheet refresh begins.
+            QTimer.singleShot(32, lambda: win._refresh_all_theme_widgets(_overlay=overlay))
+        self.repaint()
+
+    def _on_system_theme_toggle(self, use_system: bool):
+        """Toggle 'derive palette from the system Qt theme' mode.
+
+        When on, DARK/LIGHT is ignored in favour of colors sampled from the
+        live system Qt palette (see constants.apply_system_qt_theme). The
+        DARK/LIGHT switch is disabled while this is active since it has no
+        effect, and re-enabled when system mode is turned back off.
+        """
+        apply_system_qt_theme(use_system)
+        self._theme_sw.setEnabled(not use_system)
+        self._accent_btn.setEnabled(not use_system)
+        self._accent_btn.setToolTip(
+            'Accent is following the system theme (SYS mode) — turn SYS off to pick manually.'
+            if use_system else ''
+        )
+        win = self.window()
+        if win and hasattr(win, '_refresh_all_theme_widgets'):
+            overlay = _SpinningOverlay(win)
+            overlay.show(); overlay.raise_()
             QTimer.singleShot(32, lambda: win._refresh_all_theme_widgets(_overlay=overlay))
         self.repaint()
 
@@ -539,6 +574,17 @@ class SettingsPopup(QFrame):
         self._theme_sw.blockSignals(True)
         self._theme_sw.setChecked(not dark)  # True = light = checked
         self._theme_sw.blockSignals(False)
+    def system_theme_on(self) -> bool: return self._system_theme_sw.isChecked()
+    def set_system_theme(self, use_system: bool):
+        self._system_theme_sw.blockSignals(True)
+        self._system_theme_sw.setChecked(use_system)
+        self._system_theme_sw.blockSignals(False)
+        self._theme_sw.setEnabled(not use_system)
+        self._accent_btn.setEnabled(not use_system)
+        self._accent_btn.setToolTip(
+            'Accent is following the system theme (SYS mode) — turn SYS off to pick manually.'
+            if use_system else ''
+        )
     def overlay_viz_on(self)    -> bool: return self._ov_viz_sw.isChecked()
     def overlay_lyrics_on(self) -> bool: return self._ov_lyrics_sw.isChecked()
     def overlay_clock_on(self)  -> bool: return self._ov_clock_sw.isChecked()
