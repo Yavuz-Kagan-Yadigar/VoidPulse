@@ -3,7 +3,7 @@ VoidPulse — library batch-fetch popups: LibraryTagFetchWorker, TagFetchPopup,
 LibraryLyricsFetchWorker, LyricsFetchPopup.
 """
 from constants import *
-from metadata_online import lookup_tags_online, embed_lyrics
+from metadata_online import lookup_tags_online, embed_lyrics, write_tags_to_file
 from lyrics import _extract_embedded_lyrics, _src_lrclib_exact, _src_lrclib_search, _src_lyrics_ovh
 from cover_art import _BaseFetchPopup
 
@@ -160,18 +160,22 @@ class LyricsFetchPopup(_BaseFetchPopup):
     """Modal dialog that fetches and embeds lyrics for library tracks."""
 
     def __init__(self, tracks: list, parent=None):
-        needs = [t for t in tracks if not any(_extract_embedded_lyrics(t.filepath))]
-        info = (f'<b>{len(needs)}</b> tracks have no embedded lyrics '
-                f'(out of {len(tracks)} total — tracks with embedded lyrics are skipped).')
-        super().__init__(tracks, 'Fetch Lyrics', info, len(needs), parent)
-        self._needs = needs
+        # ponytail: don't scan every track's embedded lyrics on the UI thread here —
+        # on large libraries (thousands of tracks) that's a multi-second freeze, and
+        # the worker thread (run(), below) recomputes the exact same "needs" list
+        # anyway once it starts. Show the total count as a placeholder; the real
+        # needs-count arrives via the progress signal and corrects the bar range
+        # (see _BaseFetchPopup._on_progress).
+        info = (f'Checking <b>{len(tracks)}</b> tracks for missing lyrics…')
+        super().__init__(tracks, 'Fetch Lyrics', info, len(tracks), parent)
+        self._needs = list(tracks)  # placeholder only; not used for worker logic
 
     def _make_worker(self):
         return LibraryLyricsFetchWorker(self._tracks, force=self._force)
 
     def set_tracks(self, tracks: list):
         self._tracks = list(tracks)
-        self._needs  = [t for t in tracks if not any(_extract_embedded_lyrics(t.filepath))]
+        self._needs  = list(tracks)  # placeholder; corrected once the worker reports real total
         self._progress.setRange(0, max(1, len(self._needs)))
 
     def _finished_msg(self, found: int, total: int) -> str:
