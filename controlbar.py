@@ -8,13 +8,12 @@ from constants import *
 from library import RenamePopup
 from fetch_popups import LyricsFetchPopup, TagFetchPopup
 from widgets_base import _ModalOverlay, _SpinningOverlay
-from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_acch, make_stylesheet
+from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
 from time import monotonic as _monotonic
 import numpy as _np
 import gc as _gc
 from eq import EqPopup, _fmt_ms
 from settings_popup import SettingsPopup
-from blackout_overlay import BlackoutOverlay
 from cover_art import CoverFetchPopup, _BaseFetchPopup, _COVER_MASTER_SIZE, _COVER_SENTINEL, draw_default_cover, get_cover_pixmap, _acc_lut_cache, _corner_frame_cache, _cover_cache, _default_cover_mem_cache
 from player import Player, RepeatMode
 from cover_art import Track
@@ -1095,6 +1094,11 @@ class ControlBar(QFrame):
         pop.set_dark_mode(_dark)
         if not _dark:
             apply_theme(dark=False)
+        # System Qt theme override — actual apply_system_qt_theme() call
+        # happens earlier in MainWindow._load_config (before init_from_config)
+        # so palette globals are correct by the time widgets build; here we
+        # just sync the popup's toggle to reflect that state.
+        pop.set_system_theme(cfg.get('use_system_qt_theme', False))
 
         # View mode + scale sliders
         _vm = cfg.get('view_mode', 'classic')
@@ -1202,6 +1206,7 @@ class ControlBar(QFrame):
                     'list_scale': pop.list_scale(),
                     'gallery_scale': pop.gallery_scale(),
                     'dark_mode': pop.dark_mode_on(),
+                    'use_system_qt_theme': pop.system_theme_on(),
                     'viz_type': pop.viz_type(),
                     'corner_radius': pop.radius(),
                     'output_device': pop.output_device()})
@@ -1538,14 +1543,25 @@ class ControlBar(QFrame):
             self._radius_overlay = None
 
     def _on_accent_change(self, color: str):
-        global ACC, ACCH, SS
-        ACC  = color
-        ACCH = make_acch(color)
-        SS   = make_stylesheet(ACC, ACCH)
-        # apply_accent() updates constants.py globals AND broadcasts into every
-        # module namespace — so bare ACC/BG/FG refs in refresh_theme() calls
-        # throughout the codebase all see the new value immediately.
+        # apply_accent() is the single source of truth for whether ACC should
+        # actually change (it no-ops the visible ACC while SYS mode is on,
+        # only remembering the user's pick in _USER_ACC for later). We must
+        # NOT set ACC/ACCH/SS ourselves before calling it — doing so used to
+        # bypass that guard entirely, which made picking any color (or even
+        # just restoring a saved accent_color from config while SYS mode was
+        # on) immediately stomp the system-derived accent, and then every
+        # subsequent theme refresh (which recomputes ACC via apply_theme())
+        # would race against config-restore recalling this method, producing
+        # the "colors keep flipping / following the picker" symptom.
         apply_accent(color)
+        if is_system_qt_theme_active():
+            # ACC didn't actually change (apply_accent() no-op'd it) — skip
+            # the cache clears, disk unlinks, and widget restyling below
+            # entirely. Without this, restoring a saved accent_color from
+            # config while SYS mode is on would still touch disk (unlinking
+            # default_cover_*.jpg, clearing several in-memory caches) for no
+            # visible effect every single startup.
+            return
         self._on_brightness_change(self._brightness_v)
         _cover_cache.clear()
         _corner_frame_cache.clear()
