@@ -5,6 +5,8 @@ LibraryCoverFetchWorker, CoverFetchPopup.
 """
 from constants import *
 from constants import ACC, B2, BG, BG3, CONFIG_PATH, FG, FG2, _DARK_MODE, _apply_scroller_properties, _sanitize_filename_part
+import constants as _const_mod
+from metadata_online import fetch_cover_online, embed_cover_bytes
 import re as _re
 import urllib.request as _urlreq
 import urllib.parse as _urlparse
@@ -348,7 +350,6 @@ def draw_default_cover(size: int) -> QPixmap:
 
 _COVER_DISK_DIR  = CONFIG_PATH.parent / 'covers'
 _cover_fetch_on  = True   # module-level flag — updated by ControlBar
-_lastfm_api_key  = ''    # set from config or fetch popups — never hardcoded
 _cover_locked_set: set = set()   # filepaths that must not auto-fetch
 _COVER_JPEG_QUALITY = 80
 
@@ -773,7 +774,7 @@ class _BaseFetchPopup(QDialog):
         self._lfm_edit.setPlaceholderText('API key (optional)')
         self._lfm_edit.setFixedHeight(22)
         self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._lfm_edit.setText(_lastfm_api_key)
+        self._lfm_edit.setText(_const_mod._lastfm_api_key)
         self._lfm_edit.setStyleSheet(
             f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
             f'border-radius:4px;padding:0 6px;font-size:11px;}}'
@@ -783,7 +784,7 @@ class _BaseFetchPopup(QDialog):
         root.addLayout(lfm_row)
 
         self._lfm_edit.textChanged.connect(self._on_lfm_text_changed)
-        if len(_lastfm_api_key) == 32:
+        if len(_const_mod._lastfm_api_key) == 32:
             self._set_lfm_border(True)
         # ─────────────────────────────────────────────────────────────────────
 
@@ -895,8 +896,7 @@ class _BaseFetchPopup(QDialog):
             ok = result[0]
             self._set_lfm_border(ok)
             if ok:
-                global _lastfm_api_key
-                _lastfm_api_key = key
+                _const_mod._lastfm_api_key = key
 
         QTimer.singleShot(150, _poll)
 
@@ -1049,6 +1049,8 @@ class _BaseFetchPopup(QDialog):
             e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
+        if self._progress.maximum() != max(1, total):
+            self._progress.setRange(0, max(1, total))
         self._progress.setValue(current)
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
         # Store state for background restoration
@@ -1103,7 +1105,7 @@ class _BaseFetchPopup(QDialog):
         msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
         # Find main window and update status bar
         win = self.parent()
-        while win and not isinstance(win, MainWindow):
+        while win and not hasattr(win, '_status'):
             win = win.parent()
         if win and hasattr(win, '_status'):
             # Use unique widget key for this specific worker instance
@@ -1126,7 +1128,7 @@ class _BaseFetchPopup(QDialog):
         widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
         
         win = self.parent()
-        while win and not isinstance(win, MainWindow):
+        while win and not hasattr(win, '_status'):
             win = win.parent()
         if win:
             old_lbl = getattr(win, widget_key, None)
@@ -1189,22 +1191,20 @@ class CoverFetchPopup(_BaseFetchPopup):
     def __init__(self, tracks: list, table_pages: list, ctrlbar, parent=None):
         self._pages   = table_pages
         self._ctrlbar = ctrlbar
-        needs = [t for t in tracks
-                 if extract_cover_bytes(t.filepath) is None
-                 and t.filepath not in _cover_locked_set]
-        info = (f'<b>{len(needs)}</b> tracks need a cover '
-                f'(out of {len(tracks)} total — tracks with embedded covers skipped).')
-        super().__init__(tracks, 'Fetch Covers', info, len(needs), parent)
-        self._needs = needs
+        # ponytail: same fix as LyricsFetchPopup — don't synchronously scan every
+        # track's embedded cover on the UI thread here (extract_cover_bytes does
+        # disk I/O via mutagen). Show total count; worker computes the real
+        # "needs" list and corrects the progress bar range via the progress signal.
+        info = (f'Checking <b>{len(tracks)}</b> tracks for missing covers…')
+        super().__init__(tracks, 'Fetch Covers', info, len(tracks), parent)
+        self._needs = list(tracks)  # placeholder only; not used for worker logic
 
     def _make_worker(self):
         return LibraryCoverFetchWorker(self._tracks, force=self._force)
 
     def set_tracks(self, tracks: list):
         self._tracks = list(tracks)
-        self._needs  = [t for t in tracks
-                        if extract_cover_bytes(t.filepath) is None
-                        and t.filepath not in _cover_locked_set]
+        self._needs  = list(tracks)  # placeholder; corrected once the worker reports real total
         self._progress.setRange(0, max(1, len(self._needs)))
 
     def _finished_msg(self, found: int, total: int) -> str:
