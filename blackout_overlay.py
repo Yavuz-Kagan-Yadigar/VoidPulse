@@ -415,8 +415,12 @@ class BlackoutOverlay(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        # Install event filter on container to intercept paintEvent
-        self._container.installEventFilter(self)
+        # Install once — showEvent fires every time the overlay is shown, and
+        # installing the same filter repeatedly stacks duplicate registrations
+        # (each open would add another, making eventFilter fire N times per event).
+        if not getattr(self, '_container_filter_installed', False):
+            self._container.installEventFilter(self)
+            self._container_filter_installed = True
 
     def eventFilter(self, obj, e):
         if obj is self._container and e.type() == QEvent.Type.Paint:
