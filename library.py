@@ -4,7 +4,7 @@ scan_folder(), parse_m3u(), ScanThread, ConfigPlaylistLoader.
 """
 from constants import *
 from cover_art import Track, _COVER_DISK_DIR, _cover_cache, read_metadata
-from constants import ACC, B2, BG, BG3, FG, FG2, SUPPORTED_EXT
+from constants import ACC, B2, BG, BG3, FG, FG2, SUPPORTED_EXT, _apply_scroller_properties
 import re as _re
 import concurrent.futures as _cf
 
@@ -123,6 +123,12 @@ class LibraryRenameWorker(QObject):
         # Filename size limit constants (hoisted out of loop)
         _MAX_FILENAME_BYTES = 255
         _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
+        # ponytail: reverse-index cover cache keys by filepath once, instead of
+        # scanning the whole _cover_cache dict for every renamed track (was
+        # O(tracks * cache_size); large libraries + batch rename made this slow).
+        _fp_to_sizes: dict = {}
+        for (fp_key, sz_key) in _cover_cache.keys():
+            _fp_to_sizes.setdefault(fp_key, []).append(sz_key)
         for i, t in enumerate(self._tracks):
             if self._cancelled:
                 break
@@ -200,11 +206,10 @@ class LibraryRenameWorker(QObject):
                     # Update in-memory cache keys
                     old_fp_str = str(old_path)
                     new_fp_str = str(candidate)
-                    for (fp_key, sz_key) in list(_cover_cache.keys()):
-                        if fp_key == old_fp_str:
-                            pm = _cover_cache.pop((fp_key, sz_key), None)
-                            if pm is not None:
-                                _cover_cache[(new_fp_str, sz_key)] = pm
+                    for sz_key in _fp_to_sizes.pop(old_fp_str, ()):
+                        pm = _cover_cache.pop((old_fp_str, sz_key), None)
+                        if pm is not None:
+                            _cover_cache[(new_fp_str, sz_key)] = pm
                 except Exception:
                     pass
                 self.track_done.emit(str(old_path), str(candidate), True)
