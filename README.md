@@ -40,7 +40,7 @@ Disclaimer: Entire code is written by AI, I do not suggest to use as referance c
     <td><img src="https://github.com/user-attachments/assets/379be352-aa17-4130-8c79-367e412c5712" width="100%"/></td>
   </tr>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/a9a98bb9-ee92-4df1-8a45-4aee4dc3ebc6" width="100%"/></td>
+    <td><img src="https://github.com/user-attachments/assets/ff8c4d79-4279-44c3-ae48-5bc080412a6c" width="100%"/></td>
     <td><img src="https://github.com/user-attachments/assets/2fd92cda-1acc-4310-a221-d70e9c9b139a" width="100%"/></td>
   </tr>
   <tr>
