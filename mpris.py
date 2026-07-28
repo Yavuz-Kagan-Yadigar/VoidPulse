@@ -57,27 +57,24 @@ class MprisServer(QObject):
         self._reg_ids: list = []
         self._cur_track: Optional[Track] = None
         self._track_serial = 0
-        self._cover_on: bool = True          # mirrors the Settings cover toggle
-        self._art_tmp_path: Optional[str] = None   # last written temp cover file
-        self._cached_art_uri: Optional[str] = None  # built in Qt thread
-        self._pipeline_busy: bool = False    # True while pipeline is reloading
+        self._cover_on: bool = True          # mirrors the cover toggle in Settings
+        self._art_tmp_path: Optional[str] = None
+        self._cached_art_uri: Optional[str] = None  # built on the Qt thread
+        self._pipeline_busy: bool = False
         GLib.idle_add(self._setup)
 
     def set_pipeline_busy(self, busy: bool):
         """Called when a pipeline reload starts/finishes. Disables MPRIS play/pause."""
         self._pipeline_busy = busy
         if busy:
-            # Only hide play/pause capability — don't touch PlaybackStatus so
-            # MPRIS clients (GNOME Shell, KDE) don't remove the player widget.
+            # Only the play/pause capability: changing PlaybackStatus makes some
+            # clients drop the player widget altogether.
             GLib.idle_add(self._emit, ['CanPlay', 'CanPause'])
         else:
-            # Reload done: restore capabilities and sync playback status together.
             GLib.idle_add(self._emit, ['CanPlay', 'CanPause', 'PlaybackStatus'])
 
-    # Called by MainWindow whenever the cover switch is toggled
     def set_cover_on(self, enabled: bool):
         self._cover_on = enabled
-        # Rebuild art URI with new setting (in Qt thread — safe for disk I/O)
         self._cached_art_uri = self._build_art_uri(self._cur_track)
         GLib.idle_add(self._emit, ['Metadata'])
 
@@ -86,14 +83,13 @@ class MprisServer(QObject):
             self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             node = Gio.DBusNodeInfo.new_for_xml(MprisServer._MPRIS_XML)
             for iface in node.interfaces:
-                # Try new API first (PyGObject >= 3.51), fallback to old API
+                # register_object_with_closures needs PyGObject 3.51+
                 if hasattr(self._conn, 'register_object_with_closures'):
                     rid = self._conn.register_object_with_closures(
                         '/org/mpris/MediaPlayer2', iface,
                         self._handle_method, self._handle_get, self._handle_set)
                     self._reg_ids.append(rid)
                 elif hasattr(self._conn, 'register_object'):
-                    # Fallback to deprecated API for older PyGObject versions
                     rid = self._conn.register_object('/org/mpris/MediaPlayer2', iface,
                         self._handle_method, self._handle_get, self._handle_set)
                     self._reg_ids.append(rid)
@@ -107,14 +103,15 @@ class MprisServer(QObject):
             print(f'[MPRIS] {e}')
         return False
 
-    def _handle_method(self, conn, sender, obj, iface, method, params, inv):  # noqa: conn/sender required by GIO D-Bus protocol
+    # conn/sender/obj are part of the GIO D-Bus callback signature and unused here.
+    def _handle_method(self, conn, sender, obj, iface, method, params, inv):
         inv.return_value(None)
         QTimer.singleShot(0, lambda m=method, p=params: self._dispatch(m, p))
 
     def _dispatch(self, method, params):
         w = self._win; p = self._player
-        # While pipeline is reloading, ignore transport commands to avoid
-        # re-entrant reloads. CanPlay/CanPause already signal False to the client.
+        # Transport commands during a reload would re-enter it; CanPlay and
+        # CanPause already report False to the client.
         if self._pipeline_busy and method in ('PlayPause', 'Play', 'Pause'):
             return
         if   method == 'PlayPause': w._play_pause()
@@ -132,7 +129,7 @@ class MprisServer(QObject):
         elif method == 'Seek':   p.seek(max(0, p.position_ms()+params[0]//1000))
         elif method == 'SetPosition': p.seek(params[1]//1000)
 
-    def _handle_get(self, conn, sender, obj, iface, prop):  # noqa: conn/sender required by GIO D-Bus protocol
+    def _handle_get(self, conn, sender, obj, iface, prop):
         if iface == 'org.mpris.MediaPlayer2':
             d = {'CanQuit': GLib.Variant('b', True), 'CanRaise': GLib.Variant('b', True),
                  'HasTrackList': GLib.Variant('b', False),
@@ -191,9 +188,10 @@ class MprisServer(QObject):
         return 'jpg'
 
     def _build_art_uri(self, t: Optional['Track']) -> Optional[str]:
-        """
-        Build a file:// URI for cover art. Called from Qt main thread so
-        blocking disk I/O (mutagen) is safe and doesn't block the GLib loop.
+        """Build a file:// URI for the cover art.
+
+        Called on the Qt main thread, where the disk read cannot stall the GLib
+        loop that serves D-Bus.
         """
         if not self._cover_on or t is None:
             self._delete_art_tmp()
@@ -206,8 +204,13 @@ class MprisServer(QObject):
         digest = hashlib.md5(raw).hexdigest()[:12]
         tmp_path = os.path.join(tempfile.gettempdir(),
                                 f'voidpulse_cover_{digest}.{ext}')
-        if not os.path.exists(tmp_path):
+        # Drop the previous track's file whenever this track needs a different
+        # one, whether or not the new path happens to be on disk already. Tying
+        # the cleanup to "had to write it" instead leaked one file per cover
+        # revisited in a session, since a cache hit skipped the delete entirely.
+        if self._art_tmp_path != tmp_path:
             self._delete_art_tmp()
+        if not os.path.exists(tmp_path):
             try:
                 with open(tmp_path, 'wb') as fh:
                     fh.write(raw)
@@ -218,7 +221,7 @@ class MprisServer(QObject):
         return Path(tmp_path).as_uri()
 
     def _art_url_for(self, t: 'Track') -> Optional[str]:
-        """Return cached art URI (built in Qt thread). Kept for backward compat."""
+        """Return the URI _build_art_uri() prepared on the Qt thread."""
         return getattr(self, '_cached_art_uri', None)
 
     def _delete_art_tmp(self):
@@ -229,7 +232,7 @@ class MprisServer(QObject):
                 pass
         self._art_tmp_path = None
 
-    def _handle_set(self, conn, sender, obj, iface, prop, value):  # noqa: conn/sender required by GIO D-Bus protocol
+    def _handle_set(self, conn, sender, obj, iface, prop, value):
         if iface != 'org.mpris.MediaPlayer2.Player': return
         if prop == 'Volume':
             QTimer.singleShot(0, lambda v=value.unpack(): self._player.set_volume(v))
@@ -248,8 +251,7 @@ class MprisServer(QObject):
 
     def notify_track(self, track: Optional[Track]):
         self._cur_track = track; self._track_serial += 1
-        # Build art URI in Qt main thread — extract_cover_bytes does disk I/O
-        # via mutagen; doing it here avoids blocking the GLib main loop.
+        # Built here, on the Qt thread: reading the cover hits the disk
         self._cached_art_uri = self._build_art_uri(track)
         GLib.idle_add(self._emit, ['Metadata', 'PlaybackStatus'])
 

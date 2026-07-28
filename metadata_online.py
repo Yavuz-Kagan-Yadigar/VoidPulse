@@ -5,7 +5,7 @@ tag lookup (MusicBrainz/iTunes/LastFM), and mutagen tag/cover/lyrics writers.
 from constants import *
 from constants import _open_audio
 import constants as _const_mod
-from lyrics import _get, _get_json
+from constants import _get_bytes, _get_json
 import urllib.request as _urlreq
 import urllib.parse as _urlparse
 
@@ -18,8 +18,7 @@ def _fetch_cover_itunes(artist: str, title: str) -> Optional[bytes]:
             url = item.get('artworkUrl100', '')
             if url:
                 url = url.replace('100x100bb', '600x600bb')
-                data = _get(url)
-                if isinstance(data, str): data = data.encode('latin1')
+                data = _get_bytes(url)
                 if data and len(data) > 1000: return data
     except Exception: pass
     return None
@@ -32,8 +31,7 @@ def _fetch_cover_deezer(artist: str, title: str) -> Optional[bytes]:
             url = item.get('album', {}).get('cover_xl', '') or \
                   item.get('album', {}).get('cover_big', '')
             if url:
-                data = _get(url)
-                if isinstance(data, str): data = data.encode('latin1')
+                data = _get_bytes(url)
                 if data and len(data) > 1000: return data
     except Exception: pass
     return None
@@ -70,8 +68,7 @@ def _fetch_cover_lastfm(artist: str, album: str) -> Optional[bytes]:
         for img in reversed(images):
             img_url = img.get('#text', '')
             if img_url and 'noimage' not in img_url:
-                data = _get(img_url)
-                if isinstance(data, str): data = data.encode('latin1')
+                data = _get_bytes(img_url)
                 if data and len(data) > 1000: return data
     except Exception: pass
     return None
@@ -259,6 +256,41 @@ def write_tags_to_file(fp: str, tags: dict) -> bool:
         print(f'write_tags_to_file error: {e}')
         return False
 
+def write_replaygain_gain_tag(fp: str, gain_db: float) -> bool:
+    """Write a REPLAYGAIN_TRACK_GAIN tag (batch Gain fetcher — see
+    fetch_popups.LibraryGainFetchWorker). Same per-format shape as
+    write_tags_to_file. Returns True on success."""
+    try:
+        ext = Path(fp).suffix.lower()
+        try:
+            with open(fp, 'rb') as _wf:
+                if _wf.read(4) == b'\x1a\x45\xdf\xa3':   # WebM/MKV — mutagen can't write tags
+                    return False
+        except OSError:
+            return False
+        af = _open_audio(fp)
+        if af is None: return False
+        if af.tags is None: af.add_tags()
+
+        value = f'{gain_db:+.2f} dB'
+        if ext == '.mp3':
+            from mutagen.id3 import TXXX
+            af.tags.setall('TXXX:REPLAYGAIN_TRACK_GAIN',
+                           [TXXX(encoding=3, desc='REPLAYGAIN_TRACK_GAIN', text=value)])
+        elif ext in ('.flac', '.ogg', '.opus'):
+            af.tags['REPLAYGAIN_TRACK_GAIN'] = [value]
+        elif ext in ('.m4a', '.aac'):
+            from mutagen.mp4 import MP4FreeForm
+            key = '----:com.apple.iTunes:replaygain_track_gain'
+            af.tags[key] = [MP4FreeForm(value.encode('utf-8'))]
+        else:
+            return False
+        af.save()
+        return True
+    except Exception as e:
+        print(f'write_replaygain_gain_tag error: {e}')
+        return False
+
 def embed_cover_bytes(fp: str, data: bytes) -> bool:
     """Write cover bytes into the audio file tags. Returns True on success."""
     try:
@@ -289,11 +321,13 @@ def embed_cover_bytes(fp: str, data: bytes) -> bool:
 
         elif ext in ('.m4a', '.aac'):
             from mutagen.mp4 import MP4Cover
+            if af.tags is None: af.add_tags()
             fmt = MP4Cover.FORMAT_JPEG if data[:3] == b'\xff\xd8\xff' else MP4Cover.FORMAT_PNG
             af.tags['covr'] = [MP4Cover(data, imageformat=fmt)]
 
         elif ext in ('.ogg', '.opus'):
             from mutagen.flac import Picture
+            if af.tags is None: af.add_tags()
             pic = Picture()
             pic.type = 3; pic.mime = 'image/jpeg' if data[:3] == b'\xff\xd8\xff' else 'image/png'
             pic.desc = 'Cover'; pic.data = data
@@ -326,7 +360,8 @@ def embed_lyrics(fp: str, synced, plain: str) -> bool:
         else:
             lrc_text = None
 
-        text_to_write = lrc_text if lrc_text else plain
+        # Never hand None to a tag writer — mutagen would raise on it.
+        text_to_write = lrc_text or plain or ''
 
         if ext == '.mp3':
             from mutagen.id3 import USLT

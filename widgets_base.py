@@ -4,6 +4,7 @@ DeviceBusyPopup, _ModalOverlay.
 """
 from constants import *
 from constants import ACC, ACCH, B2, BG, BG4, BORD, FG, FG2, _FRAME_MS, _r
+import constants as _c   # live module reference — refresh_theme() reads _c.ACC etc.
 class ToggleSwitch(QWidget):
     """Toggle switch with optional two-sided labels.
 
@@ -11,15 +12,21 @@ class ToggleSwitch(QWidget):
     Two-sided:     ToggleSwitch('OFF', 'ON', parent) — left=off, right=on
 
     muted_labels=True: both labels always render in FG2 (grey) regardless of state.
+    pad:      gap between a label and the track; tighten it where a row is cramped.
+    track_w:  width of the track itself, for the same reason. Height is untouched
+              so a narrowed switch still lines up with its neighbours.
     """
     toggled = pyqtSignal(bool)
     W, H, R = 42, 22, 11
     PAD = 6   # gap between label and switch track
     _KNOB_PAD = 3                    # inset on every side (constant for all instances)
     _KNOB_SZ  = H - 2 * _KNOB_PAD   # = 16 px knob side length
+    # Bare-track fallbacks, in case sizeHint() is asked for before _recalc_size()
+    _hint_w, _hint_h = W, H
 
     def __init__(self, label_off: str = '', label_on_or_parent=None, parent=None,
-                 muted_labels: bool = False, label_point_size: int = 0):
+                 muted_labels: bool = False, label_point_size: int = 0,
+                 pad: int = -1, track_w: int = 0):
         # Resolve overloaded signature
         if isinstance(label_on_or_parent, str):
             self._lbl_off = label_off          # left side / off state
@@ -34,19 +41,22 @@ class ToggleSwitch(QWidget):
         super().__init__(parent)
         self._muted_labels     = muted_labels
         self._label_point_size = label_point_size  # 0 = inherit widget font size
+        # Instance values shadow the class defaults
+        if pad >= 0:
+            self.PAD = pad
+        if track_w > 0:
+            self.W = max(track_w, self._KNOB_SZ + 2 * self._KNOB_PAD)
         self._on = False; self._anim = 0.0
         self._timer = QTimer(self); self._timer.setInterval(_FRAME_MS)
         self._timer.timeout.connect(self._step)
         self._recalc_size()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Cached palette-derived colors — rebuilt by _rebuild_track_colors().
-        # Keyed by (ACC, BG4, B2, FG, FG2) so any palette/accent change invalidates them.
+        # Palette-derived colours, keyed so any palette change invalidates them
         self._color_cache_key: tuple = ()
         self._track_on_rgb: tuple = (0, 0, 0)
         self._border_on_rgb: tuple = (0, 0, 0)
         self._off_rgb: tuple = (0, 0, 0)
         self._boff_rgb: tuple = (0, 0, 0)
-        # Label colours (dim = FG2, bright = FG) — cached alongside track colours
         self._dim_rgb:    tuple = (0, 0, 0)
         self._bright_rgb: tuple = (0, 0, 0)
 
@@ -58,18 +68,40 @@ class ToggleSwitch(QWidget):
             f.setPointSize(self._label_point_size)
         return f
 
+    @staticmethod
+    def _label_width(fm: 'QFontMetrics', text: str) -> int:
+        # horizontalAdvance measures a single line, so a label wrapped with '\n'
+        # has to be measured per line and take the widest.
+        if not text:
+            return 0
+        return max(fm.horizontalAdvance(ln) for ln in text.split('\n'))
+
     def _recalc_size(self):
         fm = QFontMetrics(self._label_font())
-        lw_off = fm.horizontalAdvance(self._lbl_off) + self.PAD if self._lbl_off else 0
-        lw_on  = fm.horizontalAdvance(self._lbl_on)  + self.PAD if self._lbl_on  else 0
+        lw_off = self._label_width(fm, self._lbl_off) + self.PAD if self._lbl_off else 0
+        lw_on  = self._label_width(fm, self._lbl_on)  + self.PAD if self._lbl_on  else 0
         total_w = lw_off + self.W + lw_on
-        self.setMinimumWidth(max(total_w, self.W))
-        self.setFixedHeight(max(self.H, 18))
-        self._lw_off = lw_off  # cached left-label pixel width (including pad)
+        n_lines = max(self._lbl_off.count('\n'), self._lbl_on.count('\n')) + 1
+        label_h = fm.height() * n_lines + 2
+        self._hint_w = max(total_w, self.W)
+        self._hint_h = max(self.H, label_h, 18)
+        self.setMinimumWidth(self._hint_w)
+        self.setFixedHeight(self._hint_h)
+        self._lw_off = lw_off  # left label width, including its pad
+        self.updateGeometry()
+
+    def sizeHint(self):
+        # Without a hint QWidget reports QSize(-1, -1); a QHBoxLayout that runs
+        # out of room then lets neighbours overlap this widget and the right
+        # label paints under them. The hint is exactly what the labels need.
+        return QSize(self._hint_w, self._hint_h)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def showEvent(self, e):
         super().showEvent(e)
-        self._recalc_size()  # re-measure with actual font after widget is realized
+        self._recalc_size()  # the real font is only known once realized
 
     def isChecked(self) -> bool: return self._on
 
@@ -112,7 +144,6 @@ class ToggleSwitch(QWidget):
         lw_off = self._lw_off
 
         # ── Track ──────────────────────────────────────────────────────────────
-        # Lazily rebuild cached colour tuples when palette/accent changes.
         if self._color_cache_key != (ACC, BG4, B2, FG, FG2):
             self._rebuild_track_colors()
 
@@ -154,7 +185,7 @@ class ToggleSwitch(QWidget):
         lbl_font = self._label_font()
 
         if self._lbl_off:
-            # Left label: bright when OFF, dim when ON — or always dim if muted
+            # Bright when off, dim when on, or always dim when muted
             if self._muted_labels:
                 c = QColor(dim_r, dim_g, dim_b)
             else:
@@ -170,7 +201,7 @@ class ToggleSwitch(QWidget):
                        self._lbl_off)
 
         if self._lbl_on:
-            # Right label: bright when ON, dim when OFF — or always dim if muted
+            # Bright when on, dim when off, or always dim when muted
             if self._muted_labels:
                 c2 = QColor(dim_r, dim_g, dim_b)
             else:
@@ -214,7 +245,6 @@ class TriSwitch(QWidget):
         self._timer.timeout.connect(self._step)
         self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Cached palette colours — same pattern as ToggleSwitch
         self._color_cache_key: tuple = ()
         self._track_on_rgb:  tuple = (0, 0, 0)
         self._border_on_rgb: tuple = (0, 0, 0)
@@ -290,7 +320,7 @@ class TriSwitch(QWidget):
         track_r = _r(self.R)
         zone_w  = self.W / 3.0
 
-        # ── Clip all fill to rounded pill shape ────────────────────────────
+        # Fills are clipped to the pill shape
         clip_path = QPainterPath()
         clip_path.addRoundedRect(QRectF(0, 0, self.W, self.H), track_r, track_r)
         p.setClipPath(clip_path)
@@ -298,8 +328,7 @@ class TriSwitch(QWidget):
         # Track background (always dim)
         p.fillRect(QRectF(0, 0, self.W, self.H), QColor(off_r, off_g, off_b))
 
-        # Sliding active-zone highlight
-        # hi_x: 0 at state 0, zone_w at state 1, 2*zone_w at state 2
+        # Highlight slides one zone width per state
         hi_x = t * (self.W - zone_w)
         t2   = min(1.0, t * 2)        # 0→1 once knob leaves leftmost zone
         hi_r = int(off_r + t2 * (ton_r - off_r))
@@ -307,7 +336,7 @@ class TriSwitch(QWidget):
         hi_b = int(off_b + t2 * (ton_b - off_b))
         p.fillRect(QRectF(hi_x, 0, zone_w, self.H), QColor(hi_r, hi_g, hi_b))
 
-        # ── Remove clip for crisp border / text ────────────────────────────
+        # Border and text are drawn unclipped, to stay crisp
         p.setClipping(False)
 
         # Border
@@ -355,8 +384,7 @@ class JumpSlider(QSlider):
         super().__init__(orientation, parent)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self._touch_active = False
-        # Do not steal keyboard focus on click — avoids spurious value changes
-        # when focus moves between widgets and Qt replays key events.
+        # ClickFocus, so a focus change cannot replay keys into this slider
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     def _jump(self, x: float):
@@ -373,8 +401,7 @@ class JumpSlider(QSlider):
         super().mouseMoveEvent(e)
 
     def wheelEvent(self, e):
-        # Ignore scroll-wheel — avoids accidental radius/volume changes when
-        # scrolling over the settings popup.
+        # Ignored, so scrolling over the settings popup cannot change values
         e.ignore()
 
     def event(self, e: QEvent) -> bool:
@@ -446,7 +473,7 @@ class DeviceBusyPopup(QFrame):
     def __init__(self, parent: QWidget):
         super().__init__(parent)
         self.setObjectName('device_busy_popup')
-        # Transparent background: paintEvent draws BG + ACC border like other popups.
+        # paintEvent draws the background and border, as the other popups do
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
 
@@ -459,7 +486,6 @@ class DeviceBusyPopup(QFrame):
         root.setContentsMargins(18, 14, 18, 16)
         root.setSpacing(10)
 
-        # Title row (matches popup_title label style used by SettingsPopup / EqPopup)
         self._title_lbl = QLabel('AUDIO DEVICE ERROR')
         self._title_lbl.setObjectName('popup_title')
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -469,8 +495,8 @@ class DeviceBusyPopup(QFrame):
         div = QFrame(); div.setFixedHeight(1)
         div.setStyleSheet(f'background:{BORD}; margin:0;')
         root.addWidget(div)
+        self._divider = div
 
-        # Detail text (raw GStreamer message)
         self._detail = QLabel()
         self._detail.setWordWrap(True)
         self._detail.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -479,7 +505,6 @@ class DeviceBusyPopup(QFrame):
         self._detail.setFixedWidth(300)
         root.addWidget(self._detail)
 
-        # Button row
         btn_row = QHBoxLayout(); btn_row.setSpacing(8)
         btn_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
@@ -518,7 +543,6 @@ class DeviceBusyPopup(QFrame):
 
         self.hide()
 
-    # ── paintEvent: same rounded-rect + ACC border as SettingsPopup / EqPopup ──
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -531,6 +555,28 @@ class DeviceBusyPopup(QFrame):
         p.setPen(QPen(QColor(ACC), 3.0))
         p.drawRoundedRect(r, cr, cr)
         p.end()
+
+    def refresh_theme(self) -> None:
+        """Re-apply the child stylesheets, which bake in palette values.
+
+        This popup is built once at startup, so its QSS-styled children would
+        otherwise keep the colours from then. paintEvent already reads live.
+        """
+        self._divider.setStyleSheet(f'background:{_c.BORD}; margin:0;')
+        self._detail.setStyleSheet(
+            f'color:{_c.FG2}; font-size:11px; background:transparent;')
+        self._btn_retry.setStyleSheet(
+            f'QPushButton {{ background:{_c.ACC}; color:#fff;'
+            f'  border:none; border-radius:{_r(6)}px;'
+            f'  font-size:11px; font-weight:600; padding:6px 14px; }}'
+            f'QPushButton:hover {{ background:{_c.ACCH}; }}')
+        for b in (self._btn_switch, self._btn_dismiss):
+            b.setStyleSheet(
+                f'QPushButton {{ background:transparent; color:{_c.FG2};'
+                f'  border:1px solid {_c.BORD}; border-radius:{_r(6)}px;'
+                f'  font-size:11px; padding:6px 14px; }}'
+                f'QPushButton:hover {{ color:{_c.FG}; border-color:{_c.FG2}; }}')
+        self.update()
 
     def show_error(self, gst_error: str) -> None:
         """Display the popup with the given GStreamer error string and
@@ -574,7 +620,7 @@ class DeviceBusyPopup(QFrame):
         self._timer.stop()
         self.hide()
 
-    def resizeEvent(self, event) -> None:  # noqa: N802
+    def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if self.isVisible():
             self._reposition()
@@ -584,21 +630,21 @@ class DeviceBusyPopup(QFrame):
 #  Modal overlay — dark scrim + click-outside-to-close for all dialogs
 # ══════════════════════════════════════════════════════════════════════════════
 class _ModalOverlay(QWidget):
-    """Full-window dark scrim that sits between the main window and a popup.
+    """Dark scrim between the main window and a popup.
 
-    • Darkens the entire main window with a semi-transparent black overlay.
-    • A mouse press outside the attached popup closes/hides it.
-    • Works with QDialog (calls reject()) and plain QWidget popups (calls hide()).
-    • Automatically resizes when the parent window resizes.
-
-    For QDialog: use finished signal only (Hide fires spuriously during exec() startup).
-    For QWidget: watch Hide event (EQ, fetch popups, rename going to background).
+    Dims the window, follows its resizes, and dismisses the popup on a press
+    outside it — reject() for a QDialog, hide() for a plain widget. A QDialog is
+    tracked by its finished signal, since exec() emits a spurious Hide on the way
+    up; plain widgets are tracked by that Hide instead.
     """
 
-    def __init__(self, main_win: QWidget, popup: QWidget):
+    def __init__(self, main_win: QWidget, popup: QWidget, watch_hide: bool = False):
         super().__init__(main_win)
         self._popup = popup
         self._is_dialog = isinstance(popup, QDialog)
+        # Non-blocking dialogs (the batch fetch popups, RenamePopup) hide
+        # themselves without emitting finished(), so they opt into Hide too.
+        self._watch_hide = watch_hide or not self._is_dialog
         self._done = False
         self.setGeometry(main_win.rect())
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
@@ -607,13 +653,10 @@ class _ModalOverlay(QWidget):
         self.setAutoFillBackground(False)
         self.raise_()
         if self._is_dialog:
-            # finished fires when dialog closes — never during exec() startup
             popup.finished.connect(self._on_popup_done)
-        else:
-            # plain QWidget: watch Hide so background-dismiss works
+        if self._watch_hide:
             popup.installEventFilter(self)
         main_win.installEventFilter(self)
-        # App-level filter catches clicks anywhere on screen
         QApplication.instance().installEventFilter(self)
 
     def paintEvent(self, e):
@@ -635,7 +678,7 @@ class _ModalOverlay(QWidget):
     def eventFilter(self, obj, e):
         if obj is self.parent() and e.type() == QEvent.Type.Resize:
             self.setGeometry(self.parent().rect())
-        elif (not self._is_dialog and
+        elif (self._watch_hide and
               obj is self._popup and e.type() == QEvent.Type.Hide):
             self._on_popup_done()
         elif (e.type() == QEvent.Type.MouseButtonPress and
@@ -644,12 +687,9 @@ class _ModalOverlay(QWidget):
               not (isinstance(obj, QWidget) and self._popup.isAncestorOf(obj)) and
               not self._popup.rect().contains(
                   self._popup.mapFromGlobal(e.globalPosition().toPoint()))):
-            # Do not dismiss if a another dialog is currently active on top of
-            # the popup (e.g. LyricsEditDialog opened from TagEditDialog).
-            # On Wayland child QDialogs become true top-level windows and lose
-            # their Qt parent(), so we cannot walk the parent chain.  Instead,
-            # check whether the application's active window is any QDialog other
-            # than self._popup — if so, that dialog "owns" the click.
+            # A dialog opened from the popup owns the click. On Wayland such a
+            # child becomes a real top-level window and loses its Qt parent, so
+            # the active window is checked instead of the parent chain.
             active = QApplication.activeWindow()
             if isinstance(active, QDialog) and active is not self._popup:
                 pass  # click is inside a child/sibling dialog — keep popup open
@@ -661,10 +701,10 @@ class _ModalOverlay(QWidget):
         if self._done:
             return
         self._done = True
-        # Remove all filters first so no further events reach this (about-to-die) overlay.
+        # Filters off first, so nothing else reaches this dying overlay
         QApplication.instance().removeEventFilter(self)
         self.parent().removeEventFilter(self)
-        if not self._is_dialog:
+        if self._watch_hide:
             try:
                 self._popup.removeEventFilter(self)
             except Exception:
@@ -673,8 +713,11 @@ class _ModalOverlay(QWidget):
         self.deleteLater()
 
     @staticmethod
-    def show_for(popup: QWidget) -> '_ModalOverlay':
-        """Find the main window, create overlay, centre popup. Caller shows popup."""
+    def show_for(popup: QWidget, watch_hide: bool = False) -> '_ModalOverlay':
+        """Create the overlay and centre the popup; the caller shows the popup.
+
+        watch_hide is for a QDialog shown with .show() rather than .exec().
+        """
         parent = popup.parent()
         win = parent
         while win is not None and not isinstance(win, QMainWindow):
@@ -683,7 +726,7 @@ class _ModalOverlay(QWidget):
             win = parent
         if win is None:
             return None
-        overlay = _ModalOverlay(win, popup)
+        overlay = _ModalOverlay(win, popup, watch_hide=watch_hide)
         overlay.show()
         overlay.raise_()
         popup.adjustSize()

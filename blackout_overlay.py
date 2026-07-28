@@ -24,29 +24,26 @@ class BlackoutOverlay(QWidget):
         # Track / position state
         self._title  = ''
         self._artist = ''
-        self._album  = ''   # received via set_track() — reserved for future use
+        self._album  = ''   # set by set_track(), not currently displayed
         self._pos_ms = 0
         self._dur_ms = 0
-        # Overlay feature flags
         self._ctrlbar_ref  = None
         self._ov_viz    = False
         self._ov_lyrics = False
         self._ov_clock  = True   # show clock by default
-        # Visualization data (list of normalised 0..1 values, VIZ_BANDS long)
-        self._viz_data = None   # ndarray (VIZ_BANDS,) or None when no frame received yet
-        # Lyrics state (prev, cur, next)
+        self._viz_data = None   # (VIZ_BANDS,) ndarray, None until the first frame
         self._lyr_prev = ''; self._lyr_cur = ''; self._lyr_next = ''
 
-        # Widget offset (randomised each cycle)
-        self._ox = 0.3; self._oy = 0.35   # fractional position 0..1
+        # Container position in pixels, randomised on each fade cycle
+        self._ox = 0; self._oy = 0
 
-        # Scale factor (set from SettingsPopup overlay scale slider, 50–200 %)
+        # 50-200%, from the overlay scale slider in Settings
         self._scale = 1.0
-        # Cached paint colors — rebuilt when ACC changes
-        self._ov_paint_key: str = ''
+        # Cached paint colours, rebuilt when ACC or BG3 changes
+        self._ov_paint_key: tuple = ()
         self._ov_colors: dict = {}
 
-        # Fade animation (opacity effect on a child container)
+        # Everything is drawn in a child container, which fades as one
         self._container = QWidget(self)
         self._container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._opacity_effect = QGraphicsOpacityEffect(self._container)
@@ -56,12 +53,11 @@ class BlackoutOverlay(QWidget):
         self._anim = QPropertyAnimation(self._opacity_effect, b'opacity', self)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutSine)
 
-        # Clock refresh timer (every second)
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._container.update)
 
-        # Cycle timer: visible 8s, then fade out, reposition, fade in
+        # Visible for 8 s, then fade out, move, and fade back in
         self._cycle_timer = QTimer(self)
         self._cycle_timer.setSingleShot(True)
         self._cycle_timer.timeout.connect(self._start_fade_out)
@@ -99,21 +95,26 @@ class BlackoutOverlay(QWidget):
         if self.isVisible(): self._container.update()
 
     def push_viz_frame(self, spec_normalised):
-        """Called from Player._compute_viz_frame with the normalised (0..1) bar-height
-        ndarray.  Direct assignment — no list copy.  BlackoutOverlay._paint_info only
-        iterates the value, so ndarray and list are both valid.
+        """Store the latest normalised (0..1) bar heights for the overlay viz.
+
+        Called by ControlBar._render_tick with its own ndarray (the same,
+        delay-adjusted buffer the docked bar paints from) — kept by reference,
+        not copied. The line and line+fill styles index it as an array, so it
+        must stay an ndarray.
         """
         self._viz_data = spec_normalised
         if self._ov_viz and self.isVisible():
             self._container.update()
 
     def set_lyrics_context(self, prev: str, cur: str, nxt: str):
-        # Skip entirely when the overlay is hidden or lyrics overlay is off —
-        # storing the strings and calling update() is pure overhead in that case.
-        if not self.isVisible() or not self._ov_lyrics:
-            return
+        # Stored even while hidden: MainWindow sends ('', '', '') on every track
+        # change to clear stale text, and LyricsPanel._highlight() only emits on a
+        # line change. Dropping the reset while hidden would leave the previous
+        # track's line showing next time the overlay opens. Only the repaint is
+        # worth skipping.
         self._lyr_prev = prev; self._lyr_cur = cur; self._lyr_next = nxt
-        self._container.update()
+        if self.isVisible() and self._ov_lyrics:
+            self._container.update()
 
     # ── dismiss ───────────────────────────────────────────────────────────────
     def _dismiss(self):
@@ -121,13 +122,11 @@ class BlackoutOverlay(QWidget):
         self._anim.stop()
         self.hide()
         if self._ctrlbar_ref is not None:
-            # Resume ControlBar viz rendering now that overlay is gone,
-            # then restart the idle countdown.
             self._ctrlbar_ref.set_overlay_open(False)
             self._ctrlbar_ref._reset_idle_timer()
 
     def mousePressEvent(self, e):
-        # Consume the event — dismiss only, do not propagate to widgets beneath.
+        # Consumed, so the press never reaches what is underneath
         self._dismiss()
 
     def keyPressEvent(self, e):
@@ -136,12 +135,11 @@ class BlackoutOverlay(QWidget):
     def event(self, e):
         t = e.type()
         if t == QEvent.Type.TouchBegin:
-            # Consume the whole touch sequence that dismisses the overlay so
-            # TouchUpdate / TouchEnd do not reach whatever is beneath.
+            # The whole sequence is consumed, not just this event
             self._dismiss()
             return True
         if t in (QEvent.Type.TouchUpdate, QEvent.Type.TouchEnd):
-            return True  # swallow remainder of the dismissing touch sequence
+            return True
         return super().event(e)
 
     # ── show / cycle ──────────────────────────────────────────────────────────
@@ -152,14 +150,11 @@ class BlackoutOverlay(QWidget):
         self.showFullScreen(); self.raise_(); self.activateWindow()
         self._clock_timer.start()
         self._start_fade_in()
-        # Stop idle timer while overlay is visible
         if self._ctrlbar_ref is not None:
             self._ctrlbar_ref._idle_timer.stop()
-        # Suppress ControlBar viz rendering while overlay is open (if overlay viz is off,
-        # the ControlBar is completely covered and computing frames would be wasted).
+        # With the bar covered, ControlBar can stop rendering entirely
         if self._ctrlbar_ref is not None:
             self._ctrlbar_ref.set_overlay_open(True)
-        # Notify ControlBar so spectrum runs for overlay viz if needed
         if self._ov_viz and self._ctrlbar_ref is not None:
             self._ctrlbar_ref.ensure_overlay_spec()
 
@@ -219,14 +214,12 @@ class BlackoutOverlay(QWidget):
     # ── container paint (drawn inside the opacity-animated child) ─────────────
     def _paint_info(self, p: QPainter):
         sc = getattr(self, '_scale', 1.0)
-        # Scale everything via a painter transform.  The container widget itself
-        # is already sized to base_w*sc × base_h*sc (see _resize_container), so
-        # the coordinate system is scaled to draw at the original base sizes.
+        # The container is already sized for the scale factor, so scaling the
+        # painter lets everything below be drawn at its base size.
         if sc != 1.0:
             p.save()
             p.scale(sc, sc)
 
-        # Work in unscaled coordinates
         base_w = self._container.width()  / sc
         base_h = self._container.height() / sc
         r = QRectF(0, 0, base_w, base_h)
@@ -235,7 +228,6 @@ class BlackoutOverlay(QWidget):
             if sc != 1.0: p.restore()
             return
 
-        # Rebuild paint colors only when ACC or BG3 changes (not every frame)
         if self._ov_paint_key != (ACC, BG3):
             _c = QColor(ACC)
             _g = QColor(BG3)
@@ -261,13 +253,12 @@ class BlackoutOverlay(QWidget):
         CENT = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Layout
         LYR_H  = 20.0
         VIZ_H  = float(OV_VIZ_H)
         BAR_H  = 4.0
         BAR_W  = w - 20.0
-        # Dynamic BAR_Y: artist bottom (84) + optional lyrics + 18px for time labels
-        # Dynamic layout: when clock is hidden the title/artist block shifts up
+        # The title block shifts up when the clock is hidden, and the progress bar
+        # sits below whatever lyrics are shown.
         CLOCK_H = 34.0 if self._ov_clock else 0.0
         lyr_h_total = (3 * LYR_H) if self._ov_lyrics else 0.0
         BAR_Y = CLOCK_H + 50.0 + lyr_h_total + 18.0
@@ -332,7 +323,6 @@ class BlackoutOverlay(QWidget):
             n_v  = len(vd)
             bw_v = BAR_W / max(1, n_v)
             bar_col = _acc_a200
-            # Retrieve viz type from ctrlbar if available
             _vtype = 'bars'
             if self._ctrlbar_ref is not None:
                 _vtype = getattr(self._ctrlbar_ref, '_viz_type', 'bars')
@@ -366,9 +356,8 @@ class BlackoutOverlay(QWidget):
             elif _vtype == 'line+fill':
                 cx_arr = 10.0 + (_np.arange(n_v) + 0.5) * bw_v
                 cy_arr = viz_y + vd.astype(_np.float64) * VIZ_H
-                # Fill polygon beneath the line
                 fill_col = _acc_a70
-                # Build fill polygon: first point at top-left, data points, last point at top-right
+                # Closed at the top on both sides so the area fills
                 fx = _np.empty(n_v + 2, dtype=_np.float64)
                 fy = _np.empty(n_v + 2, dtype=_np.float64)
                 fx[0]  = cx_arr[0];  fy[0]  = viz_y
@@ -380,7 +369,6 @@ class BlackoutOverlay(QWidget):
                 p.setBrush(QBrush(fill_col))
                 p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
                 p.drawPolygon(poly_fill)
-                # Line on top
                 line_col = _acc_a220
                 pen = QPen(line_col, 1.5, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -389,15 +377,13 @@ class BlackoutOverlay(QWidget):
                 p.drawPolyline(_np_to_qpolygonf(cx_arr, cy_arr))
                 p.setClipping(False)
             else:
-                # Bars mode (original)
                 bw_draw = max(1.0, bw_v)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(bar_col))
                 p.setClipRect(QRectF(10, viz_y, BAR_W, VIZ_H))
-                # Round caps on bar tops only when global corner-radius >= 50 %
+                # Rounded bar tops only above 50% corner radius
                 _bar_use_round = RAD_PCT >= 50
-                # Iterate with explicit float() so both ndarray elements and plain
-                # floats are handled safely without triggering ndarray truth-value errors.
+                # float() per element so numpy scalars compare as plain floats
                 x = 10.0
                 for norm in vd:
                     h = float(norm) * VIZ_H
@@ -415,9 +401,8 @@ class BlackoutOverlay(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        # Install once — showEvent fires every time the overlay is shown, and
-        # installing the same filter repeatedly stacks duplicate registrations
-        # (each open would add another, making eventFilter fire N times per event).
+        # Installed once: showEvent fires on every open, and repeated installs
+        # stack duplicate registrations, so eventFilter would run N times per event.
         if not getattr(self, '_container_filter_installed', False):
             self._container.installEventFilter(self)
             self._container_filter_installed = True

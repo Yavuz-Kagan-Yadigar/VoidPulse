@@ -1,9 +1,11 @@
 """
-VoidPulse — EQ / DSP: biquad coefficient functions (Peak/Shelf/Pass/Notch),
-EQSliderCell, TouchComboBox, EqPopup (parametric EQ UI + preset manager),
-_np_to_qpolygonf helper, _fmt_ms helper, EQGraph frequency-response widget.
+VoidPulse — EQ user interface: EQSliderCell, TouchComboBox, EqPopup
+(parametric EQ panel + preset manager) and EQGraph (frequency-response plot).
+
+The biquad maths itself lives in eq_filters.py.
 """
 from constants import *
+from eq_filters import eq_band_coefficients
 from widgets_base import JumpSlider, ToggleSwitch
 from constants import ACC, ACCH, B2, BG, BG3, BG4, BORD, EQ_FREQ_MAX, EQ_FREQ_MIN, EQ_GAIN_MAX, EQ_GAIN_MAX_GRAPH, EQ_GAIN_MIN, EQ_Q_MAX, EQ_Q_MIN, EQ_TYPE_HIGHPASS, EQ_TYPE_HIGHSHELF, EQ_TYPE_LABELS, EQ_TYPE_LIST, EQ_TYPE_LOWPASS, EQ_TYPE_LOWSHELF, EQ_TYPE_NOTCH, EQ_TYPE_PEAK, FG, FG2, MAX_EQ_BANDS, _apply_scroller_properties, _r
 import numpy as _np
@@ -41,7 +43,6 @@ class EQSliderCell(QWidget):
 
     def _to_slider(self, val):
         if self._param == 'freq':
-            # logarithmic mapping
             if val <= 0:
                 return 0
             log_min = math.log10(EQ_FREQ_MIN)
@@ -50,7 +51,6 @@ class EQSliderCell(QWidget):
             pos = (log_val - log_min) / (log_max - log_min) * 1000
             return int(max(0, min(1000, pos)))
         else:
-            # linear
             return int((val - self._min) / (self._max - self._min) * 1000)
 
     def _from_slider(self, pos):
@@ -72,7 +72,7 @@ class EQSliderCell(QWidget):
 
     def _on_slider(self, pos):
         val = self._from_slider(pos)
-        # clamp due to rounding
+        # Clamp: the slider position rounds
         val = max(self._min, min(self._max, val))
         self._val = val
         self._label.setText(self._format(val))
@@ -92,7 +92,11 @@ class EQSliderCell(QWidget):
                     background: {B2}; height: 4px; border-radius: {r_grv}px;
                 }}
                 QSlider::sub-page:horizontal {{
-                    background: {acc}; border-radius: {r_grv}px 0 0 {r_grv}px;
+                    background: {acc};
+                    border-top-left-radius: {r_grv}px;
+                    border-bottom-left-radius: {r_grv}px;
+                    border-top-right-radius: 0;
+                    border-bottom-right-radius: 0;
                 }}
                 QSlider::handle:horizontal {{
                     background: {bg4}; border: 2px solid {acc};
@@ -114,7 +118,11 @@ class EQSliderCell(QWidget):
                     background: {bord}; height: 4px; border-radius: {r_grv}px;
                 }}
                 QSlider::sub-page:horizontal {{
-                    background: {bord}; border-radius: {r_grv}px 0 0 {r_grv}px;
+                    background: {bord};
+                    border-top-left-radius: {r_grv}px;
+                    border-bottom-left-radius: {r_grv}px;
+                    border-top-right-radius: 0;
+                    border-bottom-right-radius: 0;
                 }}
                 QSlider::handle:horizontal {{
                     background: {bg3}; border: 2px solid {bord};
@@ -126,8 +134,8 @@ class EQSliderCell(QWidget):
         super().setEnabled(enabled)
         self._slider.setEnabled(enabled)
         self._apply_slider_qss()
-        # Explicitly colour the label so it looks greyed-out even with
-        # WA_TranslucentBackground (Qt doesn't propagate palette to transparent labels)
+        # Coloured explicitly: Qt does not propagate the palette to a label with
+        # WA_TranslucentBackground, so it would not grey out on its own.
         self._label.setStyleSheet(f'color:{FG2 if enabled else BORD};')
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -143,7 +151,7 @@ class TouchComboBox(QComboBox):
         super().showPopup()
 
     def hidePopup(self):
-        # Block immediate close within 400 ms of opening (touch double-fire)
+        # A touch often double-fires, closing the popup as it opens
         if QDateTime.currentMSecsSinceEpoch() - self._popup_opened_ms < 400:
             return
         super().hidePopup()
@@ -156,20 +164,22 @@ class EqPopup(QFrame):
     limiter_changed      = pyqtSignal(bool)
     stereo_changed       = pyqtSignal(bool)
     stereo_width_changed = pyqtSignal(int)
+    balance_changed      = pyqtSignal(int)
     preamp_changed       = pyqtSignal(float)
+    loudness_norm_toggled = pyqtSignal(bool)   # moved here from SettingsPopup — sits with Preamp
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('eq_popup')
-        # Tool window: does NOT auto-close when OSK or other windows take focus.
-        # User dismisses via the EQ button toggle or the ✕ close button.
+        # A tool window stays open when an on-screen keyboard or another window
+        # takes focus; the EQ button or the close button dismisses it.
         self.setWindowFlags(
             Qt.WindowType.Tool |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
-        # Close when user clicks outside this window (anywhere in the app)
+        # Closes on a click anywhere outside it
         QApplication.instance().installEventFilter(self)
 
         self._bands = []          # list of (freq, gain, Q)
@@ -181,7 +191,6 @@ class EqPopup(QFrame):
         self._default_bands = []  # stored default (bands, enabled)
         self._default_enabled = True
 
-        # Debounce timer for applying changes
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.setInterval(300)  # 300 ms
@@ -198,30 +207,28 @@ class EqPopup(QFrame):
         hdr = QLabel('PARAMETRIC EQ'); hdr.setObjectName('popup_title')
         main.addWidget(hdr)
 
-        # Profile management
         prof_layout = QHBoxLayout()
 
         self._NEW = '＋ New'   # sentinel — always first item
         self._profile_combo = TouchComboBox()
         self._profile_combo.setEditable(True)
-        self._profile_combo.setMinimumWidth(110)
+        self._profile_combo.setFixedWidth(130)
         self._profile_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._profile_combo.setCompleter(None)   # no autocomplete / no filter while typing
         if self._profile_combo.lineEdit():
             le = self._profile_combo.lineEdit()
             le.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
             le.setPlaceholderText('Profile name…')
-        # Force item height via the popup list view
         combo_view = self._profile_combo.view()
         if combo_view:
             combo_view.setUniformItemSizes(True)
             combo_view.setSpacing(0)
         self._profile_combo.addItem(self._NEW)  # always first
-        # ONLY load/react when user explicitly selects from dropdown
+        # activated fires only on an explicit pick, not on typing
         self._profile_combo.activated.connect(self._on_profile_activated)
         prof_layout.addWidget(self._profile_combo)
 
-        # Buttons sized to match the combo box height (min-height:30px from QComboBox style)
+        # Matched to the combo box height from the global QComboBox rule
         _btn_ss = ('QPushButton { font-size:10px; padding:2px 7px;'
                    ' min-height:30px; max-height:30px; }')
         self._btn_save = QPushButton('Save')
@@ -246,7 +253,7 @@ class EqPopup(QFrame):
 
         self._limiter_sw = ToggleSwitch('Limiter')
         self._limiter_sw.setChecked(False)
-        self._limiter_sw.setToolTip('Hard brick-wall limiter at –0.9 dBFS\\n(prevents clipping on boosted EQ bands)')
+        self._limiter_sw.setToolTip('Hard brick-wall limiter at –1.0 dBFS\\n(last stage: catches preamp, EQ and stereo-width overs)')
         self._limiter_sw.toggled.connect(self._on_limiter_toggled)
         prof_layout.addWidget(self._limiter_sw)
 
@@ -271,17 +278,29 @@ class EqPopup(QFrame):
         self._stereo_val_lbl = QLabel('0')
         self._stereo_val_lbl.setFixedWidth(30)
         prof_layout.addWidget(self._stereo_val_lbl)
+
+        prof_layout.addSpacing(12)
+        self._balance_slider = QSlider(Qt.Orientation.Horizontal)
+        self._balance_slider.setRange(-100, 100)
+        self._balance_slider.setValue(0)
+        self._balance_slider.setFixedWidth(100)
+        self._balance_slider.setToolTip('Stereo balance (-100 = full left, 0 = centre, +100 = full right)')
+        self._balance_slider.valueChanged.connect(self._on_balance_changed)
+        prof_layout.addWidget(self._balance_slider)
+
+        self._balance_val_lbl = QLabel('C')
+        self._balance_val_lbl.setFixedWidth(24)
+        prof_layout.addWidget(self._balance_val_lbl)
+
         prof_layout.addStretch()
         main.addLayout(prof_layout)
 
 
 
-        # Frequency response graph
         self._graph = EQGraph(self)
         self._graph.setFixedHeight(160)
         main.addWidget(self._graph)
 
-        # Band table
         table_label = QLabel('Bands')
         table_label.setObjectName('setting_lbl')
         main.addWidget(table_label)
@@ -302,7 +321,6 @@ class EqPopup(QFrame):
         _apply_scroller_properties(self._band_table.viewport(), touch=False)
         main.addWidget(self._band_table)
 
-        # Add/Remove + JSON import/export buttons
         btn_row = QHBoxLayout()
         self._btn_add = QPushButton('+ Add Band')
         self._btn_add.clicked.connect(self._add_band)
@@ -318,7 +336,17 @@ class EqPopup(QFrame):
             'Export current EQ bands as a parametric EQ preset JSON file\n'
             '(PowerAmp / Wavelet / AutoEQ compatible)')
         self._btn_export_json.clicked.connect(self._export_json_profile)
-        # Preamp slider — next to the export JSON button
+        # Next to Preamp: both are gain-staging controls
+        self._loudness_sw = ToggleSwitch('Loudness\nNormalization', self, label_point_size=8)
+        self._loudness_sw.setChecked(False)   # off by default
+        self._loudness_sw.setToolTip(
+            "Levels perceived loudness across tracks. Uses each file's "
+            "embedded REPLAYGAIN_TRACK_GAIN tag when present (written by "
+            "tools like rsgain/loudgain, or foobar2000/MusicBee's ReplayGain "
+            "scanner, or VoidPulse's own Settings → Fetch → Gain); "
+            "untagged tracks are analyzed in the background on first play "
+            "instead (usually finishes in under a couple of seconds).")
+        self._loudness_sw.toggled.connect(self.loudness_norm_toggled)
         self._preamp_lbl = QLabel('Preamp:')
         self._preamp_lbl.setObjectName('setting_lbl')
         self._preamp_slider = QSlider(Qt.Orientation.Horizontal)
@@ -336,6 +364,8 @@ class EqPopup(QFrame):
         btn_row.addWidget(self._btn_import_json)
         btn_row.addWidget(self._btn_export_json)
         btn_row.addSpacing(20)
+        btn_row.addWidget(self._loudness_sw)
+        btn_row.addSpacing(12)
         btn_row.addWidget(self._preamp_lbl)
         btn_row.addWidget(self._preamp_slider)
         btn_row.addWidget(self._preamp_val_lbl)
@@ -350,11 +380,9 @@ class EqPopup(QFrame):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cr = _r(11)   # respect global corner-radius percentage
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
-        # Fill background
         p.setBrush(QBrush(QColor(BG)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(r, cr, cr)
-        # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(ACC), 3.0))
         p.drawRoundedRect(r, cr, cr)
@@ -375,7 +403,7 @@ class EqPopup(QFrame):
                 self._btn_add.setEnabled(True)
             QTimer.singleShot(2000, _restore)
             return
-        # Default values: Peak, 1000 Hz, 0 dB, Q=1.0
+        # Peak, 1 kHz, 0 dB, Q 1.0
         self._bands.append([1000.0, 0.0, 1.0, EQ_TYPE_PEAK])
         self._refresh_table()
         self._update_graph()
@@ -397,22 +425,27 @@ class EqPopup(QFrame):
             q    = float(band[2])
             ftype = int(band[3]) if len(band) >= 4 else EQ_TYPE_PEAK
 
-            # Column 0 — filter type ComboBox
+            # Column 0 — filter type
             type_combo = TouchComboBox()
-            type_combo.setFixedHeight(32)
+            type_combo.setFixedHeight(26)
+            type_combo.setObjectName('eq_type_combo')  # sizing+radius come from global QSS
             for tid in EQ_TYPE_LIST:
                 type_combo.addItem(EQ_TYPE_LABELS[tid], tid)
-            # Select the current type
             ci = type_combo.findData(ftype)
             if ci < 0:
                 ci = 0
             type_combo.blockSignals(True)
             type_combo.setCurrentIndex(ci)
             type_combo.blockSignals(False)
-            # Keep gain cell enabled/disabled based on type
             type_combo.currentIndexChanged.connect(
                 lambda _idx, row=i, combo=type_combo: self._on_type_changed(row, combo))
-            self._band_table.setCellWidget(i, 0, type_combo)
+            # setCellWidget stretches its widget over the whole row, so the combo
+            # is wrapped in a container that keeps its own height.
+            type_cell = QWidget()
+            type_cell_lay = QVBoxLayout(type_cell)
+            type_cell_lay.setContentsMargins(4, 0, 4, 0)
+            type_cell_lay.addWidget(type_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._band_table.setCellWidget(i, 0, type_cell)
 
             # Column 1 — Frequency
             freq_cell = EQSliderCell('freq', EQ_FREQ_MIN, EQ_FREQ_MAX, f, i)
@@ -443,7 +476,7 @@ class EqPopup(QFrame):
             band.append(EQ_TYPE_PEAK)
         band[3] = new_type
         self._bands[band_idx] = band
-        # Enable/disable the Gain cell depending on whether this type uses gain
+        # Gain only applies to peak and shelf filters
         gain_cell = self._band_table.cellWidget(band_idx, 2)
         if gain_cell is not None:
             gain_cell.setEnabled(
@@ -465,9 +498,7 @@ class EqPopup(QFrame):
         elif param == 'q':
             band[2] = new_val
         self._bands[band_idx] = band
-        # Update graph immediately
         self._update_graph()
-        # Schedule apply after a short delay
         self._apply_timer.start()
 
     def _update_graph(self):
@@ -478,8 +509,7 @@ class EqPopup(QFrame):
         Also auto-syncs active bands into the current profile snapshot so
         band edits are persisted without requiring an explicit Save click.
         """
-        # Mirror what _on_preamp_changed already does for preamp:
-        # keep the profile snapshot in sync with live edits.
+        # Keep the profile snapshot in step with live edits, as preamp does
         if self._current_profile and self._current_profile in self._profiles:
             entry = self._profiles[self._current_profile]
             if isinstance(entry, dict):
@@ -495,7 +525,6 @@ class EqPopup(QFrame):
         """Called only when user explicitly picks an item from the dropdown."""
         name = self._profile_combo.itemText(index)
         if name == self._NEW:
-            # Start fresh: clear bands, reset preamp, clear name field
             self._bands = []
             self._current_profile = ''
             self._profile_combo.lineEdit().clear()
@@ -506,7 +535,7 @@ class EqPopup(QFrame):
             self._apply_timer.start()
         elif name and name in self._profiles:
             entry = self._profiles[name]
-            # Support both old format (plain list) and new format (dict with bands+preamp)
+            # Older configs stored a bare band list instead of a dict
             if isinstance(entry, dict):
                 raw_bands = entry.get('bands', [])
                 preamp    = float(entry.get('preamp', 0.0))
@@ -534,7 +563,7 @@ class EqPopup(QFrame):
             return
         self._profiles[name] = {'bands': [list(b) for b in self._bands],
                                  'preamp': self._preamp_db}
-        # Add after ＋New if new; keep ＋New always at index 0
+        # ＋New always stays at index 0
         if self._profile_combo.findText(name) < 0:
             self._profile_combo.insertItem(1, name)   # insert at 1, after ＋New
         self._profile_combo.setCurrentText(name)
@@ -547,7 +576,6 @@ class EqPopup(QFrame):
             idx = self._profile_combo.findText(name)
             if idx >= 0:
                 self._profile_combo.removeItem(idx)
-            # Select ＋New, clear bands
             self._profile_combo.setCurrentIndex(0)
             self._profile_combo.lineEdit().clear()
             self._current_profile = ''
@@ -560,7 +588,6 @@ class EqPopup(QFrame):
         self._default_bands = [list(b) for b in self._bands]  # deep copy
         self._default_enabled = self._enabled
         self._default_profile_name = self._current_profile
-        # Sync into profile snapshot too (same as _apply does for band edits)
         if self._current_profile and self._current_profile in self._profiles:
             entry = self._profiles[self._current_profile]
             if isinstance(entry, dict):
@@ -574,12 +601,9 @@ class EqPopup(QFrame):
 
     # ── JSON import / export ────────────────────────────────────────────────
 
-    # Map from the PowerAmp/Wavelet/AutoEQ JSON band-type integers to VoidPulse
-    # EQ_TYPE_* constants.  The external format uses:
-    #   0 = Low Shelf, 1 = High Shelf, 2 = Low Pass, 3 = Peak/Bell,
-    #   4 = High Pass, 5 = High Shelf (variant), 6 = Notch
-    # VoidPulse internal: 0=Peak, 1=LowShelf, 2=HighShelf, 3=LowPass,
-    #                     4=HighPass, 5=Notch
+    # PowerAmp/Wavelet/AutoEQ band-type integers → EQ_TYPE_* constants. The two
+    # numberings differ: externally 0 is low shelf and 3 is peak, internally 0 is
+    # peak and 1 is low shelf.
     _JSON_TO_VOIDPULSE_TYPE = {
         0: EQ_TYPE_LOWSHELF,
         1: EQ_TYPE_HIGHSHELF,
@@ -589,7 +613,7 @@ class EqPopup(QFrame):
         5: EQ_TYPE_HIGHSHELF,   # alternate high-shelf code used by some exporters
         6: EQ_TYPE_NOTCH,
     }
-    # Reverse map for export: VoidPulse → JSON type integer (canonical values)
+    # The same mapping the other way, for export
     _VOIDPULSE_TO_JSON_TYPE = {
         EQ_TYPE_PEAK:      3,
         EQ_TYPE_LOWSHELF:  0,
@@ -625,7 +649,6 @@ class EqPopup(QFrame):
                                  f'Could not read JSON file:\n{e}')
             return
 
-        # Accept both a bare dict (single preset) and a list of presets
         if isinstance(raw, dict):
             presets = [raw]
         elif isinstance(raw, list) and raw:
@@ -635,7 +658,6 @@ class EqPopup(QFrame):
                                 'JSON file does not contain a valid EQ preset.')
             return
 
-        # If multiple presets, let the user pick one
         preset = presets[0]
         if len(presets) > 1:
             names = [p.get('name', f'Preset {i+1}') for i, p in enumerate(presets)]
@@ -662,7 +684,6 @@ class EqPopup(QFrame):
                 q     = float(b.get('q', 1.0))
                 jtype = int(b.get('type', 3))
                 vtype = self._JSON_TO_VOIDPULSE_TYPE.get(jtype, EQ_TYPE_PEAK)
-                # Clamp to VoidPulse's supported ranges
                 freq = max(EQ_FREQ_MIN, min(EQ_FREQ_MAX, freq))
                 gain = max(EQ_GAIN_MIN, min(EQ_GAIN_MAX, gain))
                 q    = max(EQ_Q_MIN,    min(EQ_Q_MAX,    q))
@@ -676,13 +697,11 @@ class EqPopup(QFrame):
                                 'No valid bands could be parsed from the preset.')
             return
 
-        # Enforce MAX_EQ_BANDS cap
         truncated = 0
         if len(new_bands) > MAX_EQ_BANDS:
             truncated = len(new_bands) - MAX_EQ_BANDS
             new_bands = new_bands[:MAX_EQ_BANDS]
 
-        # Use preset name as the suggested profile name if the combo is empty
         preset_name = preset.get('name', '').strip()
         if preset_name:
             current_text = self._profile_combo.currentText().strip()
@@ -696,7 +715,6 @@ class EqPopup(QFrame):
         self._update_graph()
         self._apply_timer.start()
 
-        # Build a user-facing summary tooltip
         msg_parts = [f'Imported {len(new_bands)} band(s)']
         if skipped:
             msg_parts.append(f'{skipped} skipped (invalid)')
@@ -750,13 +768,11 @@ class EqPopup(QFrame):
             q     = float(band[2])
             vtype = int(band[3]) if len(band) >= 4 else EQ_TYPE_PEAK
             jtype = self._VOIDPULSE_TO_JSON_TYPE.get(vtype, 3)
-            # Derive the same per-band colour used in EQGraph (HSV, saturation=0.8, value=1.0)
-            # and encode as ARGB integer (0xFF_RR_GG_BB) for PowerAmp/Wavelet compatibility.
+            # Same per-band hue EQGraph draws, packed as ARGB for PowerAmp
             hue   = (idx * 360 / max(1, n_bands)) % 360
             color = QColor.fromHsvF(hue / 360.0, 0.8, 1.0)
             argb  = (0xFF << 24) | (color.red() << 16) | (color.green() << 8) | color.blue()
-            # Python int is unsigned; JSON serialiser may emit negative for values > 0x7FFFFFFF.
-            # Convert to signed 32-bit so PowerAmp parses it correctly.
+            # PowerAmp expects a signed 32-bit value
             if argb > 0x7FFFFFFF:
                 argb -= 0x100000000
             bands_out.append({
@@ -787,9 +803,8 @@ class EqPopup(QFrame):
             self._btn_export_json.mapToGlobal(QPoint(0, -28)),
             f'Exported {len(bands_out)} band(s) → {Path(path).name}')
 
-    # Public methods to set/get state
     def set_bands(self, bands, enabled, name=''):
-        # Normalise to 4-element lists, defaulting missing type to EQ_TYPE_PEAK
+        # Normalise to 4-element bands, defaulting the type to peak
         self._bands = []
         for b in bands:
             b = list(b)
@@ -812,7 +827,7 @@ class EqPopup(QFrame):
         self.eq_changed.emit(self._bands, self._enabled)
 
     def set_profiles(self, profiles):
-        # Normalise: old format stores {name: [bands]}, new format {name: {bands,preamp}}
+        # Older configs stored {name: [bands]} instead of {name: {bands, preamp}}
         normalised = {}
         for k, v in profiles.items():
             if isinstance(v, dict):
@@ -855,7 +870,10 @@ class EqPopup(QFrame):
         self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
         self.stereo_width_changed.emit(v)
 
-    # FX getters
+    def _on_balance_changed(self, v: int):
+        self._balance_val_lbl.setText('C' if v == 0 else (f'R{v}' if v > 0 else f'L{-v}'))
+        self.balance_changed.emit(v)
+
     def limiter_enabled(self) -> bool:
         return self._limiter_sw.isChecked()
 
@@ -865,7 +883,9 @@ class EqPopup(QFrame):
     def stereo_width(self) -> int:
         return self._stereo_slider.value()
 
-    # FX setters (used by config restore)
+    def balance(self) -> int:
+        return self._balance_slider.value()
+
     def set_limiter_enabled(self, on: bool):
         self._limiter_sw.blockSignals(True)
         self._limiter_sw.setChecked(on)
@@ -882,6 +902,12 @@ class EqPopup(QFrame):
         self._stereo_val_lbl.setText(f'+{v}' if v > 0 else str(v))
         self._stereo_slider.blockSignals(False)
 
+    def set_balance(self, v: int):
+        self._balance_slider.blockSignals(True)
+        self._balance_slider.setValue(v)
+        self._balance_val_lbl.setText('C' if v == 0 else (f'R{v}' if v > 0 else f'L{-v}'))
+        self._balance_slider.blockSignals(False)
+
     # ── Preamp ──────────────────────────────────────────────────────────────────
     def _on_preamp_changed(self, tenths: int):
         db = tenths / 10.0
@@ -889,7 +915,7 @@ class EqPopup(QFrame):
         sign = '+' if db > 0 else ''
         self._preamp_val_lbl.setText(f'{sign}{db:.1f} dB')
         self.preamp_changed.emit(db)
-        # Auto-save preamp into the active profile immediately (no Save button needed)
+        # Written straight into the active profile, no Save click needed
         if self._current_profile and self._current_profile in self._profiles:
             entry = self._profiles[self._current_profile]
             if isinstance(entry, dict):
@@ -909,6 +935,15 @@ class EqPopup(QFrame):
         sign = '+' if db > 0 else ''
         self._preamp_val_lbl.setText(f'{sign}{db:.1f} dB')
         self._preamp_slider.blockSignals(False)
+
+    def loudness_norm_enabled(self) -> bool:
+        return self._loudness_sw.isChecked()
+
+    def set_loudness_norm_enabled(self, on: bool):
+        """Set the toggle without emitting the signal (config restore)."""
+        self._loudness_sw.blockSignals(True)
+        self._loudness_sw.setChecked(on)
+        self._loudness_sw.blockSignals(False)
 
     def show_above(self, btn: QWidget):
         gpos = btn.mapToGlobal(QPoint(0, 0))
@@ -969,7 +1004,7 @@ def _fmt_ms(ms: int) -> str:
 class EQGraph(QWidget):
     """Widget to draw frequency response of the current EQ bands."""
 
-    # Frequency grid: label text → Hz value (shown as vertical lines)
+    # Vertical grid lines: label → frequency
     _FREQ_GRID = [
         ('20',   20),   ('50',   50),   ('100', 100),
         ('200',  200),  ('500',  500),  ('1k',  1000),
@@ -1054,7 +1089,6 @@ class EQGraph(QWidget):
             steps = w
             fs    = 44100.0   # reference sample rate for display
             xs_np = _np.arange(steps, dtype=_np.float32)
-            # Logarithmically spaced frequencies 20 Hz → 22 kHz
             freqs_np = (20.0 * (22000.0 / 20.0) ** (xs_np / (steps - 1))).astype(_np.float64)
             n_bands = len(self._bands)
             band_gains_np = _np.zeros((n_bands, steps), dtype=_np.float32)
@@ -1067,7 +1101,7 @@ class EQGraph(QWidget):
                 if f0 <= 0.0:
                     continue
 
-                # Gain-only filters: skip if gain is 0 (no effect)
+                # Peak and shelf filters at 0 dB do nothing
                 is_gain_type = ftype in (EQ_TYPE_PEAK, EQ_TYPE_LOWSHELF, EQ_TYPE_HIGHSHELF)
                 if is_gain_type and g == 0.0:
                     continue
@@ -1077,16 +1111,14 @@ class EQGraph(QWidget):
                     continue
                 b0, b1, b2, a1, a2 = coeffs
 
-                # Evaluate H(e^jw) at each display frequency using the bilinear
-                # substitution: z = e^(j*w) where w = 2*pi*f/fs
+                # H(e^jw) at each display frequency, with w = 2*pi*f/fs
                 w_rad = (2.0 * math.pi / fs) * freqs_np          # shape (steps,)
                 z_inv = _np.exp(-1j * w_rad)                      # z^-1
                 z_inv2 = z_inv * z_inv                            # z^-2
                 H_num = b0 + b1 * z_inv + b2 * z_inv2
                 H_den = 1.0 + a1 * z_inv + a2 * z_inv2
-                # Avoid divide-by-zero near stability boundaries
+                # Guard the divide near the stability boundary
                 mag = _np.abs(H_num / (_np.where(_np.abs(H_den) < 1e-12, 1e-12, H_den)))
-                # Convert magnitude to dB
                 mag_db = 20.0 * _np.log10(_np.maximum(mag, 1e-12))
                 band_gains_np[idx] = mag_db.astype(_np.float32)
 
@@ -1098,9 +1130,8 @@ class EQGraph(QWidget):
             xs_np = band_gains_np = total_gains_np = None
 
         # ── Auto-scale: find peak absolute gain, snap to next even-dB ceiling ─
-        # LP/HP/Notch filters produce large negative dB values in the stop-band;
-        # clamp those to ±60 dB so they don't blow out the vertical scale.
-        # Minimum range ±3 dB so the graph never looks absurd on tiny boosts.
+        # Stop-band values from pass and notch filters run to large negatives, so
+        # clamp to ±60 dB, and keep at least ±3 dB so small boosts look sane.
         if total_gains_np is not None:
             finite_vals = total_gains_np[_np.isfinite(total_gains_np)]
             if len(finite_vals):
@@ -1111,12 +1142,12 @@ class EQGraph(QWidget):
         else:
             peak = 0.0
         peak = max(peak, 3.0)                          # floor at ±3 dB
-        # Round up to the nearest even number of dB (gives clean 2-dB grid steps)
+        # Even numbers give clean 2-dB grid steps
         db_range = math.ceil(peak / 2) * 2
         db_range = min(db_range, int(EQ_GAIN_MAX_GRAPH))  # hard cap at ±10 dB
 
         # ── Grid step: choose 1 or 2 dB depending on available height ─────────
-        # Aim for roughly 20–30 px per grid line; fall back to 2-dB steps.
+        # Aim for 20-30 px per line, else 2-dB steps
         db_step = 1 if (h / (db_range * 2)) >= 18 else 2
 
         # ── Background ────────────────────────────────────────────────────────
@@ -1141,7 +1172,7 @@ class EQGraph(QWidget):
             line_color = QColor(FG2) if is_zero else QColor(BORD)
             p.setPen(QPen(line_color, 1))
             p.drawLine(0, int(y), w, int(y))
-            # Label — skip 0 dB (centre line, obvious), skip labels too close to edges
+            # 0 dB is the obvious centre line, and edge labels would clip
             if db != 0 and lbl_h / 2 < y < h - lbl_h / 2:
                 lbl = f'{db:+d}'
                 lbl_w = fm.horizontalAdvance(lbl)
@@ -1166,7 +1197,7 @@ class EQGraph(QWidget):
             xi = int(x)
             p.setPen(QPen(QColor(BORD), 1))
             p.drawLine(xi, 0, xi, h)
-            # Label at bottom, background pill so it stays readable over curves
+            # Backed by a filled rect so it stays readable over the curves
             lbl_w = fm_f.horizontalAdvance(lbl_txt)
             txt_x = xi - lbl_w // 2
             txt_x = max(1, min(w - lbl_w - 1, txt_x))   # clamp to widget edges
@@ -1266,121 +1297,3 @@ class EQGraph(QWidget):
             p.drawText(tip_rect.adjusted(5, 3, -5, -3),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        tip_txt)
-
-
-def peaking_coefficients(fs, f0, gain_db, Q):
-    """Biquad coefficients for a peaking (bell) filter."""
-    A     = 10.0 ** (gain_db / 40.0)
-    w0    = 2.0 * math.pi * f0 / fs
-    alpha = math.sin(w0) / (2.0 * Q)
-    cos_w = math.cos(w0)
-    b0 =  1.0 + alpha * A
-    b1 = -2.0 * cos_w
-    b2 =  1.0 - alpha * A
-    a0 =  1.0 + alpha / A
-    a1 =  b1
-    a2 =  1.0 - alpha / A
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def lowshelf_coefficients(fs, f0, gain_db, Q):
-    """Biquad coefficients for a low-shelf filter."""
-    A     = 10.0 ** (gain_db / 40.0)
-    w0    = 2.0 * math.pi * f0 / fs
-    cos_w = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * Q)
-    sq    = 2.0 * math.sqrt(A) * alpha
-    b0 =  A * ((A + 1.0) - (A - 1.0) * cos_w + sq)
-    b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cos_w)
-    b2 =  A * ((A + 1.0) - (A - 1.0) * cos_w - sq)
-    a0 =       (A + 1.0) + (A - 1.0) * cos_w + sq
-    a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cos_w)
-    a2 =        (A + 1.0) + (A - 1.0) * cos_w - sq
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def highshelf_coefficients(fs, f0, gain_db, Q):
-    """Biquad coefficients for a high-shelf filter."""
-    A     = 10.0 ** (gain_db / 40.0)
-    w0    = 2.0 * math.pi * f0 / fs
-    cos_w = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * Q)
-    sq    = 2.0 * math.sqrt(A) * alpha
-    b0 =  A * ((A + 1.0) + (A - 1.0) * cos_w + sq)
-    b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w)
-    b2 =  A * ((A + 1.0) + (A - 1.0) * cos_w - sq)
-    a0 =       (A + 1.0) - (A - 1.0) * cos_w + sq
-    a1 =  2.0 * ((A - 1.0) - (A + 1.0) * cos_w)
-    a2 =        (A + 1.0) - (A - 1.0) * cos_w - sq
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def lowpass_coefficients(fs, f0, Q):
-    """Biquad coefficients for a 2nd-order Butterworth low-pass filter."""
-    w0    = 2.0 * math.pi * f0 / fs
-    cos_w = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * Q)
-    b0 = (1.0 - cos_w) / 2.0
-    b1 =  1.0 - cos_w
-    b2 = (1.0 - cos_w) / 2.0
-    a0 =  1.0 + alpha
-    a1 = -2.0 * cos_w
-    a2 =  1.0 - alpha
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def highpass_coefficients(fs, f0, Q):
-    """Biquad coefficients for a 2nd-order Butterworth high-pass filter."""
-    w0    = 2.0 * math.pi * f0 / fs
-    cos_w = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * Q)
-    b0 =  (1.0 + cos_w) / 2.0
-    b1 = -(1.0 + cos_w)
-    b2 =  (1.0 + cos_w) / 2.0
-    a0 =   1.0 + alpha
-    a1 =  -2.0 * cos_w
-    a2 =   1.0 - alpha
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def notch_coefficients(fs, f0, Q):
-    """Biquad coefficients for a notch (band-stop) filter."""
-    w0    = 2.0 * math.pi * f0 / fs
-    cos_w = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * Q)
-    b0 =  1.0
-    b1 = -2.0 * cos_w
-    b2 =  1.0
-    a0 =  1.0 + alpha
-    a1 =  b1
-    a2 =  1.0 - alpha
-    return (b0/a0, b1/a0, b2/a0, a1/a0, a2/a0)
-
-
-def eq_band_coefficients(fs, f0, gain_db, Q, filter_type: int):
-    """Dispatch to the correct biquad function for *filter_type*.
-
-    Returns (b0, b1, b2, a1, a2) normalised to a0=1, or None on error.
-    Low-pass, high-pass and notch filters ignore *gain_db*.
-    """
-    try:
-        if filter_type == EQ_TYPE_PEAK:
-            return peaking_coefficients(fs, f0, gain_db, Q)
-        elif filter_type == EQ_TYPE_LOWSHELF:
-            return lowshelf_coefficients(fs, f0, gain_db, Q)
-        elif filter_type == EQ_TYPE_HIGHSHELF:
-            return highshelf_coefficients(fs, f0, gain_db, Q)
-        elif filter_type == EQ_TYPE_LOWPASS:
-            return lowpass_coefficients(fs, f0, Q)
-        elif filter_type == EQ_TYPE_HIGHPASS:
-            return highpass_coefficients(fs, f0, Q)
-        elif filter_type == EQ_TYPE_NOTCH:
-            return notch_coefficients(fs, f0, Q)
-        else:
-            # Unknown type — fall back to peak
-            return peaking_coefficients(fs, f0, gain_db, Q)
-    except Exception:
-        return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-
