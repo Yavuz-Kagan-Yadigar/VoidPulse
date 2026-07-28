@@ -5,6 +5,7 @@ VoidPulse — constants, palette, theme helpers, and global stylesheet.
 import sys, os, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
 from collections import OrderedDict
 import concurrent.futures as _cf
+import urllib.request as _urlreq
 
 import numpy as _np
 from pathlib import Path
@@ -24,9 +25,27 @@ Gst.init(None)
 from mutagen import File as MutagenFile
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Flatpak sandbox detection
+# ══════════════════════════════════════════════════════════════════════════════
+IN_FLATPAK = Path('/.flatpak-info').exists()
+
+
+def host_cmd(*args) -> list:
+    """Prefix a command with `flatpak-spawn --host` when sandboxed.
+
+    aplay and systemctl aren't part of the flatpak runtime, only the host —
+    flatpak-spawn --host runs them there. Works with the finish-args VoidPulse
+    already requests (--socket=session-bus grants unrestricted bus access, so
+    no extra permission or manifest change is needed); outside flatpak this is
+    a no-op passthrough.
+    """
+    return (['flatpak-spawn', '--host'] if IN_FLATPAK else []) + list(args)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Performance constants
 # ══════════════════════════════════════════════════════════════════════════════
-FPS_CAP       = 60           # render timer target fps
+FPS_CAP       = 60           # render timer target
 _FRAME_MS     = 1000 // FPS_CAP          # 16 ms
 _FRAME_S      = 1.0 / FPS_CAP
 
@@ -34,15 +53,13 @@ _FRAME_S      = 1.0 / FPS_CAP
 # ══════════════════════════════════════════════════════════════════════════════
 #  Palette
 # ══════════════════════════════════════════════════════════════════════════════
-_DARK_MODE = True  # global theme flag
-_USE_SYSTEM_QT_THEME = False  # when True, palette is derived from the system Qt theme instead of _DARK/_LIGHT
+_DARK_MODE = True
+_USE_SYSTEM_QT_THEME = False  # derive the palette from the system Qt theme
 
-# Dark palette
 _DARK = dict(
     BG='#000000', BG2='#080808', BG3='#141414', BG4='#1e1e1e',
     BORD='#222222', B2='#333333', FG='#f0f0f0', FG2='#909090', SEL='#181818',
 )
-# Light palette
 _LIGHT = dict(
     BG='#f4f4f4', BG2='#e8e8e8', BG3='#dcdcdc', BG4='#d0d0d0',
     BORD='#c0c0c0', B2='#aaaaaa', FG='#111111', FG2='#555555', SEL='#e0e0e0',
@@ -55,40 +72,27 @@ BG4  = _DARK['BG4']
 BORD = _DARK['BORD']
 B2   = _DARK['B2']
 ACC  = '#e03030'
-_USER_ACC = ACC  # user's own accent choice, remembered so SYS mode can override ACC
-                 # without losing it, and restore it when SYS mode is turned off.
+_USER_ACC = ACC  # the user's own pick, kept so SYS mode can override ACC and
+                 # still restore it afterwards
 ACCH = '#ff4444'
 FG   = _DARK['FG']
 FG2  = _DARK['FG2']
 SEL  = _DARK['SEL']
 
-_SYSTEM_PALETTE_CACHE = None  # QPalette snapshot taken before we ever override app.setPalette()
-_APPLYING_OWN_PALETTE = False  # guard: True while VoidPulse's own _apply_app_palette() is
-                                # inside app.setPalette() — Qt fires paletteChanged for ANY
-                                # setPalette() call, including our own, with no way to tell
-                                # the difference from the signal alone. Without this guard,
-                                # our own repaint would be misread as "the system theme
-                                # changed", triggering apply_theme() again, which calls
-                                # setPalette() again, which fires the signal again —
-                                # an infinite feedback loop that looked like colors
-                                # constantly flipping / chasing the picker.
+_SYSTEM_PALETTE_CACHE = None  # QPalette snapshot taken before app.setPalette() is ever called
+# True only while _apply_app_palette() is inside app.setPalette(). Qt fires
+# paletteChanged for every setPalette() call, so without this guard VoidPulse's
+# own repaint reads as "the system theme changed" and loops forever.
+_APPLYING_OWN_PALETTE = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  qt6ct color-scheme file watching
 # ══════════════════════════════════════════════════════════════════════════════
-# qt6ct's own platform plugin only reads its color-scheme .conf file once, at
-# process startup — it does not watch the file itself, so it never emits a
-# live QApplication.paletteChanged when that file changes underneath a
-# running app. Tools like matugen (and wallust-driven Hyprland setups) work
-# by rewriting that .conf file directly on disk, so under qt6ct there is no
-# Qt-level signal to hook for a live update at all — every Qt app in this
-# situation (KeePassXC, Dolphin, etc., not just VoidPulse) has the same gap.
-#
-# The only reliable, still-fully-event-driven fix is to watch the relevant
-# files ourselves via QFileSystemWatcher (inotify-backed on Linux — zero
-# polling, zero extra disk I/O beyond the one read triggered by an actual
-# change) and re-parse+apply the color scheme directly when they change.
-_QT6CT_WATCHER = None          # QFileSystemWatcher instance (kept alive via module global)
+# qt6ct's platform plugin reads its color-scheme file once at startup and never
+# watches it, so tools that rewrite that file live (matugen, wallust) emit no
+# paletteChanged signal. QFileSystemWatcher (inotify-backed, no polling) on the
+# files themselves is the only event-driven way to notice those edits.
+_QT6CT_WATCHER = None          # module global so the watcher is not GC'd
 
 def _shade(hex_col: str, amount: float) -> str:
     """Shift a hex color's HSV value (brightness) by `amount` (can be negative)."""
@@ -106,6 +110,63 @@ def _blend(hex_a: str, hex_b: str, t: float) -> str:
     g  = round(a.green() + (b.green() - a.green()) * t)
     bl = round(a.blue()  + (b.blue()  - a.blue())  * t)
     return QColor(r, g, bl).name()
+
+
+def _relative_luminance(hex_col: str) -> float:
+    """WCAG relative luminance of a colour, 0.0 (black) to 1.0 (white)."""
+    c = QColor(hex_col)
+
+    def _lin(v: int) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(c.red()) + 0.7152 * _lin(c.green()) + 0.0722 * _lin(c.blue())
+
+
+def _contrast_ratio(hex_a: str, hex_b: str) -> float:
+    """WCAG contrast ratio between two colours, from 1.0 (identical) to 21.0."""
+    la, lb = _relative_luminance(hex_a), _relative_luminance(hex_b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+# Secondary text (artist line, format info, section labels) is FG blended toward
+# the background to read as muted. A fixed blend is unsafe on system themes: where
+# the theme's own text/background contrast is already low, blending again drops
+# below readable. MIN_FG2_CONTRAST is the floor (WCAG AA for body text); the
+# built-in palettes sit near 6.6:1, so only themes that need it get pulled back.
+FG2_BLEND = 0.45
+MIN_FG2_CONTRAST = 4.5
+
+
+def _muted_fg(text_hex: str, window_hex: str, *surfaces: str,
+              blend: float = FG2_BLEND,
+              min_ratio: float = MIN_FG2_CONTRAST) -> str:
+    """Blend text toward window for a muted tone, backing off until the result
+    clears min_ratio.
+
+    Extra `surfaces` are the other backgrounds secondary text is painted on (BG2
+    for list rows, BG3 for cards, combos and popups). Contrast is measured
+    against the worst of them.
+
+    Returns the most muted colour that still clears the floor, or the best-scoring
+    candidate if the theme is too low-contrast for any of them to.
+    """
+    checks = (window_hex,) + tuple(s for s in surfaces if s)
+
+    def _worst(col: str) -> float:
+        return min(_contrast_ratio(col, s) for s in checks)
+
+    best, best_ratio = text_hex, _worst(text_hex)
+    steps = max(1, int(round(blend / 0.05)))
+    for i in range(steps, 0, -1):
+        cand = _blend(text_hex, window_hex, i * 0.05)
+        ratio = _worst(cand)
+        if ratio >= min_ratio:
+            return cand
+        if ratio > best_ratio:
+            best, best_ratio = cand, ratio
+    return best
 
 
 def _desaturate_darken(hex_col: str, sat_amount: float, val_amount: float) -> str:
@@ -145,9 +206,8 @@ def _qt6ct_active_color_scheme_path() -> 'Optional[Path]':
             return p if p.exists() else None
     return None
 
-# Standard Qt QPalette::ColorRole order as written by qt6ct/qt5ct's
-# active_colors= line (20 comma-separated hex values). Only the roles
-# VoidPulse actually uses are named; the rest are parsed but ignored.
+# The QPalette::ColorRole order qt6ct writes in its active_colors= line, 20
+# comma-separated hex values. Unused roles are parsed and ignored.
 _QT6CT_ACTIVE_COLORS_ORDER = (
     'window_text', 'button', 'light', 'midlight', 'dark', 'mid',
     'text', 'bright_text', 'button_text', 'base', 'window', 'shadow',
@@ -188,25 +248,25 @@ def _parse_qt6ct_color_scheme(path: 'Path') -> Optional[dict]:
     highlight = _valid_hex(roles.get('highlight', ''))
     mid = _valid_hex(roles.get('mid', ''))
     if window is None or text_c is None:
-        return None   # unusable — caller falls back to whatever it had before
+        return None   # unusable; the caller keeps what it had
 
     window_hex, text_hex = window.name(), text_c.name()
     is_dark = window.value() < 128
     step = 0.06 if is_dark else -0.05
 
-    fg2 = _blend(text_hex, window_hex, 0.45)
-    # `mid` is present in every valid active_colors= line (it's a fixed-width
-    # 20-field format), so this fallback only matters if the line was
-    # malformed/truncated. Shade *toward* window brightness (lighter in dark
-    # mode, darker in light mode) — same direction _system_palette_colors()
-    # implicitly gets by using Mid directly, since Qt's own Mid role sits
-    # between Window and WindowText in brightness.
+    bg2 = base.name() if base is not None and base.name() != window_hex else _shade(window_hex, step)
+    bg3 = alt_base.name() if alt_base is not None and alt_base.name() != window_hex else _shade(window_hex, step * 2)
+    bg4 = button.name() if button is not None and button.name() != window_hex else _shade(window_hex, step * 3)
+
+    fg2 = _muted_fg(text_hex, window_hex, bg2, bg3)
+    # `mid` is present in every valid active_colors= line (fixed 20 fields), so
+    # this fallback only matters for a truncated one. It shades toward window
+    # brightness, the same direction Qt's own Mid role sits in.
     bord = mid.name() if mid is not None else _shade(window_hex, step)
 
-    # Same black/unset-Highlight safety net as _system_palette_colors(), and
-    # the same SEL != ACC contrast fix (see that function's comments) —
-    # accent stays the vivid Highlight color, SEL is a muted, darkened,
-    # desaturated version of it so playing-row text stays legible.
+    # Same guards as _system_palette_colors(): fall back when Highlight is unset
+    # or black, and keep SEL distinct from ACC (muted, darkened, desaturated) so
+    # playing-row text stays legible on a selected row.
     sel_src = (highlight.name()
                if (highlight is not None and highlight.value() >= 20 and highlight.name() != window_hex)
                else None)
@@ -215,9 +275,9 @@ def _parse_qt6ct_color_scheme(path: 'Path') -> Optional[dict]:
 
     return dict(
         BG=window_hex,
-        BG2=base.name() if base is not None and base.name() != window_hex else _shade(window_hex, step),
-        BG3=alt_base.name() if alt_base is not None and alt_base.name() != window_hex else _shade(window_hex, step * 2),
-        BG4=button.name() if button is not None and button.name() != window_hex else _shade(window_hex, step * 3),
+        BG2=bg2,
+        BG3=bg3,
+        BG4=bg4,
         BORD=bord,
         B2=_shade(bord, step),
         ACC=acc_hex,
@@ -227,9 +287,8 @@ def _parse_qt6ct_color_scheme(path: 'Path') -> Optional[dict]:
     )
 
 def _qt6ct_files_to_watch() -> list:
-    """Every path we currently need to watch: qt6ct.conf itself (so we
-    notice if the user/matugen points it at a *different* scheme file) plus
-    whichever scheme file it currently resolves to."""
+    """qt6ct.conf itself, so a switch to a different scheme file is noticed,
+    plus whichever scheme file it currently points at."""
     paths = []
     conf = _qt6ct_conf_path()
     if conf.exists():
@@ -240,17 +299,15 @@ def _qt6ct_files_to_watch() -> list:
     return paths
 
 def start_qt6ct_live_reload(on_change) -> None:
-    """Set up a QFileSystemWatcher (inotify-backed — no polling) on qt6ct's
-    config + active color-scheme file, so external tools that rewrite that
-    file on disk (matugen, wallust-based Hyprland scripts, etc.) are picked
-    up live. qt6ct's own platform plugin does not re-read the file itself
-    once the process has started, so this is the only way to react without
-    restarting VoidPulse.
+    """Watch qt6ct's config and active color-scheme file for external edits.
 
-    `on_change` is called (with no arguments) whenever a watched file
-    changes; the caller is expected to re-derive colors afterwards (see
-    MainWindow._on_qt6ct_file_changed). No-op if qt6ct isn't configured at
-    all (no qt6ct.conf found) — nothing to watch, nothing to do.
+    Uses QFileSystemWatcher (inotify-backed, no polling) so tools that rewrite
+    the scheme file on disk — matugen, wallust-driven Hyprland scripts — are
+    picked up live; qt6ct's plugin never re-reads it itself.
+
+    `on_change` is called with no arguments on every watched-file change; the
+    caller re-derives colors (see MainWindow._on_qt6ct_file_changed). No-op when
+    qt6ct is not configured at all.
     """
     global _QT6CT_WATCHER
     paths = _qt6ct_files_to_watch()
@@ -259,10 +316,9 @@ def start_qt6ct_live_reload(on_change) -> None:
     watcher = QFileSystemWatcher(paths, QApplication.instance())
 
     def _on_path_changed(_path):
-        # Editors/tools often replace-then-rename a file rather than writing
-        # in place, which drops it from the watch list — re-add whatever is
-        # currently missing (including a newly-resolved scheme file if
-        # qt6ct.conf itself changed which one is active) after each event.
+        # Tools that replace-then-rename a file drop it from the watch list, so
+        # re-add whatever is missing after each event — including a different
+        # scheme file if qt6ct.conf now points at one.
         current = set(watcher.files())
         wanted = set(_qt6ct_files_to_watch())
         missing = wanted - current
@@ -274,9 +330,10 @@ def start_qt6ct_live_reload(on_change) -> None:
     _QT6CT_WATCHER = watcher   # keep alive — QFileSystemWatcher is GC'd otherwise
 
 def qt6ct_color_scheme_colors() -> Optional[dict]:
-    """Return the current qt6ct color-scheme-derived palette dict (parsed
-    fresh from disk each call — only ever called from start_qt6ct_live_reload's
-    on_change callback or once at startup, so this is not a hot path)."""
+    """Parse the active qt6ct colour scheme from disk into a palette dict.
+
+    Read fresh each call, which only happens at startup and on a file change.
+    """
     scheme = _qt6ct_active_color_scheme_path()
     if scheme is None:
         return None
@@ -286,17 +343,14 @@ def qt6ct_color_scheme_colors() -> Optional[dict]:
 def _capture_system_palette(explicit_palette: 'QPalette' = None) -> None:
     """Snapshot the OS/Qt-theme-provided QPalette.
 
-    Only snapshots once via app.palette() (the very first call, right after
-    QApplication() is constructed in voidpulse.py, before VoidPulse has ever
-    called app.setPalette()/setStyleSheet() itself). Re-reading app.palette()
-    at any later point would just read back VoidPulse's *own* colors (since
-    _apply_app_palette() already overwrote it), not qt6ct's — so later calls
-    are a no-op by default.
+    app.palette() is read only on the first call — right after QApplication is
+    constructed in voidpulse.py, before VoidPulse overrides the palette itself.
+    Later calls are a no-op, since app.palette() would by then return VoidPulse's
+    own colors rather than the theme's.
 
-    Pass explicit_palette to force-set the cache to a specific QPalette
-    instead — used when QGuiApplication.paletteChanged fires, since Qt hands
-    us the new system palette directly as part of that signal and we don't
-    need (and must not) go back through app.palette().
+    explicit_palette overwrites the cache directly. That is the paletteChanged
+    path: Qt hands the new system palette to the signal, so app.palette() must
+    not be consulted at all.
     """
     global _SYSTEM_PALETTE_CACHE
     if explicit_palette is not None:
@@ -310,9 +364,10 @@ def _capture_system_palette(explicit_palette: 'QPalette' = None) -> None:
 
 
 def _system_palette_colors() -> dict:
-    """Derive the BG/FG/etc. hex palette VoidPulse uses internally from the
-    real system Qt theme (falls back to the current style's standard palette
-    if we never captured one)."""
+    """Derive VoidPulse's BG/FG palette from the system Qt theme.
+
+    Falls back to the current style's standard palette if none was captured.
+    """
     pal = _SYSTEM_PALETTE_CACHE
     if pal is None:
         app = QApplication.instance()
@@ -329,48 +384,37 @@ def _system_palette_colors() -> dict:
     sel      = col(QPalette.ColorRole.Highlight)
     bord     = col(QPalette.ColorRole.Mid)
 
-    # Safety net: some qt6ct/system themes never actually set Highlight (Qt's
-    # QColor.isValid() can't tell us this — it returns True even for a role
-    # the theme left at Qt's own black default). If Highlight comes back
-    # black, or effectively invisible against the window background, using
-    # it verbatim as ACC would silently paint the play button, playing-track
-    # text, active tab/playlist label, and viz bars all black. Fall back to
-    # the user's own chosen accent (or the built-in default) in that case —
-    # still "system-derived" everywhere else, just not for a role the theme
-    # never actually populated.
+    # Some themes never set Highlight and Qt fills the role with black, which
+    # QColor.isValid() cannot detect. Using that as ACC would paint the play
+    # button, playing-track text and viz bars black, so fall back to the user's
+    # accent when Highlight is black or invisible against the window.
     _sel_c = QColor(sel)
     if _sel_c.value() < 20 or _sel_c.name() == QColor(window).name():
         sel = _USER_ACC
 
-    # NOTE: we deliberately do NOT use QPalette.ColorRole.PlaceholderText here.
-    # QColor.isValid() only checks that the color can be parsed — it's true
-    # even for a role the theme never actually set (Qt fills it with a
-    # default, often pure black). That produced FG2 == "#000000" under
-    # qt6ct/Hyprland themes that don't customize PlaceholderText, making
-    # secondary/muted text render as solid black instead of a dim grey.
-    # Blending WindowText 45% toward the window background reliably yields a
-    # muted-but-legible secondary text color under both light and dark
-    # system themes, matching how _DARK/_LIGHT define FG2 relative to FG/BG.
-    fg2 = _blend(text, window, 0.45)
-
     is_dark = QColor(window).value() < 128
     step = 0.06 if is_dark else -0.05
 
-    # SEL (row/list selection background) must NOT equal ACC (accent — also
-    # used to paint the currently-playing track's text). Under system themes
-    # both were being sampled from the same QPalette.Highlight role, so a
-    # playing row that was also the selected row rendered accent-colored
-    # text directly on an identical accent-colored background — invisible.
-    # Desaturating + darkening Highlight by 50% for SEL keeps it recognizably
-    # "the same hue" (still looks like a selection tint) while guaranteeing
-    # legible contrast against the vivid ACC text painted on top.
+    bg2 = base if base != window else _shade(window, step)
+    bg3 = alt_base if alt_base != window else _shade(window, step * 2)
+    bg4 = button if button != window else _shade(window, step * 3)
+
+    # FG2 is derived rather than read from PlaceholderText: themes that leave
+    # that role unset report pure black, which hides secondary text. _muted_fg()
+    # blends toward the background but holds a contrast floor against every
+    # surface the text is drawn on.
+    fg2 = _muted_fg(text, window, bg2, bg3)
+
+    # SEL must differ from ACC: playing-track text is drawn in ACC, so if that
+    # row is also selected both would come from Highlight and cancel out.
+    # Desaturating and darkening keeps the hue and restores contrast.
     sel_bg = _desaturate_darken(sel, 0.5, 0.5)
 
     return dict(
         BG=window,
-        BG2=base if base != window else _shade(window, step),
-        BG3=alt_base if alt_base != window else _shade(window, step * 2),
-        BG4=button if button != window else _shade(window, step * 3),
+        BG2=bg2,
+        BG3=bg3,
+        BG4=bg4,
         BORD=bord,
         B2=_shade(bord, step),
         ACC=sel,
@@ -380,39 +424,39 @@ def _system_palette_colors() -> dict:
     )
 
 
-_VP_MODULE_CACHE = None  # populated lazily by _broadcast_palette()
+_VP_MODULE_CACHE = None  # filled in on the first _broadcast_palette()
+
+
+_PALETTE_NAMES = (
+    'BG', 'BG2', 'BG3', 'BG4', 'BORD', 'B2',
+    'FG', 'FG2', 'SEL', 'ACC', 'ACCH', 'SS', '_DARK_MODE', 'RAD_PCT',
+)
 
 
 def _broadcast_palette() -> None:
-    """Push current palette + accent globals into every voidpulse module namespace.
+    """Push the current palette and accent globals into every VoidPulse module.
 
-    Because all modules do `from constants import BG, ACC, ...` they get *copies*
-    of the strings at import time.  When apply_theme() or apply_accent() mutates
-    the module-level globals here, those copies go stale.  This function fixes
-    that by writing the new values back into every loaded module's __dict__ so
-    that bare-name references (e.g. ``FG`` in a refresh_theme method) always see
-    the current value without requiring every file to use ``import constants as _c``.
+    Modules do `from constants import BG, ACC, ...`, so they hold copies taken at
+    import time, which go stale when apply_theme() or apply_accent() changes the
+    values here. Writing the new values into each module's __dict__ keeps bare
+    names (e.g. ``FG`` inside a refresh_theme method) correct without every file
+    having to import constants as a module.
+
+    Modules are found by location — any loaded module whose file sits in this
+    directory — so new files participate automatically. The list is cached
+    because this runs on every step of a colour-picker drag.
     """
     global _VP_MODULE_CACHE
-    _PALETTE_NAMES = (
-        'BG', 'BG2', 'BG3', 'BG4', 'BORD', 'B2',
-        'FG', 'FG2', 'SEL', 'ACC', 'ACCH', 'SS', '_DARK_MODE', 'RAD_PCT',
-    )
     _current = {n: globals()[n] for n in _PALETTE_NAMES}
-    # ponytail: cache the actual module objects on first call instead of
-    # rescanning all of sys.modules (1000+ entries) on every theme/accent
-    # change — this fires repeatedly while the user drags the color picker.
     if _VP_MODULE_CACHE is None:
         import sys as _sys
-        _vp_names = frozenset((
-            'constants', 'controlbar', 'cover_art', 'dialogs_edit', 'eq',
-            'fetch_popups', 'library', 'lyrics', 'main_window', 'metadata_online',
-            'mpris', 'player', 'settings_popup', 'views', 'voidpulse',
-            'widgets_base', 'blackout_overlay',
-        ))
-        _VP_MODULE_CACHE = [
-            _mod for _name, _mod in _sys.modules.items() if _name in _vp_names
-        ]
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _cache = []
+        for _mod in list(_sys.modules.values()):
+            _f = getattr(_mod, '__file__', None)
+            if _f and os.path.dirname(os.path.abspath(_f)) == _here:
+                _cache.append(_mod)
+        _VP_MODULE_CACHE = _cache
     for _mod in _VP_MODULE_CACHE:
         _d = getattr(_mod, '__dict__', None)
         if _d is None:
@@ -425,30 +469,26 @@ def _broadcast_palette() -> None:
 def apply_theme(dark: bool) -> None:
     """Switch all palette globals between dark and light, then rebuild stylesheet.
 
-    If the system Qt theme override is active, the dark/light palettes are
-    ignored in favour of colors sampled from the system Qt theme (see
-    apply_system_qt_theme); `dark` is still stored so the DARK/LIGHT toggle
-    keeps its state for when the system-theme override is turned back off.
+    Under the system-theme override the dark/light palettes are ignored in favour
+    of the desktop's colours, but `dark` is still stored so the toggle keeps its
+    state for when that override is turned off again.
     """
     global _DARK_MODE, BG, BG2, BG3, BG4, BORD, B2, FG, FG2, SEL, ACC, ACCH, SS
     _DARK_MODE = dark
     if _USE_SYSTEM_QT_THEME:
-        # Prefer a freshly-parsed qt6ct color-scheme file (see
-        # start_qt6ct_live_reload) over the QPalette snapshot — external
-        # tools like matugen rewrite that file directly without qt6ct's
-        # platform plugin ever updating QApplication's live palette, so the
-        # file is the more current source of truth whenever qt6ct is in use.
+        # The scheme file beats the QPalette snapshot: tools like matugen rewrite
+        # it directly, without qt6ct ever updating QApplication's live palette.
         pal = qt6ct_color_scheme_colors() or _system_palette_colors()
-        ACC = pal['ACC']   # follow the desktop's Highlight/accent color while SYS mode is on
+        ACC = pal['ACC']   # follow the desktop's own accent
     else:
         pal = _DARK if dark else _LIGHT
-        ACC = _USER_ACC    # SYS mode off — restore the user's own accent choice
+        ACC = _USER_ACC
     BG = pal['BG']; BG2 = pal['BG2']; BG3 = pal['BG3']; BG4 = pal['BG4']
     BORD = pal['BORD']; B2 = pal['B2']; FG = pal['FG']; FG2 = pal['FG2']
     SEL = pal['SEL']
-    ACCH = make_acch(ACC)   # recompute from current ACC (HSV shift is palette-independent)
+    ACCH = make_acch(ACC)
     SS = make_stylesheet(ACC, ACCH)
-    _broadcast_palette()    # push new values into every module's namespace
+    _broadcast_palette()
     app = QApplication.instance()
     if app:
         app.setStyleSheet(SS)
@@ -458,61 +498,46 @@ def apply_theme(dark: bool) -> None:
 def apply_system_qt_theme(enabled: bool) -> None:
     """Toggle 'use system Qt theme' mode.
 
-    When enabled, VoidPulse's entire color palette (backgrounds, foregrounds,
-    borders, selection color) is derived from the system Qt theme rather than
-    the app's built-in DARK/LIGHT palettes. When disabled, reverts to
-    DARK/LIGHT based on the current _DARK_MODE flag.
+    When enabled the whole palette comes from the system Qt theme instead of the
+    built-in dark and light ones; disabling reverts to whichever of those matches
+    the current _DARK_MODE flag.
     """
     global _USE_SYSTEM_QT_THEME
     _USE_SYSTEM_QT_THEME = enabled
     if enabled:
-        # No-op if we already have a clean snapshot from startup (the normal
-        # case) — see _capture_system_palette()'s docstring for why we must
-        # NOT re-read app.palette() here (it would read back VoidPulse's own
-        # colors, not qt6ct's).
+        # A no-op when the startup snapshot exists, which is the normal case
         _capture_system_palette()
     apply_theme(_DARK_MODE)
 
 
 def is_system_qt_theme_active() -> bool:
-    """Return whether VoidPulse is currently deriving its palette from the
-    live system Qt theme (qt6ct / KDE Plasma / any xdg-desktop-portal
-    backend), rather than its own built-in DARK/LIGHT palettes."""
+    """True while the palette is being derived from the live system Qt theme."""
     return _USE_SYSTEM_QT_THEME
 
 
 def is_applying_own_palette() -> bool:
-    """True only while VoidPulse's own _apply_app_palette() is inside its
-    app.setPalette() call. Used to distinguish a genuine live system-theme
-    change (fires paletteChanged from outside VoidPulse) from the
-    paletteChanged Qt fires right back at us as a side effect of our own
-    setPalette() call — without this check, our own repaint would loop back
-    around as a fake "system theme changed", triggering another repaint,
-    forever."""
+    """True only while _apply_app_palette() is inside its app.setPalette() call.
+
+    Distinguishes a real system-theme change from the paletteChanged Qt emits as
+    a side effect of VoidPulse's own setPalette(). Without the check, each repaint
+    would come back as a fake theme change and loop.
+    """
     return _APPLYING_OWN_PALETTE
 
 
 def resync_system_qt_theme(new_palette: 'QPalette' = None) -> None:
     """Re-sample the live system Qt palette and reapply it.
 
-    Called whenever Qt reports that the platform theme has changed
-    underneath us (QGuiApplication.paletteChanged), e.g. the user switches
-    the color scheme in qt6ct, KDE System Settings, or any desktop that
-    talks to xdg-desktop-portal's org.freedesktop.portal.Settings. This is
-    the mechanism that makes "follow the system theme" actually live rather
-    than a one-time snapshot taken at startup — no per-DE code is needed
-    here since QPalette is already the DE-agnostic surface Qt exposes for
-    this.
+    Called when Qt reports a platform-theme change (paletteChanged), e.g. the
+    color scheme changed in qt6ct, KDE System Settings, or any desktop speaking
+    xdg-desktop-portal. QPalette is Qt's DE-agnostic surface for this, so no
+    per-desktop code is needed.
 
-    IMPORTANT: new_palette must be the QPalette Qt handed us as the
-    paletteChanged signal argument. We must NOT fall back to reading
-    QApplication.instance().palette() here — by the time this runs,
-    VoidPulse has already called app.setPalette() with its own derived
-    colors, so re-reading app.palette() would just feed VoidPulse's own
-    output back into itself (colors would drift/freeze instead of tracking
-    the desktop). If new_palette isn't supplied, this is a no-op.
-
-    No-op if system-theme mode isn't currently enabled.
+    new_palette must be the QPalette from the paletteChanged signal. Reading
+    QApplication.palette() instead returns VoidPulse's own derived colors (it has
+    already called setPalette by this point), which feeds the output back into
+    itself. Without the argument this is a no-op, as it is when system-theme mode
+    is off.
     """
     if not _USE_SYSTEM_QT_THEME:
         return
@@ -525,21 +550,17 @@ def resync_system_qt_theme(new_palette: 'QPalette' = None) -> None:
 def apply_accent(color: str) -> None:
     """Update accent colour globally and broadcast to all modules.
 
-    Called by ControlBar._on_accent_change() after it updates its own locals.
-    Ensures every other module (settings_popup, views, etc.) sees the new ACC.
+    Called by ControlBar._on_accent_change(), so every other module sees the
+    new ACC.
     """
     global ACC, ACCH, SS, _USER_ACC
-    # Always remember the user's own pick — including while SYS mode is on,
-    # so that config restore (which loads the saved accent_color regardless
-    # of SYS state) and toggling SYS back off later both recover the correct
-    # color instead of falling back to the '#e03030' default. Only the
-    # *visible* ACC is left alone while SYS is active (it stays following
-    # the system Highlight color); _USER_ACC just tracks what to restore.
+    # Record the user's pick even while SYS mode is on, so config restore and
+    # turning SYS back off both recover it instead of the built-in default.
+    # Only the visible ACC is left alone in that case.
     _USER_ACC = color
     if _USE_SYSTEM_QT_THEME:
-        # Don't let a manual accent pick visually override SYS mode's
-        # system-derived accent — SYS mode is already driving ACC via
-        # apply_theme(). Broadcast is skipped; there's nothing new to show.
+        # SYS mode drives ACC from the desktop via apply_theme(); a manual pick
+        # must not override it, so there is nothing to broadcast.
         return
     ACC  = color
     ACCH = make_acch(color)
@@ -586,17 +607,16 @@ SUPPORTED_EXT = frozenset({
 })
 CONFIG_PATH   = Path.home() / '.config' / 'voidpulse' / 'config.json'
 VIZ_BANDS     = 256
-GST_BANDS     = 2048  # high-res spectrum for better log/lin mapping
-OV_VIZ_H      = 60    # overlay visualization height px
+GST_BANDS     = 2048  # FFT bands, well above VIZ_BANDS for a cleaner mapping
+OV_VIZ_H      = 60    # overlay viz height, px
 MIN_DB        = -70.0
-RAD_PCT       = 60   # global corner-radius percentage (0 = boxy/sharp, 100 = pill/circle)
+RAD_PCT       = 60   # corner radius: 0 is square, 100 a pill or circle
 
 def _r(full_px: int) -> int:
-    """Return a corner radius scaled by RAD_PCT.
+    """Scale a corner radius by RAD_PCT.
 
-    ``full_px`` is the maximum radius (at 100 %) for the element being styled —
-    typically half the element's height (gives a pill/circle shape).
-    At 0 % returns 0 (perfectly sharp corners).
+    full_px is the radius at 100%, usually half the element's height, which gives
+    a pill or a circle. At 0% the corners are square.
     """
     return round(full_px * RAD_PCT / 100)
 
@@ -608,15 +628,23 @@ EQ_GAIN_MIN   = -10.0
 EQ_GAIN_MAX   = 10.0
 EQ_Q_MIN      = 0.1
 EQ_Q_MAX      = 10.0
-EQ_GAIN_MAX_GRAPH = EQ_GAIN_MAX   # graph vertical range — kept in sync with slider max
+EQ_GAIN_MAX_GRAPH = EQ_GAIN_MAX   # graph range, matching the slider maximum
 
-# ── EQ filter type constants ──────────────────────────────────────────────────
-EQ_TYPE_PEAK       = 0   # Bell / peaking EQ
-EQ_TYPE_LOWSHELF   = 1   # Low-shelf
-EQ_TYPE_HIGHSHELF  = 2   # High-shelf
-EQ_TYPE_LOWPASS    = 3   # Low-pass  (gain ignored)
-EQ_TYPE_HIGHPASS   = 4   # High-pass (gain ignored)
-EQ_TYPE_NOTCH      = 5   # Band-stop / notch  (gain ignored)
+# Output ceiling the limiter brick-walls at; Player._make_sink_bin converts it to
+# audiodynamic's linear threshold. The automatic EQ headroom stage deliberately
+# aims for 0 dBFS instead: staging to this ceiling would cost every track another
+# dB even with a flat EQ, and letting the brick wall trim a peak that was already
+# at full scale is inaudible.
+LIMITER_CEILING_DBFS = -1.0
+
+# ── EQ filter types ───────────────────────────────────────────────────────────
+# The last three ignore the gain value.
+EQ_TYPE_PEAK       = 0
+EQ_TYPE_LOWSHELF   = 1
+EQ_TYPE_HIGHSHELF  = 2
+EQ_TYPE_LOWPASS    = 3
+EQ_TYPE_HIGHPASS   = 4
+EQ_TYPE_NOTCH      = 5
 
 EQ_TYPE_LABELS = {
     EQ_TYPE_PEAK:      'Peak',
@@ -627,7 +655,7 @@ EQ_TYPE_LABELS = {
     EQ_TYPE_NOTCH:     'Notch',
 }
 
-# Ordered list for the ComboBox (index == EQ_TYPE_* constant value)
+# Combo box order; the index equals the constant
 EQ_TYPE_LIST = [
     EQ_TYPE_PEAK,
     EQ_TYPE_LOWSHELF,
@@ -637,14 +665,14 @@ EQ_TYPE_LIST = [
     EQ_TYPE_NOTCH,
 ]
 # ══════════════════════════════════════════════════════════════════════════════
-#  Stylesheet — uses current BG/FG globals (dark or light)
+#  Stylesheet
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def make_stylesheet(acc: str = None, acch: str = None) -> str:
     if acc  is None: acc  = ACC
     if acch is None: acch = ACCH
-    # ── Semantic radius values (computed once per stylesheet rebuild) ──────────
+    # Radii per element, from each one's own full-size height
     r_gen  = _r(12)   # menus, tooltips, dialogs, popups
     r_btn  = _r(18)   # standard buttons (36 px height → max 18 px pill)
     r_play = _r(26)   # play button (52 px → max 26 px circle)
@@ -653,18 +681,33 @@ def make_stylesheet(acc: str = None, acch: str = None) -> str:
     r_grv  = _r(2)    # slider groove (4 px height → max 2 px)
     r_slh  = _r(7)    # EQ/settings slider handle (14 px → max 7 px circle)
     r_inp  = _r(15)   # text inputs & combo boxes (~30 px → max 15 px)
+    # eq_type_combo renders 22px tall (min-height 16 + padding 4 + border 2).
+    # r_inp is calibrated for a ~30px input and would ask for up to 15px here;
+    # past about half a box's height Qt drops the rounding entirely instead of
+    # clamping to a pill, so this radius is capped to what the box supports.
+    r_eqtype = min(r_inp, 22 // 2)
     r_tbl  = _r(8)    # table & list container
     r_tab  = _r(5)    # tab bar top corners
     r_item = _r(6)    # list/tab item highlight
     r_scr  = _r(2)    # scrollbar handle (5 px wide)
-    # Drop-down arrow sub-control: right side rounded, left side square
-    r_dd_r = f'0 {r_inp}px {r_inp}px 0'
+    # Drop-down strip: rounded on the right, square against the box.
+    # Qt's stylesheet parser accepts only one or two lengths for `border-radius`
+    # — CSS's four-corner shorthand is dropped silently, which left the strip
+    # square and painting its own corners over the combo's rounded outline.
+    # Per-corner properties are the form Qt honours. The strip is laid out
+    # inside the 1px border, so its radius is a pixel tighter than the box's.
+    def _dd_right(radius: int) -> str:
+        rr = max(radius - 1, 0)
+        return ('border-top-left-radius:0; border-bottom-left-radius:0;'
+                f'border-top-right-radius:{rr}px; border-bottom-right-radius:{rr}px;')
+    r_dd_r = _dd_right(r_inp)
+    r_dd_r_eqtype = _dd_right(r_eqtype)
     return f"""
 * {{ outline: none; }}
 QWidget     {{ background:{BG};  color:{FG};  font-size:13px; }}
 QMainWindow {{ background:{BG}; }}
 QDialog     {{ background:{BG}; border-radius:{r_gen}px; border:3px solid {ACC}; }}
-QWidget#sidebar {{ background:{BG2}; border-right:1px solid {BORD}; }}
+QWidget#sidebar {{ background:{BG}; border-right:1px solid {BORD}; }}
 
 QPushButton {{
     background:{BG3}; color:{FG}; border:1px solid {B2};
@@ -702,7 +745,13 @@ QPushButton#icon_btn:pressed {{ background:{BG4}; }}
 
 QSlider {{ background: transparent; }}
 QSlider::groove:horizontal {{ background:{B2}; height:4px; border-radius:{r_grv}px; }}
-QSlider::sub-page:horizontal {{ background:{acc}; border-radius:{r_grv}px 0 0 {r_grv}px; }}
+/* Rounded at the start of the groove, square where the handle covers it. Written
+   per corner because Qt ignores CSS's four-corner border-radius shorthand. */
+QSlider::sub-page:horizontal {{
+    background:{acc};
+    border-top-left-radius:{r_grv}px; border-bottom-left-radius:{r_grv}px;
+    border-top-right-radius:0; border-bottom-right-radius:0;
+}}
 QSlider::handle:horizontal {{
     background:{BG4}; border:2px solid {acc};
     width:14px; height:14px; border-radius:{r_slh}px; margin:-5px 0;
@@ -767,8 +816,9 @@ QComboBox {{
 QComboBox:hover  {{ border-color:{acc}; }}
 QComboBox:focus  {{ border-color:{acc}; }}
 QComboBox::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: top right;
     border-left:1px solid {B2}; background:{BG2};
-    width:30px; border-radius:{r_dd_r};
+    width:30px; {r_dd_r}
 }}
 QComboBox::down-arrow {{ color:{FG2}; }}
 QComboBox QAbstractItemView {{
@@ -776,6 +826,29 @@ QComboBox QAbstractItemView {{
     selection-background-color:{SEL};
 }}
 QComboBox QAbstractItemView::item {{ min-height:30px; padding:0 8px; }}
+
+/* EQ band-table "Type" combo. eq.py gives this cell control a 26px fixed
+   height, but the generic QComboBox rule above (min-height:30px + padding +
+   border) pushes the real box past that — stylesheet sizing wins over
+   setFixedHeight() — and the pill then clips against the next table row.
+   This ID rule (higher specificity) shrinks the box and the drop-down strip
+   to fit 26px and leaves more width for the label.
+
+   Background, colour, border and radius are restated rather than inherited:
+   once this rule declares its own box model, the plain QComboBox rule's
+   border-radius no longer applies and the corners come out square whatever
+   RAD_PCT is set to. */
+#eq_type_combo {{
+    background:{BG3}; color:{FG}; border:1px solid {B2};
+    border-radius:{r_eqtype}px; min-height:16px; padding:2px 6px; font-size:11px;
+}}
+#eq_type_combo:hover  {{ border-color:{acc}; }}
+#eq_type_combo:focus  {{ border-color:{acc}; }}
+#eq_type_combo::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: top right;
+    border-left:1px solid {B2}; background:{BG2};
+    width:16px; {r_dd_r_eqtype}
+}}
 
 QListWidget {{ background:{BG2}; border:none; color:{FG}; border-radius:{r_tbl}px; }}
 QListWidget::item {{ padding:12px 14px; border-bottom:1px solid {BORD}; font-size:12px; }}
@@ -790,9 +863,9 @@ QScrollBar::handle:hover {{ background:{acc}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height:0; width:0; }}
 QScrollBar::add-page,  QScrollBar::sub-page {{ background:none; }}
 
-QSplitter::handle {{ background:transparent; }}
-QSplitter::handle:horizontal {{ width:16px; border-left:1px solid {BORD}; border-right:1px solid {BORD}; background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 transparent, stop:0.4999 transparent, stop:0.5 {BORD}, stop:0.5001 {BORD}, stop:0.5002 transparent, stop:1 transparent); }}
-QSplitter::handle:vertical   {{ height:16px; border-top:1px solid {BORD}; border-bottom:1px solid {BORD}; background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 transparent, stop:0.4999 transparent, stop:0.5 {BORD}, stop:0.5001 {BORD}, stop:0.5002 transparent, stop:1 transparent); }}
+QSplitter::handle {{ background:{BG2}; }}
+QSplitter::handle:horizontal {{ width:16px; border-left:1px solid {BORD}; border-right:1px solid {BORD}; }}
+QSplitter::handle:vertical   {{ height:16px; border-top:1px solid {BORD}; border-bottom:1px solid {BORD}; }}
 
 QMenu {{ background:{BG3}; border:2px solid {ACC}; border-radius:{r_gen}px; padding:4px 0; }}
 QMenu::item {{ padding:9px 22px; color:{FG}; }}
@@ -816,20 +889,48 @@ QFrame#ctrlbar {{ border-top:1px solid {BORD}; }}
 
 /* Settings & EQ popups – background drawn by paintEvent */
 QFrame#settings_popup,
-QFrame#eq_popup {{
+QFrame#eq_popup,
+QFrame#device_busy_popup {{
     background: transparent;
     border: none;
 }}
 """
 
-SS = make_stylesheet()  # initial
+SS = make_stylesheet()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Shared utilities (moved here to break circular imports)
+#  Shared utilities — here rather than in a module, to avoid import cycles
 # ══════════════════════════════════════════════════════════════════════════════
 
-_lastfm_api_key  = ''    # set from config or fetch popups — never hardcoded
+_lastfm_api_key  = ''    # from the config file or a fetch popup
+
+_HTTP_UA = 'Mozilla/5.0 (X11; Linux x86_64) VoidPulse/2.0'
+
+
+def _get_bytes(url, timeout=8, headers=None):
+    """Fetch a URL and return the raw body bytes.
+
+    Used for images. Decoding those as text would corrupt them, so text and
+    binary fetches are kept apart.
+    """
+    h = {'User-Agent': _HTTP_UA}
+    if headers:
+        h.update(headers)
+    req = _urlreq.Request(url, headers=h)
+    with _urlreq.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _get(url, timeout=8, headers=None):
+    """Fetch a URL and return the body decoded as text."""
+    return _get_bytes(url, timeout, headers).decode('utf-8', errors='replace')
+
+
+def _get_json(url, timeout=8, headers=None):
+    """Fetch a URL and parse the body as JSON."""
+    return json.loads(_get(url, timeout, headers))
+
 
 def _sanitize_filename_part(text: str) -> str:
     """Remove characters that are illegal in filenames on Linux/POSIX."""
@@ -837,7 +938,7 @@ def _sanitize_filename_part(text: str) -> str:
     return text.strip('. ')
 
 def _open_audio(fp: str):
-    """Open an audio file with mutagen, trying format-specific classes as fallback."""
+    """Open an audio file with mutagen, falling back to per-format classes."""
     af = MutagenFile(fp, easy=False)
     if af is not None:
         return af

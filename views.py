@@ -1,14 +1,18 @@
 """
-VoidPulse — library views and sidebar: SeekSlider, LongPressFilter,
-_TouchHeaderView, _CoverTitleDelegate, TrackTable (touch-aware QTableWidget),
-GalleryView (virtual-scroll card gallery), PlaylistPage, _PlaylistRowWidget, Sidebar.
+VoidPulse — track browsing views.
+
+SeekSlider and LongPressFilter are shared input helpers; _TouchHeaderView and
+_CoverTitleDelegate support TrackTable (the touch-aware list view); GalleryView
+is the virtual-scrolling card grid; PlaylistPage stacks the two views and owns
+the track list they show.
+
+The playlist sidebar lives in sidebar.py.
 """
 from constants import *
 from constants import ACC, ACCH, B2, BG, BG2, BG3, BG4, BORD, FG, FG2, SEL, _r, _apply_scroller_properties
 from time import monotonic as _monotonic
 from cover_art import get_cover_pixmap, draw_default_cover, _draw_cover_rounded, _ensure_async_cover_loader
 
-# TrackTable column definitions
 COLS  = ['Length', 'Title', 'Artist', 'Album', 'Sample Rate', 'Bit Depth', 'Type']
 C_LEN=0; C_TIT=1; C_ART=2; C_ALB=3; C_SR=4; C_BD=5; C_TYP=6
 _HEADER_GRAB = 14   # px either side of a column boundary = 28px total touch target
@@ -31,7 +35,11 @@ class SeekSlider(QSlider):
             QSlider::groove:horizontal {{
                 background: rgba(80,80,80,160); height: 4px; border-radius: {r_grv}px;
             }}
-            QSlider::sub-page:horizontal {{ background: {acc}; border-radius: {r_grv}px 0 0 {r_grv}px; }}
+            QSlider::sub-page:horizontal {{
+                background: {acc};
+                border-top-left-radius: {r_grv}px; border-bottom-left-radius: {r_grv}px;
+                border-top-right-radius: 0; border-bottom-right-radius: 0;
+            }}
             QSlider::handle:horizontal {{
                 background: {BG4}; border: 2px solid {acc};
                 width: 18px; height: 18px; border-radius: {r_hdl}px; margin: -7px 0;
@@ -118,6 +126,50 @@ class SeekSlider(QSlider):
 
 # ══════════════════════════════════════════════════════════════════════════════
 
+class DoubleTapTracker:
+    """Recognises 'two clean taps on the same item' without Qt's double-click.
+
+    QScroller takes the touch/press stream over as soon as a view can actually
+    scroll, and from that point Qt no longer delivers the synthesized
+    MouseButtonDblClick both library views used to start a track — so a library
+    long enough to scroll could not be started by double-clicking while a short
+    one could.  Pairing the taps here, from events the scroller cannot take
+    away, makes activation independent of all that.
+
+    A tap only counts when the pointer stayed put between press and release, so
+    a flick that happens to end on a card never starts playback.
+    """
+    DRIFT_PX = 10
+
+    def __init__(self):
+        self._item  = -1          # item id of the pending first tap
+        self._ms    = 0
+        self._start = QPoint()    # press position of the tap in progress
+        self._down  = False
+
+    def press(self, pos: QPoint):
+        self._start = QPoint(pos); self._down = True
+
+    def cancel(self):
+        """Pointer drifted / gesture taken over — the tap in progress is void."""
+        self._down = False
+
+    def release(self, pos: QPoint, item: int) -> bool:
+        """Register a release; True when it completes a double-tap on `item`."""
+        moved = (pos - self._start).manhattanLength() > self.DRIFT_PX
+        down  = self._down
+        self._down = False
+        if item < 0 or not down or moved:
+            self._item = -1
+            return False
+        now = QDateTime.currentMSecsSinceEpoch()
+        if item == self._item and (now - self._ms) < QApplication.doubleClickInterval():
+            self._item = -1
+            return True
+        self._item, self._ms = item, now
+        return False
+
+
 class LongPressFilter(QObject):
     triggered = pyqtSignal(int, QPoint)
     DELAY_MS = 550; DRIFT_PX = 10
@@ -127,14 +179,14 @@ class LongPressFilter(QObject):
         self._table = table; self._row = -1; self._gpos = QPoint(); self._start = QPoint()
         self._timer = QTimer(self); self._timer.setSingleShot(True)
         self._timer.setInterval(self.DELAY_MS); self._timer.timeout.connect(self._fire)
-        # Touch double-tap detection
-        self._last_tap_row = -1; self._last_tap_ms = 0
+        self._taps = DoubleTapTracker()
 
     def eventFilter(self, obj, event):
         t = event.type()
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             item = self._table.itemAt(event.pos())
             self._row = item.row() if item else -1
+            self._taps.press(event.pos())
             if self._row >= 0:
                 self._start = QPoint(event.pos())
                 self._gpos  = self._table.viewport().mapToGlobal(event.pos())
@@ -143,26 +195,36 @@ class LongPressFilter(QObject):
             if self._timer.isActive():
                 d = event.pos() - self._start
                 if abs(d.x())+abs(d.y()) > self.DRIFT_PX: self._timer.stop(); self._row = -1
-        elif t in (QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick):
+        elif t == QEvent.Type.MouseButtonRelease:
             self._timer.stop()
-        # Touch tap → synthesise double-click via rapid second tap on same row
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._on_tap_release(event.pos())
+        elif t == QEvent.Type.MouseButtonDblClick:
+            self._timer.stop()
+            self._taps.cancel()   # Qt's own event drives this one; see TrackTable
+        # Touch: the press/release pair arrives without a synthesized double-click
+        elif t == QEvent.Type.TouchBegin:
+            pts = event.points()
+            if pts:
+                self._taps.press(pts[0].position().toPoint())
         elif t == QEvent.Type.TouchEnd:
             pts = event.points()
             if pts:
-                pos = pts[0].position().toPoint()
-                item = self._table.itemAt(pos)
-                row = item.row() if item else -1
-                if row >= 0:
-                    now = QDateTime.currentMSecsSinceEpoch()
-                    if row == self._last_tap_row and (now - self._last_tap_ms) < 400:
-                        self._table.row_activated.emit(row)
-                        self._last_tap_row = -1
-                    else:
-                        self._last_tap_row = row; self._last_tap_ms = now
+                self._on_tap_release(pts[0].position().toPoint())
+        elif t == QEvent.Type.TouchCancel:
+            self._taps.cancel()
         return False
 
+    def _on_tap_release(self, pos: QPoint):
+        """Second clean tap on a row starts it, the way a double-click would."""
+        item = self._table.itemAt(pos)
+        if self._taps.release(pos, item.row() if item else -1):
+            self._table.activate_row(item.row())
+
     def _fire(self):
-        if self._row >= 0: self.triggered.emit(self._row, self._gpos); self._row = -1
+        if self._row >= 0:
+            self.triggered.emit(self._row, self._gpos); self._row = -1
+            self._taps.cancel()   # a long press is not the first half of a tap pair
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -269,13 +331,13 @@ class _CoverTitleDelegate(QStyledItemDelegate):
             if pm is not None:
                 cy = r.top() + (r.height() - cover_sz) // 2
                 _draw_cover_rounded(painter, pm,
-                                    r.left() + pad, cy, cover_sz, _r(4), BG)
+                                    r.left() + pad, cy, cover_sz, _r(4))
             text_x = r.left() + pad + cover_sz + 6
         else:
             text_x = r.left() + pad
 
         # ── Title text ────────────────────────────────────────────────────────
-        # ForegroundRole is stored as QBrush by QTableWidgetItem.setForeground()
+        # setForeground() stores a QBrush, not a QColor
         fg_data = index.data(Qt.ItemDataRole.ForegroundRole)
         if isinstance(fg_data, QBrush):
             painter.setPen(fg_data.color())
@@ -305,7 +367,7 @@ class TrackTable(QTableWidget):
     ctx_requested  = pyqtSignal(int, QPoint)
     col_widths_changed = pyqtSignal(list)   # emitted after user resizes a column
 
-    # Default column ratios (sum = 1.0); used for proportional sizing.
+    # Proportional column widths, summing to 1.0
     _DEFAULT_COL_RATIOS = [w / 928 for w in (72, 260, 180, 180, 92, 82, 62)]  # 928 = sum
 
     _POPULATE_CHUNK = 200   # rows filled synchronously on first pass / per deferred tick
@@ -318,7 +380,7 @@ class TrackTable(QTableWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setColumnCount(len(COLS)); self.setHorizontalHeaderLabels(COLS)
-        # Replace default header with touch-friendly version (wider grab zone)
+        # Wider resize grab zone for touch
         th = _TouchHeaderView(self)
         self.setHorizontalHeader(th)
         self.verticalHeader().setVisible(False)
@@ -331,38 +393,37 @@ class TrackTable(QTableWidget):
         self.customContextMenuRequested.connect(lambda pos: self._emit_ctx(pos))
         hh = self.horizontalHeader()
         hh.setSectionsMovable(False)
-        # Left-align all header labels
         hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        # All columns Interactive — user can resize any column with the mouse.
-        # setSectionResizeMode(Interactive) + cascadingSectionResizes(False) means
-        # only the dragged column and its right neighbour change size; all others stay fixed.
+        # Interactive plus no cascading: dragging a divider resizes only that column
+        # and its right neighbour, leaving the rest alone.
         for col in range(len(COLS)):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         hh.setCascadingSectionResizes(False)
         hh.setMinimumSectionSize(30)
         hh.setStretchLastSection(False)
-        # Ratios initialised to defaults; actual pixel widths applied in resizeEvent
+        # resizeEvent turns these ratios into pixel widths
         self._col_ratios = list(self._DEFAULT_COL_RATIOS)
         self._user_dragging = False   # True while user is actively dragging a column divider
         self._last_vp_w = -1          # last viewport width seen in resizeEvent
         self._row_h = 44   # tracks current desired row height; re-applied after setRowCount resets
         self.verticalHeader().setDefaultSectionSize(44)
-        # Cover delegate: draws covers via _draw_cover_rounded() (same as GalleryView),
-        # bypassing Qt's QIcon pipeline which corrupts accent-recoloured pixmaps.
+        # The delegate draws covers the same way GalleryView does, avoiding Qt's
+        # QIcon pipeline, whose style effects corrupt accent-recoloured pixmaps.
         self.setItemDelegateForColumn(C_TIT, _CoverTitleDelegate(self))
         QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
         _apply_scroller_properties(self.viewport())
+        # Installed after grabGesture() so this filter is called before the
+        # scroller's — Qt runs event filters newest first.
         self._lp = LongPressFilter(self); self.viewport().installEventFilter(self._lp)
         self._lp.triggered.connect(self.ctx_requested)
-        self.doubleClicked.connect(lambda idx: self.row_activated.emit(idx.row()))
-        # QScroller (TouchGesture) can suppress mouseDoubleClickEvent on the viewport
-        # on some platforms, preventing doubleClicked from firing. Install a viewport
-        # event filter to catch MouseButtonDblClick directly as a reliable fallback.
+        self._last_act_row = -1; self._last_act_ms = 0
+        self.doubleClicked.connect(lambda idx: self.activate_row(idx.row()))
+        # QScroller can swallow the viewport's double-click on some platforms, so a
+        # filter catches MouseButtonDblClick directly as a fallback.
         self.viewport().installEventFilter(self)
-        # Manual sort — we keep _tracks in sync with visual order so row index is always correct
+        # Sorting is manual: _tracks follows the visual order, so row indices hold
         self._sort_col = -1; self._sort_asc = True
         hh.sectionClicked.connect(self._on_header_clicked)
-        # Emit col widths after user finishes dragging a section separator
         hh.sectionResized.connect(self._on_section_resized)
         self._covers_on = True
         self._col_resize_timer = QTimer(self)
@@ -377,6 +438,22 @@ class TrackTable(QTableWidget):
         """Cover icon size derived from row height — scales proportionally."""
         return max(16, self._row_h - 16)
 
+    def activate_row(self, row: int):
+        """Sole entry point for 'start this row'.
+
+        Several paths can report the same gesture — Qt's doubleClicked signal,
+        the viewport's MouseButtonDblClick filter and the tap pairing in
+        LongPressFilter — so a repeat of the same row inside one double-click
+        interval is treated as that one gesture and dropped.
+        """
+        if row < 0:
+            return
+        now = QDateTime.currentMSecsSinceEpoch()
+        if row == self._last_act_row and (now - self._last_act_ms) < QApplication.doubleClickInterval():
+            return
+        self._last_act_row, self._last_act_ms = row, now
+        self.row_activated.emit(row)
+
     def eventFilter(self, obj, event) -> bool:
         """Catch MouseButtonDblClick on the viewport — QScroller may suppress
         the normal doubleClicked signal on some platforms/Qt versions."""
@@ -385,7 +462,7 @@ class TrackTable(QTableWidget):
                 event.button() == Qt.MouseButton.LeftButton):
             item = self.itemAt(event.pos())
             if item is not None:
-                self.row_activated.emit(item.row())
+                self.activate_row(item.row())
                 return True   # consumed — prevents duplicate from doubleClicked
         return super().eventFilter(obj, event)
 
@@ -396,16 +473,14 @@ class TrackTable(QTableWidget):
         r = self._fp_to_row.get(fp, -1)
         if r < 0:
             return
-        # Invalidate just the C_TIT cell — the delegate will call get_cover_pixmap()
-        # on the next paint and find the newly cached pixmap.
+        # Only the title cell; the delegate picks the cover up on its next paint
         item = self.item(r, C_TIT)
         if item is not None:
             self.viewport().update(self.visualRect(self.indexFromItem(item)))
 
     def _on_section_resized(self, _logical, _old, _new):
-        # Mark that user is actively dragging; suppress resizeEvent ratio restore
+        # Flags the drag so resizeEvent does not restore stored ratios over it
         self._user_dragging = True
-        # Debounce: only emit after user stops dragging for 400 ms
         self._col_resize_timer.start()
 
     def _emit_col_widths(self):
@@ -426,7 +501,7 @@ class TrackTable(QTableWidget):
         ratios = self._col_ratios
         if not ratios or len(ratios) != len(COLS):
             ratios = self._DEFAULT_COL_RATIOS
-        # Distribute pixels; last column gets the remainder to avoid gaps
+        # The last column absorbs the rounding remainder
         widths = [max(30, int(r * vp_w)) for r in ratios]
         diff = vp_w - sum(widths)
         widths[-1] = max(30, widths[-1] + diff)
@@ -440,8 +515,8 @@ class TrackTable(QTableWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Don't overwrite user's drag with stored ratios while they're still dragging,
-        # and skip if viewport width hasn't actually changed (avoids spurious resets).
+        # Never overwrite an in-progress drag, and ignore resizes that did not
+        # change the viewport width.
         if self._user_dragging:
             return
         vp_w = self.viewport().width()
@@ -467,18 +542,17 @@ class TrackTable(QTableWidget):
     def populate(self, tracks, playing_idx=-1):
         self.setSortingEnabled(False)
         self.setRowCount(0); self.setRowCount(len(tracks))
-        # Qt6 resets defaultSectionSize to the style default on setRowCount(0).
-        # Re-apply our desired height so newly created rows get the correct size.
+        # setRowCount(0) resets defaultSectionSize to the style default
         self.verticalHeader().setDefaultSectionSize(self._row_h)
-        # Build O(1) reverse index: filepath → row
+        # filepath → row, for cover callbacks
         self._fp_to_row = {t.filepath: r for r, t in enumerate(tracks)}
         CHUNK = self._POPULATE_CHUNK
-        # Fill first chunk synchronously so rows appear immediately
+        # First chunk synchronously, so rows appear at once
         end = min(CHUNK, len(tracks))
         for r in range(end):
             self._fill_row(r, tracks[r])
         self.set_playing_row(playing_idx)
-        # Fill the rest in deferred chunks so the event loop stays alive
+        # The rest in deferred chunks, keeping the event loop responsive
         if len(tracks) > CHUNK:
             self._populate_deferred(tracks, playing_idx, CHUNK)
 
@@ -494,7 +568,6 @@ class TrackTable(QTableWidget):
 
     def _on_header_clicked(self, col: int):
         """Sort the underlying PlaylistPage._tracks via the page reference."""
-        # Find the PlaylistPage parent
         page = self.parent()
         while page and not isinstance(page, PlaylistPage):
             page = page.parent()
@@ -504,7 +577,6 @@ class TrackTable(QTableWidget):
             self._sort_asc = not self._sort_asc
         else:
             self._sort_col = col; self._sort_asc = True
-        # Key functions per column
         def sort_key(t):
             if col == C_LEN: return t.duration
             if col == C_TIT: return t.title.lower()
@@ -514,14 +586,13 @@ class TrackTable(QTableWidget):
             if col == C_BD:  return t.bit_depth
             if col == C_TYP: return t.file_type.lower()
             return ''
-        # Remember currently playing track so we can update its index
+        # The playing row moves with the sort
         cur_fp = None
         if 0 <= page.playing_idx < len(page.tracks):
             cur_fp = page.tracks[page.playing_idx].filepath
         sorted_tracks = sorted(page.tracks, key=sort_key, reverse=not self._sort_asc)
         new_playing = next((i for i, t in enumerate(sorted_tracks) if t.filepath == cur_fp), -1)
         page.set_tracks(sorted_tracks, new_playing)
-        # Update header indicator
         hh = self.horizontalHeader()
         hh.setSortIndicatorShown(True)
         hh.setSortIndicator(col, Qt.SortOrder.AscendingOrder if self._sort_asc
@@ -532,20 +603,18 @@ class TrackTable(QTableWidget):
                                     t.sr_str(), t.bd_str(), t.file_type]):
             item = QTableWidgetItem(txt)
             if col == C_TIT:
-                # Store filepath so _CoverTitleDelegate can fetch the cover.
-                # No QIcon is set — the delegate draws covers directly via
-                # _draw_cover_rounded(), matching GalleryView's rendering path.
+                # The delegate reads the filepath from here and draws the cover
+                # itself, so no QIcon is set.
                 item.setData(Qt.ItemDataRole.UserRole, t.filepath)
             item.setTextAlignment(self._CELL_ALIGN); self.setItem(row, col, item)
 
     def set_covers_on(self, on: bool, tracks: list):
         self._covers_on = on
-        # The delegate reads _covers_on on every paint — a single viewport
-        # repaint is sufficient; no per-item icon manipulation needed.
+        # The delegate reads _covers_on on every paint, so a repaint is enough
         self.viewport().update()
 
     def set_playing_row(self, row):
-        # Only repaint old and new rows — O(1) instead of O(n).
+        # Only the two affected rows
         prev = getattr(self, '_playing_row', -1)
         self._playing_row = row
         for r in (prev, row):
@@ -598,14 +667,12 @@ class GalleryView(QWidget):
         self._layout_mode:  str   = 'gallery_z'  # 'gallery_z' | 'gallery_s'
         self._layout_ready: bool  = False         # True after first real viewport measure
 
-        # Layout cache
         self._n_cols:       int   = 1
         self._card_h_act:   int   = 130
         self._card_w_act:   int   = 260
         self._total_h:      int   = 0
         self._cover_sz_cached: int = 118  # canonical cover_sz (snapped to 8px); set by _recompute_layout
 
-        # Interaction
         self._hovered_idx:  int   = -1
         self._press_pos:    QPoint = QPoint()
         self._press_vis_pos: int  = -1   # visual pos (into _vis_idx) at press
@@ -614,10 +681,10 @@ class GalleryView(QWidget):
         self._long_press_timer.setInterval(600)
         self._long_press_timer.timeout.connect(self._on_long_press)
 
-        # Deferred populate: set True when populate() called while hidden
+        # Set when populate() runs while hidden, replayed on show
         self._pending_populate: bool = False
 
-        # String cache: track_idx -> (title, artist, fmt)
+        # track index → (title, artist, format), built during paint
         self._str_cache:    dict  = {}
 
         outer = QVBoxLayout(self)
@@ -682,19 +749,28 @@ class GalleryView(QWidget):
                            QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
         QScroller.scroller(self._scroll.viewport()).setScrollerProperties(sp)
 
+        # Card activation. The canvas' own mouseDoubleClickEvent only arrives
+        # while Qt is synthesizing mouse events from touch, which it stops doing
+        # once the scroller claims the gesture — i.e. as soon as the gallery is
+        # long enough to scroll. So the tap pair is tracked here as well, on the
+        # viewport (installed after grabGesture so it is filtered first) for
+        # touch and in the canvas handlers for the mouse.
+        self._taps = DoubleTapTracker()
+        self._last_act_ti = -1; self._last_act_ms = 0
+        self._scroll.viewport().installEventFilter(self)
+
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(80)
         self._resize_timer.timeout.connect(self._on_resize_done)
 
-        # Debounce timer for gallery-scale slider — fires after user stops dragging
+        # Debounces the card-size slider
         self._scale_timer = QTimer(self)
         self._scale_timer.setSingleShot(True)
         self._scale_timer.setInterval(60)
         self._scale_timer.timeout.connect(self._on_scale_done)
         self._scale_spinner_on = False
 
-        # Connect to async cover loader — repaint cards as covers arrive
         _ensure_async_cover_loader().cover_loaded.connect(self._on_cover_loaded)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -704,8 +780,7 @@ class GalleryView(QWidget):
         self._playing_idx = playing_idx
         self._str_cache   = {}
         self._hovered_idx = -1
-        # Only recompute geometry when actually visible.
-        # showEvent will call _apply_filter_and_layout when we become visible.
+        # Geometry needs a real viewport width, so showEvent does it when hidden
         if self.isVisible():
             self._apply_filter_and_layout()
         else:
@@ -725,7 +800,7 @@ class GalleryView(QWidget):
         h = max(self.CARD_H_MIN, min(self.CARD_H_MAX, h))
         if h == self._card_h: return
         self._card_h = h
-        # Show spinner overlay and defer layout until slider is idle
+        # Spinner now, relayout once the slider settles
         if not self._scale_spinner_on:
             self._scale_spinner_on = True
             self._canvas.update()
@@ -757,29 +832,24 @@ class GalleryView(QWidget):
         gap = self.GAP; margin = self.MARGIN
         avail = vp_w - margin * 2
 
-        # Slider controls desired height. Derive a target aspect-ratio width (2:1)
-        # then find how many columns fit, then stretch cards to fill the row exactly.
+        # The slider sets the height; a 2:1 nominal width decides the column count,
+        # then cards stretch to fill the row exactly.
         card_h_desired = max(self.CARD_H_MIN, min(self.CARD_H_MAX, self._card_h))
         card_w_nominal = card_h_desired * 2  # approximate 2:1 aspect
 
         n_cols = max(1, (avail + gap) // (card_w_nominal + gap))
-        # Each card gets exactly 1/n_cols of available width (fills the row perfectly)
         card_w_act = (avail - gap * (n_cols - 1)) // n_cols
         card_w_act = max(self.CARD_H_MIN * 2, card_w_act)
 
-        # Height: keep the natural aspect ratio of the computed width (÷2), but
-        # honour the slider as the upper bound so the slider still has visible effect.
+        # Height follows the real width's 2:1 ratio, capped by the slider
         card_h_act = min(card_h_desired, max(self.CARD_H_MIN, card_w_act // 2))
 
         self._n_cols     = n_cols
         self._card_h_act = card_h_act
         self._card_w_act = card_w_act
 
-        # Canonical cover size — snapped to the nearest 8 px so all cards at similar
-        # sizes share the same cache key.  Without snapping every pixel change in
-        # card_h_act (from resize or slider drag) produces a distinct (fp, cover_sz)
-        # entry, causing the memory and disk caches to accumulate dozens of redundant
-        # scaled copies of the same image.
+        # Snapped to 8 px so nearby card sizes share one cache key; otherwise every
+        # pixel of resize or slider drag adds another scaled copy per track.
         _cover_pad = 4
         _raw_sz = card_h_act - _cover_pad * 2 - 4
         self._cover_sz_cached = max(8, (_raw_sz + 4) // 8 * 8)  # round to nearest 8px
@@ -821,7 +891,7 @@ class GalleryView(QWidget):
         if col >= self._n_cols: return -1
         if x - col * denom_w >= self._card_w_act: return -1
         if y - row * denom_h >= self._card_h_act: return -1
-        # In U-mode odd rows are drawn right-to-left, so invert col to get logical pos
+        # Odd rows run right-to-left in S mode, so invert the column
         logical_col = (self._n_cols - 1 - col
                        if self._layout_mode == 'gallery_s' and (row % 2 == 1)
                        else col)
@@ -834,7 +904,7 @@ class GalleryView(QWidget):
 
     def _invalidate_track(self, ti: int):
         if ti < 0: return
-        # Build a track-index → visual-position map lazily (reset in _apply_filter_and_layout).
+        # track index → visual position, built on demand per layout
         rmap = getattr(self, '_ti_to_vis_pos', None)
         if rmap is None:
             rmap = {track_idx: pos for pos, track_idx in enumerate(self._vis_idx)}
@@ -855,7 +925,7 @@ class GalleryView(QWidget):
                     or q in Path(t.filepath).name.lower())]
         else:
             self._vis_idx = list(range(len(self._tracks)))
-        # Invalidate both lazy lookup caches used by _on_cover_loaded and _invalidate_track
+        # Both lazy position maps belong to the old layout
         self._fp_to_vis_positions = None
         self._ti_to_vis_pos       = None
         self._recompute_layout()
@@ -864,14 +934,12 @@ class GalleryView(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        # Process any populate() call that arrived while we were hidden
         if self._pending_populate:
             self._pending_populate = False
             self._apply_filter_and_layout()
             return
-        # Recompute as soon as widget becomes visible so the viewport has a real width.
-        # This eliminates the brief single-column flash when switching to gallery mode.
-        # Set _layout_ready=False so paintEvent suppresses rendering until geometry is set.
+        # Now that the viewport has a real width, remeasure. _layout_ready holds
+        # painting off until then, which avoids a one-frame single-column flash.
         self._layout_ready = False
         QTimer.singleShot(0, self._recompute_layout)
 
@@ -883,9 +951,7 @@ class GalleryView(QWidget):
         clip = event.rect()
         gap = self.GAP; margin = self.MARGIN
 
-        # Suppress all painting until the layout has been measured against a real
-        # viewport width.  Without this guard the cards flash in a single column
-        # for one frame while Qt is still sizing the widget.
+        # Nothing is drawn until the layout has seen a real viewport width
         if not self._layout_ready or self._card_h_act <= 0 or self._n_cols <= 0:
             p.fillRect(clip, QColor(BG)); p.end(); return
         p.fillRect(clip, QColor(BG))
@@ -918,7 +984,9 @@ class GalleryView(QWidget):
 
         cover_pad = 4          # padding around cover image inside card
         cover_sz  = self._cover_sz_cached   # canonical (8px-snapped); set by _recompute_layout
-        cover_r   = _r(6)
+        # Both radii scale with the element, so RAD_PCT=100 reaches a true pill
+        cover_r   = _r(cover_sz // 2)
+        card_r    = _r(h // 2)
 
         for row in range(first_row, last_row + 1):
             for logical_col in range(self._n_cols):
@@ -934,26 +1002,35 @@ class GalleryView(QWidget):
                 playing = (ti == self._playing_idx)
                 hovered = (ti == self._hovered_idx)
                 if playing:
-                    p.setBrush(brush_sel);  p.setPen(pen_playing)
+                    fill_brush = brush_sel;  pen = pen_playing
                 elif hovered:
-                    p.setBrush(brush_bg3);  p.setPen(pen_hover)
+                    fill_brush = brush_bg3;  pen = pen_hover
                 else:
-                    p.setBrush(brush_bg2);  p.setPen(pen_border)
-                p.drawRoundedRect(rect, _r(18), _r(18))
+                    fill_brush = brush_bg2;  pen = pen_border
+                # Fill only: the cover sits close enough to the rounded edge to
+                # paint over the outline, which is stroked again after it.
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fill_brush)
+                p.drawRoundedRect(rect, card_r, card_r)
 
-                # Cover — drawn with uniform padding on all sides
+                # Fixed left pad, vertically centred: the cover does not always
+                # fill the card's height.
                 cover_x = x + cover_pad + 2
-                cover_y = y + cover_pad + 2
+                cover_y = y + (h - cover_sz) // 2
                 text_x  = x + 10
                 if self._cover_on:
                     pm = get_cover_pixmap(t.filepath, cover_sz)
                     if pm is None:
                         pm = draw_default_cover(cover_sz)
                     if pm is not None:
-                        _draw_cover_rounded(p, pm, cover_x, cover_y, cover_sz, cover_r, BG2)
+                        _draw_cover_rounded(p, pm, cover_x, cover_y, cover_sz, cover_r)
                     text_x = cover_x + cover_sz + 8
 
-                # Text
+                # Border last, over the cover
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(rect, card_r, card_r)
+
                 if ti not in self._str_cache:
                     sr_khz = f'{t.sample_rate/1000:.1f}kHz' if t.sample_rate else ''
                     bd_s   = f'{t.bit_depth}bit' if t.bit_depth else ''
@@ -995,10 +1072,8 @@ class GalleryView(QWidget):
         if getattr(self, '_scale_spinner_on', False):
             vp = self._scroll.viewport()
             vw = vp.width(); vh = vp.height()
-            # Dim the visible area
             p.fillRect(0, self._scroll.verticalScrollBar().value(),
                        vw, vh, QColor(0, 0, 0, 90))
-            # Spinning arc centred in viewport
             cx = vw // 2
             cy = self._scroll.verticalScrollBar().value() + vh // 2
             r = 22
@@ -1007,18 +1082,51 @@ class GalleryView(QWidget):
                           Qt.PenCapStyle.RoundCap))
             p.drawArc(cx - r, cy - r, r * 2, r * 2,
                       angle * 16, 270 * 16)
-            # Schedule another repaint to animate
             QTimer.singleShot(16, self._canvas.update)
 
         p.end()
 
     # ── Mouse ─────────────────────────────────────────────────────────────────
 
+    def activate_track(self, ti: int):
+        """Sole entry point for 'start this track' — see TrackTable.activate_row."""
+        if ti < 0:
+            return
+        now = QDateTime.currentMSecsSinceEpoch()
+        if ti == self._last_act_ti and (now - self._last_act_ms) < QApplication.doubleClickInterval():
+            return
+        self._last_act_ti, self._last_act_ms = ti, now
+        self.row_activated.emit(ti)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Pair up taps on the scroll viewport (touch), which never reach the
+        canvas' mouse handlers once QScroller owns the gesture."""
+        if obj is self._scroll.viewport():
+            t = event.type()
+            if t == QEvent.Type.TouchBegin:
+                pts = event.points()
+                if pts:
+                    self._taps.press(self._to_canvas(pts[0].position().toPoint()))
+            elif t == QEvent.Type.TouchEnd:
+                pts = event.points()
+                if pts:
+                    pos = self._to_canvas(pts[0].position().toPoint())
+                    if self._taps.release(pos, self._track_idx_at(pos)):
+                        self.activate_track(self._track_idx_at(pos))
+            elif t == QEvent.Type.TouchCancel:
+                self._taps.cancel()
+        return super().eventFilter(obj, event)
+
+    def _to_canvas(self, vp_pos: QPoint) -> QPoint:
+        """Scroll-viewport point → canvas point (the canvas slides under it)."""
+        return self._canvas.mapFrom(self._scroll.viewport(), vp_pos)
+
     def _canvas_mouse_press(self, e: QMouseEvent):
         self._long_press_timer.stop()
         if e.button() == Qt.MouseButton.LeftButton:
             self._press_pos      = e.pos()
             self._press_vis_pos  = self._pos_at(e.pos())
+            self._taps.press(e.pos())
             if self._press_vis_pos >= 0:
                 self._long_press_timer.start()
         elif e.button() == Qt.MouseButton.RightButton:
@@ -1029,12 +1137,15 @@ class GalleryView(QWidget):
     def _canvas_mouse_release(self, e: QMouseEvent):
         self._long_press_timer.stop()
         self._press_vis_pos = -1
+        if e.button() == Qt.MouseButton.LeftButton:
+            ti = self._track_idx_at(e.pos())
+            if self._taps.release(e.pos(), ti):
+                self.activate_track(ti)
 
     def _canvas_dblclick(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
-            ti = self._track_idx_at(e.pos())
-            if ti >= 0:
-                self.row_activated.emit(ti)
+            self._taps.cancel()   # this event already stands for the pair
+            self.activate_track(self._track_idx_at(e.pos()))
 
     def _canvas_mouse_move(self, e: QMouseEvent):
         if (e.pos() - self._press_pos).manhattanLength() > 8:
@@ -1056,12 +1167,12 @@ class GalleryView(QWidget):
         pos = self._press_vis_pos
         if pos >= 0 and pos < len(self._vis_idx):
             ti = self._vis_idx[pos]
+            self._taps.cancel()   # a long press is not the first half of a tap pair
             self.ctx_requested.emit(ti, self._canvas.mapToGlobal(self._press_pos))
 
     def _on_cover_loaded(self, fp: str, size: int):
         """Repaint any visible cards whose cover just arrived from the async loader."""
-        # Build a filepath -> list-of-positions map lazily on first use per layout.
-        # Invalidated whenever _vis_idx changes (in _apply_filter_and_layout).
+        # filepath → visual positions, built on demand and dropped per layout
         fp_map = getattr(self, '_fp_to_vis_positions', None)
         if fp_map is None:
             fp_map = {}
@@ -1077,7 +1188,8 @@ class GalleryView(QWidget):
     def _sort_btn_ss(self) -> str:
         return (
             f'QPushButton {{ background:{BG3}; color:{FG2}; border:1px solid {B2};'
-            f' border-radius:{_r(5)}px; padding:2px 8px; font-size:11px;'
+            # Radius from the button's own 28px height, for a full pill at 100%
+            f' border-radius:{_r(14)}px; padding:2px 8px; font-size:11px;'
             f' min-height:26px; max-height:28px; }}'
             f'QPushButton:hover {{ border-color:{ACC}; color:{FG}; }}'
             f'QPushButton:checked {{ color:{ACC}; border-color:{ACC}; background:{BG3}; }}')
@@ -1130,10 +1242,8 @@ class GalleryView(QWidget):
         while page and not isinstance(page, PlaylistPage):
             page = page.parent()
         if page:
-            # Sync PlaylistPage internal state and repopulate the TABLE so it
-            # reflects the new sort order if the user switches to classic view.
-            # Do NOT call page.set_tracks() — it would re-run gallery.populate()
-            # on an already-sorted gallery, causing a redundant full relayout.
+            # Repopulate the table so classic view shows the same order.
+            # set_tracks() would relayout the already-sorted gallery again.
             page._tracks = self._tracks  # already a fresh list from sorted(), no need to copy again
             page._playing_idx = new_playing
             page.table.populate(page._tracks, new_playing)
@@ -1210,8 +1320,7 @@ class PlaylistPage(QWidget):
         if mode in ('gallery_z', 'gallery_s'):
             self.gallery.set_layout_mode(mode)
             self._stack.setCurrentIndex(1)
-            # gallery.populate() already defers work when hidden; calling it here
-            # only triggers a full layout recompute if the gallery is now visible.
+            # populate() defers itself while hidden, so this is cheap either way
             self.gallery.populate(self._tracks, self._playing_idx)
         else:
             self._stack.setCurrentIndex(0)
@@ -1220,11 +1329,9 @@ class PlaylistPage(QWidget):
         """Set classic-view row height and scale cover icons proportionally."""
         self.table._row_h = row_h
         self.table.verticalHeader().setDefaultSectionSize(row_h)
-        # Resize existing rows
         for r in range(self.table.rowCount()):
             self.table.setRowHeight(r, row_h)
-        # Delegate reads _icon_sz (derived from _row_h) on every paint —
-        # a viewport repaint is enough to apply the new cover size.
+        # The delegate derives the cover size from _row_h on every paint
         self.table.viewport().update()
 
     def set_gallery_scale(self, card_h: int):
@@ -1234,9 +1341,8 @@ class PlaylistPage(QWidget):
     def refresh_theme(self):
         """Propagate theme refresh to child views."""
         self.gallery.refresh_theme()
-        # Delegate re-reads get_cover_pixmap() (which applies _recolor_pixmap when
-        # _COVER_ACC_ON is set) on every paint — a single repaint propagates any
-        # accent / theme change to the list view without rebuilding QIcon objects.
+        # The delegate re-reads get_cover_pixmap() on every paint, so one repaint
+        # carries any accent or theme change into the list view.
         self.table.viewport().update()
 
     def set_label(self, new_label: str):
@@ -1246,408 +1352,3 @@ class PlaylistPage(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 #  Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
-class _PlaylistRowWidget(QWidget):
-    """A sidebar playlist row: [label] [X btn] — delete button on the far right."""
-    delete_clicked = pyqtSignal()
-    select_clicked = pyqtSignal()
-    long_pressed   = pyqtSignal(QPoint)   # emitted with global pos after hold
-
-    _LONG_PRESS_MS = 550
-    _DRIFT_PX      = 10
-
-    def __init__(self, label: str, parent=None):
-        super().__init__(parent)
-        self.setMinimumHeight(28)
-        self.setMaximumHeight(48)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 4, 8, 4)
-        lay.setSpacing(4)
-
-        self._lbl = QLabel(label)
-        self._lbl.setStyleSheet(f'color:{FG}; font-size:13px; background:transparent;')
-
-        # Accent-coloured X button on the far right
-        self._del_btn = QPushButton('✕')
-        self._del_btn.setMinimumSize(24, 24)
-        self._del_btn.setMaximumSize(28, 28)
-        self._del_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._del_btn.setStyleSheet(
-            f'QPushButton {{ background:transparent; border:none; color:{ACC};'
-            f' font-size:12px; font-weight:bold; border-radius:{_r(13)}px; padding:0; }}'
-            f'QPushButton:hover {{ background:{BG4}; color:{ACCH}; }}'
-            f'QPushButton:pressed {{ background:{BG3}; }}')
-        self._del_btn.setToolTip('Remove playlist')
-        self._del_btn.clicked.connect(self.delete_clicked)
-
-        lay.addWidget(self._lbl, 1)
-        lay.addWidget(self._del_btn)
-
-        # Long-press detection
-        self._lp_timer = QTimer(self)
-        self._lp_timer.setSingleShot(True)
-        self._lp_timer.setInterval(self._LONG_PRESS_MS)
-        self._lp_timer.timeout.connect(self._on_long_press_fire)
-        self._lp_start  = QPoint()
-        self._lp_gpos   = QPoint()
-        self._lp_active = False
-
-    def _on_long_press_fire(self):
-        self._lp_active = True
-        self.long_pressed.emit(self._lp_gpos)
-
-    def set_selected(self, on: bool):
-        c = ACC if on else FG
-        self._selected = on
-        self._lbl.setStyleSheet(f'color:{c}; font-size:13px; font-weight:{"bold" if on else "normal"}; background:transparent;')
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            # Only arm long-press when the press is on the label area, not the delete button
-            if self.childAt(e.position().toPoint()) is not self._del_btn:
-                self._lp_start  = e.position().toPoint()
-                self._lp_gpos   = self.mapToGlobal(e.position().toPoint())
-                self._lp_active = False
-                self._lp_timer.start()
-        super().mousePressEvent(e)
-
-    def mouseMoveEvent(self, e):
-        if self._lp_timer.isActive():
-            d = e.position().toPoint() - self._lp_start
-            if abs(d.x()) + abs(d.y()) > self._DRIFT_PX:
-                self._lp_timer.stop()
-        super().mouseMoveEvent(e)
-
-    def mouseReleaseEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._lp_timer.stop()
-            if not self._lp_active:
-                # Short tap — treat as select only if not on the delete button
-                if self.childAt(e.position().toPoint()) is not self._del_btn:
-                    self.select_clicked.emit()
-            self._lp_active = False
-        super().mouseReleaseEvent(e)
-
-    def update_accent(self):
-        self._del_btn.setStyleSheet(
-            f'QPushButton {{ background:transparent; border:none; color:{ACC};'
-            f' font-size:12px; font-weight:bold; border-radius:{_r(11)}px; padding:0; }}'
-            f'QPushButton:hover {{ background:{BG4}; color:{ACCH}; }}'
-            f'QPushButton:pressed {{ background:{BG3}; }}')
-        # Re-apply selected highlight with updated accent color
-        if getattr(self, '_selected', False):
-            self._lbl.setStyleSheet(
-                f'color:{ACC}; font-size:13px; font-weight:bold; background:transparent;')
-
-    def refresh_theme(self):
-        """Re-apply FG/BG colours after a dark/light theme switch."""
-        self.update_accent()
-        # Unselected label uses FG which changes between dark and light
-        if not getattr(self, '_selected', False):
-            self._lbl.setStyleSheet(
-                f'color:{FG}; font-size:13px; font-weight:normal; background:transparent;')
-
-class Sidebar(QWidget):
-    add_folder_req    = pyqtSignal()
-    add_m3u_req       = pyqtSignal()
-    new_playlist_req  = pyqtSignal()
-    refresh_req       = pyqtSignal()
-    remove_req        = pyqtSignal(int)
-    rename_req        = pyqtSignal(int, str)   # (index, new_label)
-    move_up_req       = pyqtSignal(int)        # index to move up
-    move_down_req     = pyqtSignal(int)        # index to move down
-    source_selected   = pyqtSignal(int)
-    search_changed    = pyqtSignal(str)
-    export_m3u_req    = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('sidebar')
-        self.setMinimumWidth(140)
-        self.setMaximumWidth(400)
-        root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-
-        logo = QLabel('VoidPulse')
-        self._logo_lbl = logo
-        logo.setObjectName('logo_lbl')
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet(f'color:{ACC}; font-size:15px; font-weight:900;'
-                           f' letter-spacing:5px; padding:16px 0 10px 0; background:{BG2};')
-        root.addWidget(logo)
-
-        sf = QWidget(); sf.setStyleSheet(f'background:{BG2};')
-        self._sf = sf
-        sfl = QHBoxLayout(sf); sfl.setContentsMargins(10,3,10,6)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText('Search…'); self._search.setClearButtonEnabled(True)
-        # Max height: double original (36px × 2 = 72, capped at 40 for compact look)
-        self._search.setMaximumHeight(40)
-        self._search.setStyleSheet(
-            f'QLineEdit {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:{_r(10)}px; padding:3px 10px; font-size:12px; }}'
-            f'QLineEdit:focus {{ border-color:{ACC}; }}')
-        self._search.textChanged.connect(self.search_changed)
-        sfl.addWidget(self._search); root.addWidget(sf)
-
-        div = QFrame(); div.setFixedHeight(1); div.setStyleSheet(f'background:{BORD};')
-        self._sidebar_div = div
-        root.addWidget(div)
-
-        lbl1 = QLabel('LIBRARY'); lbl1.setObjectName('sect_lbl'); root.addWidget(lbl1)
-
-        self._lib_btn = QPushButton('  All Tracks')
-        self._lib_btn.setStyleSheet(
-            f'QPushButton {{ background:{BG3}; color:{ACC}; border:none;'
-            f' border-left:3px solid {ACC}; border-radius:{_r(6)}px; text-align:left;'
-            f' padding:6px 16px; font-weight:bold; font-size:12px; }}'
-            f'QPushButton:hover {{ background:{BG4}; }}')
-        self._lib_btn.setMaximumHeight(56)
-        self._lib_btn.clicked.connect(lambda: self.source_selected.emit(-1))
-        root.addWidget(self._lib_btn)
-
-        lbl2 = QLabel("PLAYLISTS"); lbl2.setObjectName('sect_lbl'); root.addWidget(lbl2)
-
-        # Scrollable playlist list using a QScrollArea with custom row widgets
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet('background:transparent; border:none;')
-        # Enable touch scrolling for sidebar playlist area
-        QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
-        _apply_scroller_properties(scroll.viewport())
-        self._pl_container = QWidget(); self._pl_container.setStyleSheet('background:transparent;')
-        self._pl_layout = QVBoxLayout(self._pl_container)
-        self._pl_layout.setContentsMargins(0,0,0,0); self._pl_layout.setSpacing(0)
-        self._pl_layout.addStretch()
-        scroll.setWidget(self._pl_container)
-        root.addWidget(scroll, 1)
-
-        self._pl_rows: list = []   # list of _PlaylistRowWidget
-        self._selected_pl_idx = -1
-
-        bdiv = QFrame(); bdiv.setFixedHeight(1); bdiv.setStyleSheet(f'background:{BORD};')
-        self._sidebar_bdiv = bdiv
-        root.addWidget(bdiv)
-
-        bf = QWidget(); bf.setStyleSheet(f'background:{BG2};')
-        self._bf = bf
-        bfl = QVBoxLayout(bf); bfl.setContentsMargins(10,6,10,8); bfl.setSpacing(3)
-        add_f    = QPushButton('＋  Add Folder')
-        add_m    = QPushButton('＋  Import M3U / M3U8')
-        new_pl   = QPushButton('+ Create New Playlist')
-        new_pl.setToolTip('Create an empty playlist and save as M3U8')
-        refresh  = QPushButton('↺  Refresh Library')
-        refresh.setToolTip('Rescan all saved folders')
-        export_m = QPushButton('↑  Export as M3U8')
-        export_m.setToolTip('Export current playlist to an M3U8 file')
-        add_f.clicked.connect(self.add_folder_req); add_m.clicked.connect(self.add_m3u_req)
-        new_pl.clicked.connect(self.new_playlist_req)
-        refresh.clicked.connect(self.refresh_req)
-        export_m.clicked.connect(self.export_m3u_req)
-        self._action_btns = [add_f, add_m, new_pl, refresh, export_m]
-        # Responsive buttons — min 28px, max 36px (2× original); shrink gracefully
-        for b in self._action_btns:
-            b.setMinimumHeight(28)
-            b.setMaximumHeight(36)
-            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            b.setStyleSheet(
-                f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-                f' border-radius:5px; padding:2px 8px; font-size:11px; }}'
-                f'QPushButton:hover {{ border-color:{ACC}; }}'
-                f'QPushButton:pressed {{ background:{BG4}; }}')
-            bfl.addWidget(b)
-        root.addWidget(bf)
-
-    def add_playlist(self, label: str):
-        row = _PlaylistRowWidget(label)
-        idx = len(self._pl_rows)
-        self._pl_rows.append(row)
-        # Insert before the trailing stretch
-        self._pl_layout.insertWidget(self._pl_layout.count() - 1, row)
-        row.select_clicked.connect(lambda i=idx: self._on_select(i))
-        row.delete_clicked.connect(lambda i=idx: self._on_delete_clicked(i))
-        row.long_pressed.connect(lambda gpos, i=idx: self._show_pl_context_menu(i, gpos))
-
-    def _show_pl_context_menu(self, idx: int, gpos: QPoint):
-        if not (0 <= idx < len(self._pl_rows)):
-            return
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            f'QMenu {{ background:{BG3}; color:{FG}; border:2px solid {ACC};'
-            f' border-radius:{_r(12)}px; padding:4px 0; font-size:12px; }}'
-            f'QMenu::item {{ padding:6px 20px; }}'
-            f'QMenu::item:selected {{ background:{SEL}; color:{ACC}; }}'
-            f'QMenu::separator {{ height:1px; background:{B2}; margin:3px 8px; }}')
-        act_rename = menu.addAction('✎  Rename')
-        menu.addSeparator()
-        act_up   = menu.addAction('▲  Move Up')
-        act_down = menu.addAction('▼  Move Down')
-        act_up.setEnabled(idx > 0)
-        act_down.setEnabled(idx < len(self._pl_rows) - 1)
-        chosen = menu.exec(gpos)
-        if chosen is act_rename:
-            self._prompt_rename(idx)
-        elif chosen is act_up:
-            self.move_up_req.emit(idx)
-        elif chosen is act_down:
-            self.move_down_req.emit(idx)
-
-    def _prompt_rename(self, idx: int):
-        if not (0 <= idx < len(self._pl_rows)):
-            return
-        current = self._pl_rows[idx]._lbl.text()
-        dlg = QInputDialog(self)
-        dlg.setWindowTitle('Rename Playlist')
-        dlg.setLabelText('New name:')
-        dlg.setTextValue(current)
-        dlg.setStyleSheet(
-            f'QDialog {{ background:{BG2}; }}'
-            f'QLabel {{ color:{FG}; font-size:13px; }}'
-            f'QLineEdit {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:{_r(6)}px; padding:4px 8px; font-size:13px; }}'
-            f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:{_r(5)}px; padding:4px 16px; font-size:12px; }}'
-            f'QPushButton:hover {{ border-color:{ACC}; }}'
-            f'QPushButton:default {{ border-color:{ACC}; color:{ACC}; }}')
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_name = dlg.textValue().strip()
-            if new_name and new_name != current:
-                self.rename_row(idx, new_name)
-                self.rename_req.emit(idx, new_name)
-
-    def rename_row(self, idx: int, new_label: str):
-        """Update the sidebar label for playlist at idx."""
-        if not (0 <= idx < len(self._pl_rows)):
-            return
-        row = self._pl_rows[idx]
-        row._lbl.setText(new_label)
-        # Re-apply colour so bold/accent state is preserved
-        row.set_selected(getattr(row, '_selected', False))
-
-    def move_playlist_row(self, from_idx: int, to_idx: int):
-        """Swap two adjacent playlist rows in the sidebar UI and rewire signals."""
-        n = len(self._pl_rows)
-        if not (0 <= from_idx < n and 0 <= to_idx < n):
-            return
-        lo_i = min(from_idx, to_idx)
-        hi_i = max(from_idx, to_idx)
-        lo_w = self._pl_rows[lo_i]
-        hi_w = self._pl_rows[hi_i]
-        # Swap in the list
-        self._pl_rows[from_idx], self._pl_rows[to_idx] = (
-            self._pl_rows[to_idx], self._pl_rows[from_idx])
-        # Remove both widgets then reinsert swapped at the same positions.
-        # Remove higher index first to avoid index shifting.
-        lo = self._pl_layout
-        lo.removeWidget(hi_w)
-        lo.removeWidget(lo_w)
-        lo.insertWidget(lo_i, hi_w)
-        lo.insertWidget(hi_i, lo_w)
-        # Update selected index if needed
-        if self._selected_pl_idx == from_idx:
-            self._selected_pl_idx = to_idx
-        elif self._selected_pl_idx == to_idx:
-            self._selected_pl_idx = from_idx
-        # Rewire all signals with fresh captured indices
-        self._rewire_all_rows()
-
-    def _rewire_all_rows(self):
-        """Disconnect and reconnect all row signals with correct current indices."""
-        for i, r in enumerate(self._pl_rows):
-            try: r.select_clicked.disconnect()
-            except Exception: pass
-            try: r.delete_clicked.disconnect()
-            except Exception: pass
-            try: r.long_pressed.disconnect()
-            except Exception: pass
-            r.select_clicked.connect(lambda _i=i: self._on_select(_i))
-            r.delete_clicked.connect(lambda _i=i: self._on_delete_clicked(_i))
-            r.long_pressed.connect(lambda gpos, _i=i: self._show_pl_context_menu(_i, gpos))
-
-    def remove_playlist(self, idx: int):
-        if not (0 <= idx < len(self._pl_rows)): return
-        row = self._pl_rows.pop(idx)
-        self._pl_layout.removeWidget(row); row.deleteLater()
-        self._rewire_all_rows()
-        if self._selected_pl_idx >= len(self._pl_rows):
-            self._selected_pl_idx = -1
-
-    def _on_select(self, idx: int):
-        if self._selected_pl_idx >= 0 and self._selected_pl_idx < len(self._pl_rows):
-            self._pl_rows[self._selected_pl_idx].set_selected(False)
-        self._selected_pl_idx = idx
-        self._pl_rows[idx].set_selected(True)
-        self.source_selected.emit(idx)
-
-    def select_source(self, idx: int):
-        """Highlight sidebar row for tab index without emitting source_selected.
-
-        idx == -1  → Library (All Tracks)
-        idx >= 0   → playlist row at that index
-        Used by MainWindow to sync sidebar highlight on startup restore.
-        """
-        # Clear current selection
-        if self._selected_pl_idx >= 0 and self._selected_pl_idx < len(self._pl_rows):
-            self._pl_rows[self._selected_pl_idx].set_selected(False)
-        if idx == -1:
-            # Highlight lib_btn; deselect any playlist row
-            self._selected_pl_idx = -1
-            self._lib_btn.setStyleSheet(
-                f'QPushButton {{ background:{BG3}; color:{ACC}; border:none;'
-                f' border-left:3px solid {ACC}; border-radius:6px; text-align:left;'
-                f' padding:6px 16px; font-weight:bold; font-size:12px; }}'
-                f'QPushButton:hover {{ background:{BG4}; }}')
-        elif 0 <= idx < len(self._pl_rows):
-            self._selected_pl_idx = idx
-            self._pl_rows[idx].set_selected(True)
-
-    def update_accent(self):
-        """Re-apply accent color to all inline-styled sidebar widgets."""
-        self._lib_btn.setStyleSheet(
-            f'QPushButton {{ background:{BG3}; color:{ACC}; border:none;'
-            f' border-left:3px solid {ACC}; border-radius:{_r(6)}px; text-align:left;'
-            f' padding:6px 16px; font-weight:bold; font-size:12px; }}'
-            f'QPushButton:hover {{ background:{BG4}; }}')
-        self._search.setStyleSheet(
-            f'QLineEdit {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-            f' border-radius:{_r(10)}px; padding:3px 10px; font-size:12px; }}'
-            f'QLineEdit:focus {{ border-color:{ACC}; }}')
-        logo = self.findChild(QLabel, 'logo_lbl')
-        if logo:
-            logo.setStyleSheet(
-                f'color:{ACC}; font-size:15px; font-weight:900;'
-                f' letter-spacing:5px; padding:16px 0 10px 0; background:{BG2};')
-        for row in self._pl_rows:
-            row.update_accent()
-
-    def refresh_theme(self):
-        """Re-apply all palette globals after a dark/light switch."""
-        self._sf.setStyleSheet(f'background:{BG2};')
-        self._bf.setStyleSheet(f'background:{BG2};')
-        self._sidebar_div.setStyleSheet(f'background:{BORD};')
-        self._sidebar_bdiv.setStyleSheet(f'background:{BORD};')
-        for b in self._action_btns:
-            b.setStyleSheet(
-                f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
-                f' border-radius:5px; padding:2px 8px; font-size:11px; }}'
-                f'QPushButton:hover {{ border-color:{ACC}; }}'
-                f'QPushButton:pressed {{ background:{BG4}; }}')
-        self.update_accent()   # logo, lib_btn, search
-        for row in self._pl_rows:
-            row.refresh_theme()   # also updates FG for unselected labels
-
-    def _on_delete_clicked(self, idx: int):
-        if not (0 <= idx < len(self._pl_rows)): return
-        name = self._pl_rows[idx]._lbl.text()
-        reply = QMessageBox.question(
-            self, 'Remove Playlist',
-            f'Remove "{name}" from the player?\n(Files will not be deleted)',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.remove_req.emit(idx)
-
-# ══════════════════════════════════════════════════════════════════════════════
-

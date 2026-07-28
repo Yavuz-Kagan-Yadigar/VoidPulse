@@ -1,12 +1,18 @@
 """
-VoidPulse — control bar and titlebar: _ctrl() factory, RepeatButton, _FullscreenBtn,
-SpinningPlayButton, _RoundedCoverLabel, ControlBar (seek + transport + EQ/settings + viz
-paintEvent), TitleBarButton, TitleBarCloseButton, BlackTitleBar.
+VoidPulse — ControlBar: the bar under the track list holding the seek slider,
+transport buttons, cover thumbnail, EQ/settings popups and the spectrum
+visualiser it paints itself.
+
+Its child widgets live in controlbar_widgets.py and the frameless window
+titlebar in titlebar.py.
 """
 from constants import *
 
+from controlbar_widgets import (_ctrl, RepeatButton, _FullscreenBtn,
+                                SpinningPlayButton, _RoundedCoverLabel)
 from library import RenamePopup
-from fetch_popups import LyricsFetchPopup, TagFetchPopup
+from fetch_popups import (LyricsFetchPopup, TagFetchPopup, GainFetchPopup,
+                          CoverFetchPopup, _BaseFetchPopup)
 from widgets_base import _ModalOverlay, _SpinningOverlay
 from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
 from time import monotonic as _monotonic
@@ -14,329 +20,15 @@ import numpy as _np
 import gc as _gc
 from eq import EqPopup, _fmt_ms
 from settings_popup import SettingsPopup
-from cover_art import CoverFetchPopup, _BaseFetchPopup, _COVER_MASTER_SIZE, _COVER_SENTINEL, draw_default_cover, get_cover_pixmap, _acc_lut_cache, _corner_frame_cache, _cover_cache, _default_cover_mem_cache
-from player import Player, RepeatMode
+from alsa import probe_alsa_devices
+from cover_art import (draw_default_cover,
+                       get_cover_pixmap, _acc_lut_cache, _cover_cache,
+                       _default_cover_mem_cache)
+from player import Player
+from resampler import HAVE_SOXR
 from cover_art import Track
 from views import SeekSlider
 
-def _ctrl(text, checkable=False, sz=44):
-    b = QPushButton(text); b.setObjectName('ctrl')
-    b.setCheckable(checkable); b.setMinimumSize(sz,sz); b.setMaximumSize(sz,sz)
-    return b
-
-class RepeatButton(QAbstractButton):
-    mode_changed = pyqtSignal(RepeatMode)
-    _TIPS  = ['No repeat', 'Repeat all', 'Repeat one']
-    _MODES = [RepeatMode.NONE, RepeatMode.ALL, RepeatMode.ONE]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(44,44); self._idx = 0
-        self.clicked.connect(self._cycle)
-        self.setCursor(Qt.CursorShape.PointingHandCursor); self.setToolTip(self._TIPS[0])
-
-    def _cycle(self):
-        self._idx = (self._idx+1)%3; self.setToolTip(self._TIPS[self._idx])
-        self.update(); self.mode_changed.emit(self._MODES[self._idx])
-
-    def set_mode(self, m): self._idx = self._MODES.index(m); self.setToolTip(self._TIPS[self._idx]); self.update()
-    def current_mode(self): return self._MODES[self._idx]
-
-    def paintEvent(self, _):
-        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        idx = self._idx; col = QColor(ACC if idx > 0 else FG2)
-        cx, cy, r = self.width()//2, self.height()//2, 7
-        if self.underMouse():
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(QColor(BG3)))
-            p.drawEllipse(QRectF(0, 0, self.width(), self.height()))
-        pen = QPen(col, 2.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawArc(cx-r, cy-r, r*2, r*2, 60*16, 300*16)
-        ang = math.radians(60); tx = cx+r*math.cos(ang); ty = cy-r*math.sin(ang)
-        L, W = 4.5, 2.0; bx, by = 0.866, 0.5; px, py = -0.5, 0.866
-        p.drawLine(QPointF(tx,ty), QPointF(tx+L*bx+W*px, ty+L*by+W*py))
-        p.drawLine(QPointF(tx,ty), QPointF(tx+L*bx-W*px, ty+L*by-W*py))
-        if idx == 2:
-            f = QFont(p.font()); f.setPixelSize(8); f.setBold(True); p.setFont(f)
-            p.setPen(col); p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '1')
-        p.end()
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Full-screen toggle button
-# ══════════════════════════════════════════════════════════════════════════════
-class _FullscreenBtn(QAbstractButton):
-    """Draws 4 outward-pointing corner arrows; toggles on click."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._is_full = False
-        self.setFixedSize(36, 36)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-
-    def set_fullscreen(self, v: bool):
-        self._is_full = v
-        self.setToolTip('Exit Fullscreen' if v else 'Fullscreen')
-        self.update()
-
-    def sizeHint(self): return QSize(36, 36)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Background on hover
-        if self.underMouse():
-            p.setBrush(QBrush(QColor(BG3)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QRectF(0, 0, 36, 36))
-        col = QColor(FG) if self.underMouse() else QColor(FG2)
-        pen = QPen(col, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                   Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-        # Arrow size and margin
-        m = 8.0; a = 5.0   # margin from edge, arrow arm length
-        # outward arrows when fullscreen → "compress/exit"; inward when normal → "expand"
-        # Note: corner (cx,cy) is at the edge; arm goes cx+dx*a, cy+dy*a
-        # For the icon to read as "expand", arms at each corner should point INWARD
-        # (toward center) because that's the conventional "go fullscreen" arrows.
-        s = 1 if self._is_full else -1
-        # Four corners: (cx, cy, dx, dy) where d = outward direction
-        corners = [
-            (m,      m,      -s,  -s),   # top-left
-            (36-m,   m,       s,  -s),   # top-right
-            (m,      36-m,   -s,   s),   # bottom-left
-            (36-m,   36-m,    s,   s),   # bottom-right
-        ]
-        for cx, cy, dx, dy in corners:
-            # L-shaped arrow: horizontal arm + vertical arm + diagonal tip
-            p.drawLine(QPointF(cx, cy), QPointF(cx + dx*a, cy))
-            p.drawLine(QPointF(cx, cy), QPointF(cx, cy + dy*a))
-        p.end()
-
-class SpinningPlayButton(QPushButton):
-    """Play/pause button that shows a spinning arc while the pipeline is busy (reloading).
-
-    States:
-      • normal  — shows ▶ or ⏸ depending on playback state, fully interactive
-      • busy    — shows a rotating arc overlay, click is blocked, MPRIS notified
-    """
-
-    def __init__(self, parent=None):
-        super().__init__('▶', parent)
-        self.setObjectName('play')
-        self.setMinimumSize(52, 52)
-        self.setMaximumSize(52, 52)
-        self._busy       = False
-        self._angle      = 0.0    # current arc start angle (degrees)
-        self._spin_timer = QTimer(self)
-        self._spin_timer.setInterval(_FRAME_MS)
-        self._spin_timer.timeout.connect(self._tick)
-
-    # ── public API ────────────────────────────────────────────────────────────
-
-    def set_busy(self, busy: bool):
-        """Enter/leave busy (reloading) state."""
-        if busy == self._busy:
-            return
-        self._busy = busy
-        if busy:
-            self._angle = 0.0
-            self._spin_timer.start()
-        else:
-            self._spin_timer.stop()
-        self.setEnabled(not busy)
-        self.update()
-
-    # ── internals ─────────────────────────────────────────────────────────────
-
-    def _tick(self):
-        self._angle = (self._angle + 8.0) % 360.0
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._busy:
-            return
-        # Draw spinning arc on top of the button face
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Semi-transparent dark overlay so the ▶/⏸ text fades back
-        p.fillRect(self.rect(), QColor(0, 0, 0, 140))
-        # Arc geometry — inset 6 px from border
-        inset = 7
-        rect  = QRectF(inset, inset, self.width() - 2*inset, self.height() - 2*inset)
-        pen   = QPen(QColor(ACC), 3.0, Qt.PenStyle.SolidLine,
-                     Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        # Qt angles: 0° = 3 o'clock, positive = counter-clockwise, units = 1/16 degree
-        start_angle = int((90.0 - self._angle) * 16)   # top = 90°
-        span_angle  = int(250 * 16)                     # 250° arc
-        p.drawArc(rect, start_angle, span_angle)
-        p.end()
-
-class _RoundedCoverLabel(QWidget):
-    """Cover thumbnail that clips its pixmap to a rounded rect matching the
-    global corner radius (RAD_PCT).  The clip is applied via QPainterPath on
-    every paintEvent — no cache needed because QPainterPath construction is
-    O(1) and the painter clip is the only thing that makes the corners
-    transparent against the viz background.
-
-    Cover-accent mode (set_cover_accent_mode):
-      When on, the 220px master is fetched from _cover_cache, each pixel's
-      brightness is extracted and mapped onto the current accent hue+sat at
-      that value level (black→darkAccent, white→brightAccent).  This is done
-      with numpy on the raw ARGB32 buffer — no per-pixel Python loop.
-      The recoloured pixmap is cached per (fp, acc_h, acc_s) and invalidated
-      on track or accent change.
-    """
-
-    def __init__(self, size: int, parent=None):
-        super().__init__(parent)
-        self._sz  = size
-        self._pm: QPixmap | None = None
-        self._fp: str | None = None          # filepath of current track
-        self._cover_acc_mode: bool = False
-        self._acc_pm: QPixmap | None = None  # cached recoloured pixmap
-        self._acc_pm_key: tuple = ()         # (fp, acc_h, acc_s) → invalidation key
-        self.setFixedSize(size, size)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
-    def setPixmap(self, pm: QPixmap | None, fp: str | None = None):
-        self._pm = pm
-        self._fp = fp
-        self._acc_pm = None   # invalidate recoloured cache on new pixmap
-        self.update()
-
-    def clear(self):
-        self._pm = None
-        self._fp = None
-        self._acc_pm = None
-        self.update()
-
-    def set_cover_accent_mode(self, on: bool):
-        self._cover_acc_mode = on
-        self._acc_pm = None   # force rebuild on next paint
-        self.update()
-
-    def _build_accent_pixmap(self) -> QPixmap | None:
-        """Recolour the 220px master: each pixel's brightness → accent colour.
-
-        Stride-correct numpy read (identical strategy to _recolor_pixmap so
-        bytesPerLine padding never causes a reshape crash on any Qt build).
-        Uses the shared _acc_lut_cache so the 256-QColor loop runs at most once
-        per accent hue for the whole app instead of once per track change.
-        The result is downscaled to self._sz and cached — paintEvent never
-        rescales, eliminating a 60-fps QPixmap allocation.
-        Cache key includes sz so the same instance can serve any target size.
-        """
-        fp = self._fp
-        if not fp:
-            return None
-        # Pull 220px master already in RAM — no I/O
-        master = _cover_cache.get((fp, _COVER_MASTER_SIZE), _COVER_SENTINEL)
-        if master is _COVER_SENTINEL or master is None:
-            return None
-
-        acc_h, acc_s, _, _ = QColor(ACC).getHsv()
-        sz  = self._sz
-        # Include _DARK_MODE in key: light mode maps accent→white, dark maps black→accent
-        key = (fp, acc_h, acc_s, sz, _DARK_MODE)
-        if self._acc_pm_key == key and self._acc_pm is not None:
-            return self._acc_pm   # still valid
-
-        # ── Shared LUT (same as _recolor_pixmap; built once per accent hue + mode) ──
-        lut_key = (acc_h, _DARK_MODE)
-        lut = _acc_lut_cache.get(lut_key)
-        if lut is None:
-            lut_r = _np.empty(256, dtype=_np.uint8)
-            lut_g = _np.empty(256, dtype=_np.uint8)
-            lut_b = _np.empty(256, dtype=_np.uint8)
-            _c = QColor()
-            if _DARK_MODE:
-                for v in range(256):
-                    _c.setHsv(acc_h, acc_s, v)
-                    lut_r[v] = _c.red()
-                    lut_g[v] = _c.green()
-                    lut_b[v] = _c.blue()
-            else:
-                for v in range(256):
-                    sat = 255 - v
-                    _c.setHsv(acc_h, sat, 255)
-                    lut_r[v] = _c.red()
-                    lut_g[v] = _c.green()
-                    lut_b[v] = _c.blue()
-            lut = (lut_r, lut_g, lut_b)
-            _acc_lut_cache[lut_key] = lut
-        lut_r, lut_g, lut_b = lut
-
-        # ── Stride-correct numpy read (bytesPerLine may exceed w*4) ──────────
-        # Same approach as _recolor_pixmap; avoids reshape ValueError when Qt
-        # adds row-alignment padding after convertToFormat on some builds.
-        img = master.toImage().convertToFormat(QImage.Format.Format_RGB32)
-        w, h = img.width(), img.height()
-        stride = img.bytesPerLine()
-        ptr = img.bits()
-        ptr.setsize(h * stride)
-        raw = _np.frombuffer(ptr, dtype=_np.uint8).reshape(h, stride).copy()
-        del img  # release QImage ASAP — data already copied
-        arr = raw[:, : w * 4].reshape(h * w, 4)   # strip row padding
-
-        # Qt RGB32 LE layout: [B, G, R, 0xFF] — BT.601 integer luminance
-        y8 = ((arr[:, 2].astype(_np.uint16) * 2 +
-               arr[:, 1].astype(_np.uint16) * 5 +
-               arr[:, 0].astype(_np.uint16)) >> 3).clip(0, 255).astype(_np.uint8)
-
-        out = arr.copy()
-        out[:, 0] = lut_b[y8]
-        out[:, 1] = lut_g[y8]
-        out[:, 2] = lut_r[y8]
-        # out[:, 3] stays 0xFF (opaque)
-
-        acc_pm = QPixmap.fromImage(
-            QImage(out.tobytes(), w, h, w * 4, QImage.Format.Format_RGB32))
-
-        # ── Downscale to widget size once, cache the result ───────────────────
-        if acc_pm.size() != QSize(sz, sz):
-            acc_pm = acc_pm.scaled(sz, sz,
-                                   Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                   Qt.TransformationMode.SmoothTransformation)
-            ox = (acc_pm.width()  - sz) // 2
-            oy = (acc_pm.height() - sz) // 2
-            acc_pm = acc_pm.copy(ox, oy, sz, sz)
-
-        self._acc_pm     = acc_pm
-        self._acc_pm_key = key
-        return acc_pm
-
-    def paintEvent(self, _):
-        if self._pm is None:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        radius = _r(self._sz // 2)
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(0, 0, self._sz, self._sz), radius, radius)
-        p.setClipPath(path)
-        # Choose source pixmap
-        if self._cover_acc_mode:
-            pm = self._build_accent_pixmap() or self._pm
-        else:
-            pm = self._pm
-        # Scale/crop to widget size if needed
-        if pm.size() != QSize(self._sz, self._sz):
-            pm = pm.scaled(self._sz, self._sz,
-                           Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                           Qt.TransformationMode.SmoothTransformation)
-            ox = (pm.width()  - self._sz) // 2
-            oy = (pm.height() - self._sz) // 2
-            pm = pm.copy(ox, oy, self._sz, self._sz)
-        # Cover-accent mode: draw fully opaque (the recoloured image IS the bg).
-        # Normal mode: 65% so the viz bars bleed through.
-        p.setOpacity(1.0 if self._cover_acc_mode else 0.65)
-        p.drawPixmap(0, 0, pm)
-        p.end()
 
 
 class ControlBar(QFrame):
@@ -375,24 +67,22 @@ class ControlBar(QFrame):
         self._cover_acc_on: bool = False   # mirrors the "ACC" cover-accent toggle
 
         self._delay_ms    = 0
-        # Numpy ring buffer for viz frame delay.
-        # At 60 fps and max delay 1000 ms we need at most ~62 slots; 70 gives headroom.
-        # Two pre-allocated arrays — no Python allocation per frame:
-        #   _viz_rbuf   (70, VIZ_BANDS) float32  — circular frame storage
-        #   _viz_rbuf_ts (70,)          float64  — wall-clock timestamp per slot
-        # _viz_rbuf_head: next write slot (mod 70); _viz_rbuf_count: valid slots filled.
-        _VIZ_RBUF_N = 70
+        # Recent viz frames, so the display can lag behind the audio to match
+        # Bluetooth/DAC latency. It has to span the Delay slider's full 3000 ms
+        # (~180 slots at 60 fps) or the "oldest slot >= delay_ms" scan finds
+        # nothing and the display freezes; 200 leaves room for render jitter.
+        _VIZ_RBUF_N = 200
         self._viz_rbuf_n    = _VIZ_RBUF_N
         self._viz_rbuf      = _np.zeros((_VIZ_RBUF_N, VIZ_BANDS), dtype=_np.float32)
         self._viz_rbuf_ts   = _np.zeros(_VIZ_RBUF_N, dtype=_np.float64)
         self._viz_rbuf_head = 0
         self._viz_rbuf_count= 0
-        # Display buffer: delayed (or live) frame that paintEvent reads.
+        # The frame paintEvent reads, live or delayed
         self._viz_display_buf = _np.zeros(VIZ_BANDS, dtype=_np.float32)
 
-        # Paint pre-allocation — rebuilt in _precompute_bars / resizeEvent, reused every frame
+        # Paint buffers, rebuilt by _precompute_bars and reused every frame
         self._paint_bar_px      = _np.zeros(VIZ_BANDS, dtype=_np.int32)
-        # Pixel buffer for single-shot drawImage (avoids 256+ fillRect calls per frame)
+        # Pixel buffer for one drawImage per frame instead of 256+ fillRects
         self._px_buf:     object = None   # (ih, iw) uint32 numpy array
         self._px_qimg:    object = None   # QImage wrapping _px_buf
         self._px_shape:   tuple  = (0, 0) # (ih, iw) rebuilt on resize
@@ -401,14 +91,18 @@ class ControlBar(QFrame):
         self._px_bg_key:  object = None   # tracks BG global for cache invalidation
         self._px_bar_key: object = None   # tracks bar color for cache invalidation
         self._px_row_idx: object = None   # (ih, 1) int32 — row indices for broadcast
+        self._px_m32:     object = None   # (ih, iw) uint32 scratch for the bar blend
+        # Integer bar heights of the last repainted frame, to skip identical ones
+        self._viz_px_cur:  object = _np.zeros(VIZ_BANDS, dtype=_np.int32)
+        self._viz_px_last: object = _np.full(VIZ_BANDS, -1, dtype=_np.int32)
+        self._viz_last_ih: int    = -1
         self._render_last_wt:    float = 0.0   # timestamp of last update() call
-        # Cached QPen / QBrush objects for paintEvent — rebuilt when BORD/BG globals change.
-        # Avoids constructing QPen(QColor(BORD), 1) on every 60-fps frame.
+        # Cached pen/brush, rebuilt when BORD or BG changes rather than per frame
         self._paint_bord_key: object = None    # tracks BORD global
         self._paint_bord_pen: QPen   = QPen()  # QPen(BORD, 1) — rebuilt on demand
         self._paint_bg_brush: QBrush = QBrush()
 
-        # Settings and EQ popups (lazy-created)
+        # Both popups are created on first use
         self._settings_popup: Optional[SettingsPopup] = None
         self._eq_popup: Optional[EqPopup] = None
 
@@ -435,16 +129,15 @@ class ControlBar(QFrame):
         # Now-playing
         info = QWidget(); info.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         info.setStyleSheet('background:transparent;')
-        # Horizontal layout: cover thumbnail (optional) + title/artist stack
         info_h = QHBoxLayout(info); info_h.setContentsMargins(8, 0, 0, 0); info_h.setSpacing(10)
         _COVER_SZ = 64
-        # Cover thumbnail — rounded corners via _RoundedCoverLabel (clips to global RAD_PCT;
-        # transparent corners show the viz background cleanly, computed per paintEvent, no cache)
+        # _RoundedCoverLabel clips to RAD_PCT, so the corners stay transparent
+        # over the viz background.
         self._cover_lbl = _RoundedCoverLabel(_COVER_SZ)
         self._cover_lbl.setVisible(True)
         info_h.addWidget(self._cover_lbl)
         # Title pinned to cover top, artist pinned to cover bottom
-        txt_w = QWidget(); txt_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._txt_w = txt_w = QWidget(); txt_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         txt_w.setStyleSheet('background:transparent;'); txt_w.setFixedHeight(_COVER_SZ)
         il = QVBoxLayout(txt_w); il.setContentsMargins(0, 3, 0, 3); il.setSpacing(0)
         self._lbl_title  = QLabel('—'); self._lbl_title.setObjectName('now_title')
@@ -454,11 +147,23 @@ class ControlBar(QFrame):
             lbl.setStyleSheet('background:transparent;')
         self._lbl_title.setMaximumWidth(240); self._lbl_title.setWordWrap(False)
         self._lbl_title.setTextFormat(Qt.TextFormat.PlainText)
+        self._lbl_artist.setMaximumWidth(240); self._lbl_artist.setWordWrap(False)
+        # Un-elided originals; _apply_now_playing_text() elides them to fit
+        self._now_title_raw  = '—'
+        self._now_artist_raw = ''
         il.addWidget(self._lbl_title, 0, Qt.AlignmentFlag.AlignTop)
         il.addStretch(1)
         il.addWidget(self._lbl_artist, 0, Qt.AlignmentFlag.AlignBottom)
         info_h.addWidget(txt_w, 1)
         row2.addWidget(info, 3)
+        # Responsive breakpoints used by resizeEvent:
+        # (min_width, cover_size, title/artist max width, play button size)
+        self._NOWPLAYING_BREAKPOINTS = (
+            (900, 64, 240, 60),
+            (700, 52, 170, 52),
+            (560, 42, 120, 46),
+            (0,   32, 80,  40),
+        )
 
         # Transport
         centre_w = QWidget(); centre_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -476,14 +181,7 @@ class ControlBar(QFrame):
                f'QPushButton#ctrl:checked {{ color:{ACC}; background:transparent; }}'
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self.btn_shuf, self.btn_prev, self.btn_next): b.setStyleSheet(_ts)
-        self.btn_play.setStyleSheet(
-            f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
-            f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
-            f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
-            f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
-            f' background:{BG4}; }}'
-            f'QPushButton#play:pressed {{ background:{BG4}; }}')
+        # btn_play sizes itself in SpinningPlayButton.set_size()
         for b in (self.btn_shuf, self.btn_prev, self.btn_play, self.btn_next, self.btn_rep):
             centre.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter)
         row2.addWidget(centre_w, 2)
@@ -534,25 +232,22 @@ class ControlBar(QFrame):
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(self._overlay_timeout_ms)
         self._idle_timer.timeout.connect(self._on_idle_timeout)
-        # Last mouse position for 5-px threshold (global screen coordinates)
+        # Global mouse position, for the 5-px movement threshold
         self._idle_last_mouse: Optional[QPoint] = None
 
         # ── Viz repaint — fixed-rate Qt timer ───────────────────────────────
-        # GStreamer frames update _viz_bar_buf at whatever rate they arrive;
-        # a separate Qt timer drives paintEvent at a fixed 16 ms cadence (FPS_CAP).
-        # Each tick records its deadline and schedules the next tick relative to
-        # that deadline so scheduling jitter does not accumulate.
-        # _viz_has_new is the handshake between the GLib spectrum callback and the
-        # render timer — no direct signal connection needed.
-        # Recompute freq→bin mapping when track sample rate changes.
+        # Spectrum frames arrive at whatever rate the codec produces; this timer
+        # drives painting at a fixed FPS_CAP cadence instead, draining the queue
+        # via Player._compute_viz_frame. A new sample rate needs new freq→bin
+        # tables, hence the sig_fs_changed hookup.
         player.sig_fs_changed.connect(lambda _fs: self._precompute_bars())
         self._render_timer = QTimer(self)
         self._render_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._render_timer.setInterval(_FRAME_MS)  # FPS_CAP fixed render cadence
         self._render_timer.timeout.connect(self._render_tick)
-        # Pre-compute bar layout once widget has a valid size (after first layout pass)
+        # Bar layout needs a real widget width, so defer past the first layout pass
         QTimer.singleShot(0, self._precompute_bars)
-        # Debounce timer for resize — avoids recomputing on every pixel change
+        # Debounced so a resize drag does not recompute per pixel
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(40)
@@ -566,10 +261,14 @@ class ControlBar(QFrame):
             pop.limiter_changed.connect(self._player.set_limiter_enabled)
             pop.stereo_changed.connect(self._player.set_stereo_enabled)
             pop.stereo_width_changed.connect(self._player.set_stereo_width)
+            pop.balance_changed.connect(self._player.set_balance)
             pop.preamp_changed.connect(self._player.set_preamp_db)
-            # Auto-save on FX changes
+            # Applies live through Player's preamp element, so it goes straight
+            # to the player with no MainWindow handler in between.
+            pop.loudness_norm_toggled.connect(self._player.set_loudness_norm)
             for sig in (pop.limiter_changed, pop.stereo_changed,
-                        pop.stereo_width_changed, pop.preamp_changed):
+                        pop.stereo_width_changed, pop.balance_changed, pop.preamp_changed,
+                        pop.loudness_norm_toggled):
                 sig.connect(lambda *_: self.settings_changed.emit())
             self._eq_popup = pop
         return self._eq_popup
@@ -581,10 +280,11 @@ class ControlBar(QFrame):
             pop._hide_timestamp_ms = 0
             return
         pop.set_bands(self._player._eq_bands, self._player._eq_enabled)
-        # Sync FX switches from player state (in case they changed without UI)
+        # The switches may be out of date if state changed without the popup open
         pop.set_limiter_enabled(self._player._limiter_enabled)
         pop.set_stereo_enabled(self._player._stereo_enabled)
         pop.set_stereo_width(self._player._stereo_width)
+        pop.set_balance(self._player._balance)
         pop.set_preamp_db(self._player._preamp_db)
         if pop.isVisible():
             pop.hide()
@@ -614,7 +314,6 @@ class ControlBar(QFrame):
             pop.cover_toggled.connect(self._on_cover_toggle)
             pop.cover_accent_toggled.connect(self._on_cover_acc_toggle)
             pop.accent_changed.connect(self._on_accent_change)
-            # lyrics_fetch_toggled gates LyricsPanel; no ControlBar handler needed
             pop.overlay_viz_toggled.connect(self.set_overlay_viz_enabled)
             pop.overlay_viz_toggled.connect(
                 lambda on: getattr(self, '_blackout_ref', None) and
@@ -633,21 +332,24 @@ class ControlBar(QFrame):
             pop.cover_fetch_toggled.connect(self._on_cover_fetch_btn)
             pop.lyric_fetch_action.connect(self._on_lyric_fetch_btn)
             pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
+            pop.gain_fetch_action.connect(self._on_gain_fetch_btn)
             pop.rename_toggled.connect(self._on_rename_btn)
             pop.radius_changed.connect(self._on_radius_change)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
-            # Sync volume slider when Player changes volume programmatically (e.g. ALSA auto-vol)
+            # Keep the slider in step with volume changes made by the player
             self._player.sig_volume_changed.connect(pop.set_volume)
-            # Notify MainWindow to run the ALSA probe when the device changes.
-            # Must be connected here (lazy popup creation) — MainWindow's __init__
-            # guard `if _settings_popup is not None` always fails at startup.
+            # Connected here rather than in MainWindow.__init__: the popup does
+            # not exist yet at that point.
             win = self.window()
             if win is not None and hasattr(win, '_on_output_device_changed'):
                 pop.output_device_changed.connect(win._on_output_device_changed)
+            if win is not None and hasattr(win, '_on_adaptive_rate_toggled'):
+                pop.adaptive_rate_toggled.connect(win._on_adaptive_rate_toggled)
+            if win is not None and hasattr(win, '_on_bg_opt_toggled'):
+                pop.bg_opt_toggled.connect(win._on_bg_opt_toggled)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
-            # Auto-save on every setting change
             _save_sigs = [
                 pop.viz_toggled, pop.log_toggled, pop.volume_changed,
                 pop.delay_changed, pop.inertia_changed, pop.brightness_changed,
@@ -658,10 +360,11 @@ class ControlBar(QFrame):
                 pop.overlay_timeout_changed, pop.view_mode_changed,
                 pop.list_scale_changed, pop.gallery_scale_changed,
                 pop.radius_changed, pop.output_device_changed,
+                pop.adaptive_rate_toggled, pop.bg_opt_toggled,
             ]
             for sig in _save_sigs:
                 sig.connect(lambda *_: self.settings_changed.emit())
-            # Theme switch emits via _on_theme_toggle → connect directly
+            # The theme switch has its own handler, so connect to the switch itself
             pop._theme_sw.toggled.connect(lambda *_: self.settings_changed.emit())
             self._settings_popup = pop
         return self._settings_popup
@@ -707,7 +410,6 @@ class ControlBar(QFrame):
             dsp_parts.append(eq_str)
         if self._player._limiter_enabled:
             dsp_parts.append('Lim')
-        # Stereo Expand — added to dsp_parts so | separates everything
         if self._player._stereo_enabled:
             width = self._player._stereo_width
             width_str = f'+{width}' if width > 0 else str(width)
@@ -719,13 +421,20 @@ class ControlBar(QFrame):
         # ── Output / Device ──────────────────────────────────────────
         dev = self._player._alsa_device
         if not self._player._is_hw_device(dev):
-            pop._info_dev.setText('PipeWire')
+            label = 'PipeWire'
         else:
             idx = pop._out_dev_combo.findData(dev)
-            if idx >= 0:
-                pop._info_dev.setText(pop._out_dev_combo.itemText(idx))
-            else:
-                pop._info_dev.setText(dev)
+            label = pop._out_dev_combo.itemText(idx) if idx >= 0 else dev
+        # Cheap after the first call — the rate probes are cached in-process
+        mode, target_rate = self._player._resolve_rate_plan()
+        if mode == 'resample' and target_rate:
+            # HAVE_SOXR only says the package imported, not that this particular
+            # bin built; a per-instance fallback prints to the console instead.
+            backend = 'SoX' if HAVE_SOXR else 'GST'
+            label += f'  ·  {backend} {target_rate / 1000:.1f}k'
+        elif mode == 'passthrough':
+            label += '  ·  bit-perfect'
+        pop._info_dev.setText(label)
 
     @property
     def lyrics_fetch_enabled(self) -> bool:
@@ -736,9 +445,6 @@ class ControlBar(QFrame):
         """Return current state of the Cover switch (default True if popup not yet created)."""
         pop = self._settings_popup
         return pop.cover_on() if pop else True
-
-    # lyrics_fetch_toggled merely gates LyricsPanel.set_track() — that method
-    # reads self._ctrlbar.lyrics_fetch_enabled at call time, so no handler needed.
 
     def _on_overlay_auto_open_toggle(self, on: bool):
         self._overlay_auto_open = on
@@ -768,7 +474,7 @@ class ControlBar(QFrame):
             return
         if bref.isVisible():
             return
-        # Only auto-open while app is actually in the foreground
+        # Only while the app is in the foreground
         win = self.window()
         if win and win.isActiveWindow():
             bref.show_blackout()
@@ -782,11 +488,10 @@ class ControlBar(QFrame):
         self._player._viz_overlay_cb = self._overlay_cb if on else None
         if not on:
             self._player.set_overlay_needs_spectrum(False)
-            # If overlay is currently open, we just lost the only reason to render
+            # With the overlay open, this was the only reason left to render
             if self._overlay_open or not self._viz_on:
-                self._render_timer.stop()
+                self._stop_render_timer()
         elif self._overlay_open and self._player.playing and not self._viz_paused:
-            # Overlay viz just turned on while overlay is visible — start rendering
             self._start_render_timer()
 
     def set_overlay_open(self, open: bool):
@@ -800,10 +505,9 @@ class ControlBar(QFrame):
         """
         self._overlay_open = open
         if open and not self._overlay_viz_enabled:
-            # Overlay covers everything and overlay viz is off — rendering is wasted
-            self._render_timer.stop()
+            # Fully covered with nothing to show — rendering would be wasted
+            self._stop_render_timer()
         elif not open and self._viz_on and not self._viz_paused and self._player.playing:
-            # Overlay dismissed — restart main viz if it should be running
             self._start_render_timer()
 
     def set_blackout_ref(self, overlay):
@@ -823,10 +527,9 @@ class ControlBar(QFrame):
             return
         if self._settings_popup: self._settings_popup.hide()
         
-        # Check if there's already a cover fetch running in background
+        # Reuse the dialog if this fetch is already running in the background
         workers_list = _BaseFetchPopup._active_workers.get('CoverFetchPopup', [])
         if workers_list:
-            # Show the most recent existing popup instead of creating a new one
             old_instance, old_worker, old_thread = workers_list[-1]
             old_instance.show()
             old_instance.raise_()
@@ -834,7 +537,7 @@ class ControlBar(QFrame):
             return
         
         dlg = CoverFetchPopup(all_tracks, pages, self, parent=win)
-        _ModalOverlay.show_for(dlg)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
         dlg.show()
 
     def _on_lyric_fetch_btn(self):
@@ -846,10 +549,9 @@ class ControlBar(QFrame):
             return
         if self._settings_popup: self._settings_popup.hide()
         
-        # Check if there's already a lyrics fetch running in background
+        # Reuse the dialog if this fetch is already running in the background
         workers_list = _BaseFetchPopup._active_workers.get('LyricsFetchPopup', [])
         if workers_list:
-            # Show the most recent existing popup instead of creating a new one
             old_instance, old_worker, old_thread = workers_list[-1]
             old_instance.show()
             old_instance.raise_()
@@ -857,7 +559,7 @@ class ControlBar(QFrame):
             return
         
         dlg = LyricsFetchPopup(all_tracks, parent=win)
-        _ModalOverlay.show_for(dlg)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
         dlg.show()
 
     def _on_tag_fetch_btn(self):
@@ -868,10 +570,9 @@ class ControlBar(QFrame):
             return
         if self._settings_popup: self._settings_popup.hide()
         
-        # Check if there's already a tag fetch running in background
+        # Reuse the dialog if this fetch is already running in the background
         workers_list = _BaseFetchPopup._active_workers.get('TagFetchPopup', [])
         if workers_list:
-            # Show the most recent existing popup instead of creating a new one
             old_instance, old_worker, old_thread = workers_list[-1]
             old_instance.show()
             old_instance.raise_()
@@ -880,7 +581,28 @@ class ControlBar(QFrame):
         
         dlg = TagFetchPopup(all_tracks, parent=win)
         dlg.tags_updated.connect(lambda fp, tags: win._on_tags_fetched(fp, tags))
-        _ModalOverlay.show_for(dlg)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
+        dlg.show()
+
+    def _on_gain_fetch_btn(self):
+        win = self.window()
+        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
+        if not all_tracks:
+            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
+            return
+        if self._settings_popup: self._settings_popup.hide()
+
+        # Reuse the dialog if this fetch is already running in the background
+        workers_list = _BaseFetchPopup._active_workers.get('GainFetchPopup', [])
+        if workers_list:
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+
+        dlg = GainFetchPopup(all_tracks, parent=win)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
         dlg.show()
 
     def _on_rename_btn(self):
@@ -928,11 +650,9 @@ class ControlBar(QFrame):
                     win._known_paths.discard(old)
                     win._known_paths.add(new)
 
-            # 2b. Patch live player state so the playing track keeps its accent
-            # indicator and lyrics panel after the rescan produces new Track objects.
-            # Without this, _rebuild_library can't match the old filepath to the
-            # rebuilt track list (pidx stays -1) and the lyrics panel fetches
-            # lyrics for the now-gone old path ("does not contain lyrics").
+            # 2b. Move the live player state onto the new paths, or the rescan
+            # cannot match the playing track (losing its highlight) and the
+            # lyrics panel looks up a path that no longer exists.
             ctrlbar = getattr(win, '_ctrlbar', None)
             player  = getattr(win, '_player', None)
             if player and player._last_filepath in rename_map:
@@ -964,11 +684,10 @@ class ControlBar(QFrame):
         if self._settings_popup:
             self._settings_popup.hide()
         
-        # Check if there's already a rename operation running in background
+        # Reuse the dialog if a rename is already running in the background
         existing = RenamePopup._active_worker
         if existing:
             old_instance, old_worker, old_thread = existing
-            # Show the existing popup instead of creating a new one
             old_instance.show()
             old_instance.raise_()
             old_instance.activateWindow()
@@ -976,7 +695,7 @@ class ControlBar(QFrame):
         
         dlg = RenamePopup(all_tracks, parent=win)
         dlg._post_finish_cb = _on_rename_finished
-        _ModalOverlay.show_for(dlg)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
         dlg.show()
 
     def _toggle_fullscreen(self):
@@ -990,9 +709,9 @@ class ControlBar(QFrame):
 
     def _toggle_settings(self):
         pop = self._ensure_settings_popup()
-        # If this toggle was triggered by the same click that closed the popup
-        # (eventFilter hides it, then the button's clicked signal fires), suppress
-        # the re-open.  150 ms is generous; the two events arrive within ~1 ms.
+        # One click can both close the popup (via the event filter) and re-fire
+        # this handler, so ignore a toggle right after a hide. The two events
+        # arrive ~1 ms apart; 150 ms is a generous window.
         now = QDateTime.currentMSecsSinceEpoch()
         if now - pop._hide_timestamp_ms < 150:
             pop._hide_timestamp_ms = 0
@@ -1025,7 +744,7 @@ class ControlBar(QFrame):
         return result
 
     def init_from_config(self, cfg: dict):
-        # Settings popup — safely coerce numeric values that JSON may deserialize as strings
+        # Numbers may come back from JSON as strings, so coerce them
         pop = self._ensure_settings_popup()
         volume  = int(float(cfg.get('volume',       80)))
         delay   = int(float(cfg.get('viz_delay_ms',  0)))
@@ -1037,6 +756,10 @@ class ControlBar(QFrame):
         pop.set_inertia(inertia)
         viz = cfg.get('viz_on', True); log = cfg.get('log_on', True)
         pop.set_viz(viz); pop.set_log(log)
+        # Stored inverted: the config key predates the switch and names the opt-out.
+        # setChecked() does not emit, so MainWindow's own copy of the flag — already
+        # read by _load_config before we get here — is not clobbered.
+        pop.set_bg_opt(not cfg.get('disable_background_optimizations', False))
         self._on_viz_toggle(viz); self._on_log_toggle(log)
         self._on_delay_change(delay)
         self._on_inertia_change(inertia)
@@ -1049,8 +772,9 @@ class ControlBar(QFrame):
         cover_acc = cfg.get('cover_accent', False)
         pop.set_cover_accent(cover_acc)
         self._cover_acc_on = cover_acc
-        global _COVER_ACC_ON; _COVER_ACC_ON = cover_acc
-        import cover_art as _cover_art_mod; _cover_art_mod._COVER_ACC_ON = cover_acc
+        # get_cover_pixmap reads the flag from cover_art, so set it there.
+        import cover_art as _cover_art_mod
+        _cover_art_mod._COVER_ACC_ON = cover_acc
         if cover_acc:
             self._cover_lbl.set_cover_accent_mode(True)
         pop.set_lyrics_fetch(cfg.get('lyrics_fetch_on', True))
@@ -1077,9 +801,7 @@ class ControlBar(QFrame):
             self._blackout_ref.set_overlay_lyrics(_ov_lyr)
             self._blackout_ref.set_overlay_clock(_ov_clk)
             self._blackout_ref.set_scale(_ov_sc)
-        _cover_fetch = cfg.get('cover_fetch_on', True)
-        pop.set_cover_fetch(_cover_fetch)
-        global _cover_fetch_on; _cover_fetch_on = _cover_fetch
+        pop.set_cover_fetch(cfg.get('cover_fetch_on', True))
         self._player.set_volume(volume / 100)
         # Corner radius — restore before theme so the first stylesheet is correct
         _rad = int(float(cfg.get('corner_radius', RAD_PCT)))
@@ -1109,7 +831,7 @@ class ControlBar(QFrame):
         # so the user is not left with a broken/silent sink on next launch.
         _saved_dev = cfg.get('output_device', 'pipewire')
         if Player._is_hw_device(_saved_dev):
-            _available_ids = {dev_id for _, dev_id in SettingsPopup._probe_alsa_devices()}
+            _available_ids = {dev_id for _, dev_id in probe_alsa_devices()}
             if _saved_dev not in _available_ids:
                 print(f'[Config] saved output device {_saved_dev!r} not found — falling back to PipeWire')
                 _saved_dev = 'pipewire'  # fallback sentinel
@@ -1123,8 +845,21 @@ class ControlBar(QFrame):
         pop.set_output_device(_saved_dev)          # combo shows saved card name
         self._player._alsa_device = _pipeline_dev  # pipeline starts on hw:X,Y
         print(f'[AudioSwitch] startup: combo={_saved_dev!r}, pipeline device={_pipeline_dev!r}')
-        # Pre-confirm hw:X,Y as the optimistic default immediately.
-        # The real probe runs on first _alsa_play() which validates it with audio.
+
+        # Restore the toggle silently, and re-sync the config drop-in only if the
+        # user had already opted in — never opt them in here.
+        _adaptive = cfg.get('pipewire_adaptive_rate', False)
+        pop.set_adaptive_rate_enabled(_adaptive)
+        self._player.set_pipewire_adaptive_rate(_adaptive, reload=False)
+        win = self.window()
+        if _adaptive and win is not None and hasattr(win, '_sync_pipewire_adaptive_rate_file'):
+            win._sync_pipewire_adaptive_rate_file(True)
+
+        _loudness = cfg.get('loudness_norm', False)
+        self._ensure_eq_popup().set_loudness_norm_enabled(_loudness)
+        self._player.set_loudness_norm(_loudness)
+
+        # Assume hw:X,Y works; the first _alsa_play() probe confirms it for real
         if Player._is_hw_device(_pipeline_dev):
             win = self.window()
             win._alsa_confirmed_device = _pipeline_dev   # hw:X,Y (correct card)
@@ -1137,34 +872,29 @@ class ControlBar(QFrame):
         pop.set_view_mode(_vm)
         pop.set_list_scale(_ls)
         pop.set_gallery_scale(_gs)
-        # Propagate to pages (deferred so pages are fully built)
+        # Deferred so the pages exist by the time this runs
         QTimer.singleShot(0, lambda: self._apply_view_settings(_vm, _ls, _gs))
 
-        # EQ popup profiles and default state
         eq_pop = self._ensure_eq_popup()
         raw_profiles = cfg.get('eq_profiles', {})
         eq_profiles = {}
         for k, v in raw_profiles.items():
             if isinstance(v, dict):
-                # New format: {bands: [...], preamp: float}
                 eq_profiles[k] = {'bands':  self._coerce_bands(v.get('bands', [])),
                                    'preamp': float(v.get('preamp', 0.0))}
             else:
-                # Legacy format: plain band list
+                # Older configs stored a bare band list
                 eq_profiles[k] = {'bands': self._coerce_bands(v), 'preamp': 0.0}
         eq_pop.set_profiles(eq_profiles)
 
-        # Load default EQ (if any) and apply it
         default_bands   = self._coerce_bands(cfg.get('default_eq_bands', []))
         default_enabled = cfg.get('default_eq_enabled', True)
         default_name    = cfg.get('default_eq_profile', '')
         eq_pop.set_default(default_bands, default_enabled, default_name)
         eq_pop.set_bands(default_bands, default_enabled, default_name)
-        # Apply to player
         self._player.set_eq_enabled(default_enabled)
         self._player.set_eq_bands(default_bands)
 
-        # Limiter, stereo enhance
         _lim  = cfg.get('limiter_enabled', False)
         _ste  = cfg.get('stereo_enabled',  False)
         _stw  = int(float(cfg.get('stereo_width', 50)))
@@ -1174,6 +904,10 @@ class ControlBar(QFrame):
         self._player._limiter_enabled = _lim
         self._player._stereo_enabled  = _ste
         self._player._stereo_width    = _stw
+
+        _bal  = int(float(cfg.get('balance', 0)))
+        eq_pop.set_balance(_bal)
+        self._player._balance = _bal
 
         _preamp = float(cfg.get('eq_preamp_db', 0.0))
         eq_pop.set_preamp_db(_preamp)
@@ -1209,7 +943,8 @@ class ControlBar(QFrame):
                     'use_system_qt_theme': pop.system_theme_on(),
                     'viz_type': pop.viz_type(),
                     'corner_radius': pop.radius(),
-                    'output_device': pop.output_device()})
+                    'output_device': pop.output_device(),
+                    'pipewire_adaptive_rate': pop.adaptive_rate_enabled()})
         eq_pop = self._ensure_eq_popup()
         cfg['eq_profiles'] = eq_pop.get_profiles()
         default_bands, default_enabled = eq_pop.get_default()
@@ -1219,7 +954,9 @@ class ControlBar(QFrame):
         cfg['limiter_enabled']    = eq_pop.limiter_enabled()
         cfg['stereo_enabled']     = eq_pop.stereo_enabled()
         cfg['stereo_width']       = eq_pop.stereo_width()
+        cfg['balance']            = eq_pop.balance()
         cfg['eq_preamp_db']       = eq_pop.preamp_db()
+        cfg['loudness_norm']      = eq_pop.loudness_norm_enabled()
         return cfg
 
     def _precompute_bars(self):
@@ -1227,8 +964,7 @@ class ControlBar(QFrame):
         iw = round(self.width() * dpr)
         if iw < 2: return
 
-        # ── Integer bar geometry: all bars same width, exactly 1px gap ─────────
-        # bw * VIZ_BANDS + 1 * (VIZ_BANDS-1) = total_used
+        # Equal-width bars with a 1px gap: bw*VIZ_BANDS + (VIZ_BANDS-1) columns
         bw = max(1, (iw - (VIZ_BANDS - 1)) // VIZ_BANDS)
         total_used = bw * VIZ_BANDS + (VIZ_BANDS - 1)
         offset = max(0, (iw - total_used) // 2)   # center the bar group
@@ -1248,9 +984,13 @@ class ControlBar(QFrame):
         self._col_bar      = col_bar
         self._col_has_bar  = (col_bar >= 0)
         self._col_bar_safe = _np.maximum(col_bar, 0)
+        # Constant for a given width, so bars mode never rebuilds them per frame
+        self._col_no_bar   = ~self._col_has_bar
+        self._col_h_buf    = _np.empty(iw, dtype=_np.int32)   # per-column bar height
+        self._col_y0_buf   = _np.empty(iw, dtype=_np.int32)   # per-column body top row
 
         # ── Cap pixel offset arrays — fully vectorized ────────────────────────────
-        # Round caps are disabled when the global corner-radius is below 50 %
+        # Round bar caps only above 50% corner radius
         radius = (bw // 2) if RAD_PCT >= 50 else 0
         if radius > 0 and bw >= 2:
             cx   = (bw - 1) * 0.5
@@ -1266,7 +1006,7 @@ class ControlBar(QFrame):
                 xr_v  = _np.minimum(bw, _np.floor(cx + dx_v).astype(_np.int32) + 1)
                 widths = (xr_v - xl_v).astype(_np.int32)
                 total  = int(widths.sum())
-                # Build col offsets: for each row ri, cols = xl_v[ri] + [0..widths[ri]-1]
+                # Per row ri the columns are xl_v[ri] .. xl_v[ri]+widths[ri]-1
                 cum = _np.zeros(len(widths) + 1, dtype=_np.int32)
                 _np.cumsum(widths, out=cum[1:])
                 col_range  = _np.arange(total, dtype=_np.int32)
@@ -1283,11 +1023,10 @@ class ControlBar(QFrame):
             self._cap_c_offsets = _np.empty(0, dtype=_np.int32)
             self._cap_radius    = 0
 
-        # ── Freq mapping and smooth tables ────────────────────────────────────
+        # ── Freq mapping tables ───────────────────────────────────────────────
         if getattr(self, '_log_scale', True):
             F_MIN = 20.0; F_MAX = 20000.0
             FS_HALF = self._player.current_fs / 2.0
-            FULL_HZ = 20.0; FADE_HZ = 60.0
             log_min = math.log10(F_MIN); log_max = math.log10(F_MAX)
 
             # ── Vectorized freq array ─────────────────────────────────────────
@@ -1303,29 +1042,6 @@ class ControlBar(QFrame):
             bb_arr = _np.minimum(ba_arr + 1, GST_BANDS - 1)
             bt_arr = (fracs_arr - ba_arr.astype(_np.float64)).astype(_np.float32)
 
-            # ── Vectorized run_len_at ─────────────────────────────────────────
-            changes  = _np.concatenate(([True], ba_arr[1:] != ba_arr[:-1], [True]))
-            run_ends = _np.flatnonzero(changes)         # boundaries between runs
-            run_lens = _np.diff(run_ends)               # length of each run
-            run_id   = (_np.searchsorted(run_ends[:-1],
-                         _np.arange(VIZ_BANDS, dtype=_np.int32),
-                         side='right') - 1)
-            run_len_arr = run_lens[run_id]              # (VIZ_BANDS,) run length per bar
-
-            fc_hz_list  = fc_hz_arr.tolist()
-            run_len_list = run_len_arr.tolist()
-            smooth_w = []
-            for d in range(VIZ_BANDS):
-                fc = fc_hz_list[d]; rl = run_len_list[d]
-                if fc >= FADE_HZ or rl <= 1:
-                    smooth_w.append(None)
-                else:
-                    strength = (1.0 if fc < FULL_HZ
-                                else 1.0 - (fc - FULL_HZ) / (FADE_HZ - FULL_HZ))
-                    hw = max(1, int((rl // 2) * strength))
-                    lo = max(0, d - hw); hi = min(VIZ_BANDS - 1, d + hw)
-                    n  = hi - lo + 1
-                    smooth_w.append(tuple((nb, 1.0 / n) for nb in range(lo, hi + 1)))
         else:
             FS_HALF   = self._player.current_fs / 2.0
             lin_scale = (20000.0 / FS_HALF) * GST_BANDS / VIZ_BANDS
@@ -1335,40 +1051,73 @@ class ControlBar(QFrame):
             ba_arr    = _np.clip(fracs_arr.astype(_np.int32), 0, GST_BANDS - 1)
             bb_arr    = _np.minimum(ba_arr + 1, GST_BANDS - 1)
             bt_arr    = (fracs_arr - ba_arr.astype(_np.float64)).astype(_np.float32)
-            smooth_w  = []
-
-        entries = []
-        for d, sw in enumerate(smooth_w):
-            if sw is not None:
-                nb_arr = _np.array([nb for nb, _ in sw], dtype=_np.int32)
-                wk_arr = _np.array([wk for _, wk in sw], dtype=_np.float32)
-                entries.append((d, (nb_arr, wk_arr)))
 
         self._player.set_viz_tables(
-            ba_arr, bb_arr, bt_arr, col_bar, entries,
-            self._inertia,
+            ba_arr, bb_arr, bt_arr, self._inertia,
             overlay_cb=self._overlay_cb if self._overlay_viz_enabled else None
         )
 
         self._paint_bar_px     = _np.zeros(VIZ_BANDS, dtype=_np.int32)
 
-        # ── Line-mode: cache per-width arrays (avoid per-frame allocation) ────────
-        # All of these are constant for a given widget width. Computed once here
-        # (on resize/init) so paintEvent allocates nothing for the interpolation step.
+        # Line-mode scratch arrays. Constant for a given width, so building them
+        # here leaves paintEvent's interpolation allocation-free.
         self._line_col_x_i = _np.arange(iw, dtype=_np.int32)   # column indices for buf[y, col]
-        self._line_cy_buf  = _np.empty(VIZ_BANDS, dtype=_np.float64)  # reusable (ih - bar_px) buf
+        # float32 throughout: the interpolation only ever feeds an int32 pixel
+        # row, so float64 doubled the memory traffic for no extra precision.
+        self._line_cy_buf  = _np.empty(VIZ_BANDS, dtype=_np.float32)  # reusable (ih - bar_px) buf
+        self._line_y_f     = _np.empty(iw, dtype=_np.float32)   # reusable interpolated y
+        self._line_y_tmp   = _np.empty(iw, dtype=_np.float32)   # reusable gather scratch
         self._line_y_int   = _np.empty(iw, dtype=_np.int32)     # reusable per-column y output
 
-        # Precompute uniform linear-interp tables that replace np.interp per frame.
-        # cx_arr = linspace(0, iw-1, VIZ_BANDS) is uniform, so the mapping
-        #   bin_f[x] = x * (VIZ_BANDS-1) / (iw-1)
-        # can be split into cached integer floor (bin_i) and fractional part (bin_f)
-        # arrays — both of shape (iw,).  Per frame: two gathers + one fused-multiply-add.
+        # Interpolation tables replacing a per-frame np.interp. The bar→column
+        # mapping is uniform, so bin_f[x] = x * (VIZ_BANDS-1) / (iw-1) splits into
+        # a cached integer floor and fraction; each frame is then two gathers and
+        # one multiply-add.
         _bin_scale        = float(VIZ_BANDS - 1) / max(1, iw - 1)
         _bf               = _np.arange(iw, dtype=_np.float32) * _bin_scale
         self._line_bin_i  = _np.clip(_bf.astype(_np.int32), 0, VIZ_BANDS - 2)
         self._line_bin_i1 = self._line_bin_i + 1                         # (iw,) int32
         self._line_bin_f  = (_bf - self._line_bin_i).astype(_np.float32) # (iw,) frac [0,1)
+
+    def _interp_line_y(self, bar_px_arr, ih):
+        """Interpolate VIZ_BANDS bar heights into one pixel row per column.
+
+        Returns the shared (iw,) int32 buffer, filled in place. np.take with
+        out= replaces the fancy-index gathers, and the float32 scratch rows are
+        reused, so a frame allocates nothing here.
+        """
+        cy = self._line_cy_buf
+        _np.subtract(ih, bar_px_arr, out=cy, casting='unsafe')
+        yf  = self._line_y_f
+        tmp = self._line_y_tmp
+        _np.take(cy, self._line_bin_i,  out=yf)
+        _np.take(cy, self._line_bin_i1, out=tmp)
+        _np.subtract(tmp, yf, out=tmp)
+        _np.multiply(tmp, self._line_bin_f, out=tmp)
+        _np.add(yf, tmp, out=yf)
+        # Clamping in float before the truncating cast matches the previous
+        # cast-then-clip: both saturate identically at either end.
+        _np.clip(yf, 0.0, ih - 1, out=yf)
+        out = self._line_y_int
+        _np.copyto(out, yf, casting='unsafe')
+        return out
+
+    def _blend_rows(self, buf, y0_row, ih, iw, px_bg, px_fg):
+        """Compose bg + (fg - bg) * mask into buf, mask being row >= y0_row.
+
+        One arithmetic sweep over a reused uint32 scratch, replacing an
+        (ih, iw) boolean mask allocation plus a masked scatter write — the
+        scatter builds an index list over the whole buffer, so at 60 fps it
+        dominated the frame. The delta is masked to 32 bits because fg < bg is
+        normal in a light theme and numpy will not cast a negative Python int
+        to uint32; wraparound makes the addition exact anyway.
+        """
+        m32 = self._px_m32
+        if m32 is None or m32.shape != (ih, iw):
+            m32 = self._px_m32 = _np.empty((ih, iw), dtype=_np.uint32)
+        _np.greater_equal(self._px_row_idx, y0_row, out=m32, casting='unsafe')
+        _np.multiply(m32, _np.uint32((px_fg - px_bg) & 0xFFFFFFFF), out=m32)
+        _np.add(m32, _np.uint32(px_bg), out=buf)
 
     def _start_render_timer(self):
         """Start the fixed-rate render timer with a fresh deadline."""
@@ -1376,44 +1125,57 @@ class ControlBar(QFrame):
         _gc.disable()   # prevent GC pauses during render loop
         self._render_timer.start()
 
+    def _stop_render_timer(self):
+        """Stop the render timer and re-enable GC.
+
+        Always paired with _start_render_timer: GC stays off for as long as the
+        timer runs, so every stop path has to turn it back on or cyclic garbage
+        is never collected again.
+        """
+        self._render_timer.stop()
+        _gc.enable()
+
     def _on_viz_toggle(self, on: bool):
         self._viz_on = on
-        # GStreamer spectrum stays active if either main viz or overlay viz needs it
         self._player.set_viz_active(on and not self._viz_paused)
         if on and self._player.playing and not self._viz_paused:
             self._start_render_timer()
         else:
-            # Only stop the render timer if overlay viz is also off
             if not self._overlay_viz_enabled:
-                self._render_timer.stop()
+                self._stop_render_timer()
             self._player._viz_spec[:] = MIN_DB
+            self._player._viz_reset_queue()
         self.update()
 
     def _on_log_toggle(self, on: bool):
         self._log_scale = on
-        # Flush stale bar data so the old mapping does not bleed into the first
-        # frame rendered with the new freq->bin tables.
+        # Flush stale bars so the old mapping does not bleed into the first frame
         self._player._viz_bar_buf[:] = 0.0
         self._player._viz_spec[:]    = MIN_DB
+        self._player._viz_reset_queue()
         self._precompute_bars()
         self.update()
 
     def _on_delay_change(self, v: int):
         self._delay_ms = v
-        # Reset ring buffer so stale frames from the old delay don't linger.
-        # The buffer will fill within ~70 frames (≈1 s at 60 fps); until then
-        # _render_tick mirrors the live frame directly (best_idx == -1 path).
+        # Drop frames buffered at the old delay. It refills in about a second;
+        # until then _render_tick shows the live frame.
         self._viz_rbuf_head  = 0
         self._viz_rbuf_count = 0
 
     def _overlay_cb(self, bh_list):
-        """Called from GLib thread when overlay viz is active."""
+        """Hand a finished, delay-adjusted viz frame to the blackout overlay.
+
+        Called by _render_tick while overlay viz is active, with the same
+        _viz_display_buf the docked bar paints from — so the overlay honours
+        the Delay slider too instead of always showing the raw live frame.
+        """
         _bref = getattr(self, '_blackout_ref', None)
         if _bref is not None:
             _bref.push_viz_frame(bh_list)
 
     def _on_inertia_change(self, v: int):
-        # Slider value / 100.0 = alpha directly (40→0.40, 100→1.0)
+        # The slider value is the EMA alpha in percent
         self._inertia = v / 100.0
         self._player._viz_inertia = self._inertia
 
@@ -1425,16 +1187,14 @@ class ControlBar(QFrame):
         ah, as_, al, _ = acc.getHsvF()
 
         if _DARK_MODE:
-            # Dark: dim desaturated accent (t=0) → vivid accent (t=1)
-            # Never goes to black — minimum luma is 15% of accent luma
+            # Dim desaturated accent up to the vivid accent, never reaching black
             luma  = max(0.10, al * (0.15 + 0.85 * t))
             tint  = QColor()
             sat   = as_ * (0.50 + 0.50 * t)
             tint.setHsvF(ah, sat, luma)
         else:
-            # Light mode: mix between bg-tinted desaturated accent (t=0)
-            # and a readable vivid accent (t=1). Never pure white or pure black.
-            # t=0: hue preserved, very low sat, value close to BG lightness
+            # Light mode runs from a background-tinted tint to a readable vivid
+            # accent, never reaching pure white or black.
             bg_l  = QColor(BG).lightnessF()
             v0    = max(0.50, bg_l * 0.90)         # near-BG tone, never white
             s0    = as_ * 0.20
@@ -1448,7 +1208,7 @@ class ControlBar(QFrame):
 
     def _on_viz_type_change(self, vtype: str):
         self._viz_type = vtype
-        # Invalidate pixel buffer so line mode allocates a fresh ARGB buffer
+        # Force a fresh pixel buffer for the new style
         self._px_shape = (0, 0)
         self.update()
 
@@ -1465,12 +1225,10 @@ class ControlBar(QFrame):
         import constants as _cm
         global RAD_PCT
         RAD_PCT = max(0, min(100, v))
-        # Broadcast into constants module and every other voidpulse module so
-        # _r() calls in paintEvent / refresh_theme return the new value.
+        # Broadcast so _r() returns the new value everywhere
         _cm.RAD_PCT = RAD_PCT
         _cm._broadcast_palette()
 
-        # Lazily create the debounce timer once
         if not hasattr(self, '_radius_debounce'):
             t = QTimer(self)
             t.setSingleShot(True)
@@ -1480,7 +1238,7 @@ class ControlBar(QFrame):
 
         win = self.window()
         if win is not None and win.isVisible():
-            # Live user interaction — show overlay on first touch, then debounce
+            # Live drag: overlay once, then debounce the rebuild
             if not getattr(self, '_radius_overlay', None):
                 ov = _SpinningOverlay(win)
                 ov.show(); ov.raise_()
@@ -1488,7 +1246,7 @@ class ControlBar(QFrame):
                 self._radius_overlay = ov
             self._radius_debounce.start()
         else:
-            # Config restore / pre-show — apply immediately, no overlay
+            # Config restore, before the window is up — apply straight away
             self._radius_debounce.stop()
             self._radius_apply()
 
@@ -1499,9 +1257,8 @@ class ControlBar(QFrame):
         app = QApplication.instance()
         if app:
             app.setStyleSheet(SS)
-        # Rebuild seek slider QSS (has inline border-radius, not covered by global SS)
+        # The seek slider's radius is inline, so the global sheet misses it
         self._seek.update_radius()
-        # Inline play/ctrl button stylesheets — refresh with new radii
         _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
                f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
                f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
@@ -1509,14 +1266,7 @@ class ControlBar(QFrame):
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self.btn_shuf, self.btn_prev, self.btn_next):
             b.setStyleSheet(_ts)
-        self.btn_play.setStyleSheet(
-            f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
-            f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
-            f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
-            f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH}; background:{BG4}; }}'
-            f'QPushButton#play:pressed {{ background:{BG4}; }}')
-        # Accent swatch border-radius
+        self.btn_play.update()   # colors (BG3/ACC/ACCH/BG4) are read live in paintEvent
         pop = self._settings_popup
         if pop is not None:
             pop._accent_btn.setStyleSheet(
@@ -1525,55 +1275,35 @@ class ControlBar(QFrame):
                 f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
                 f'  padding:0;'
                 f'}}')
-        # TagEditDialog is transient — no refresh needed here
-        # All ToggleSwitch widgets repaint automatically from globals on next update()
-        # Recompute bar cap geometry — cap radius depends on RAD_PCT
+        # Bar cap geometry depends on RAD_PCT too
         self._precompute_bars()
-        # Corner-frame overlays are radius-dependent — clear so they rebuild with new RAD_PCT.
-        # Cover pixmaps themselves are untouched (radius-independent).
-        _corner_frame_cache.clear()
         self.update()
-        # Trigger full widget refresh so inline-styled widgets (search, sort buttons,
-        # sidebar lib_btn, comboboxes, etc.) pick up new border-radius values.
+        # Reaches the remaining inline-styled widgets (search box, sort buttons,
+        # sidebar, combo boxes).
         self.accent_changed.emit(ACC)
-        # Dismiss overlay (present only during live user interaction)
         ov = getattr(self, '_radius_overlay', None)
         if ov is not None:
             ov.close_overlay()
             self._radius_overlay = None
 
     def _on_accent_change(self, color: str):
-        # apply_accent() is the single source of truth for whether ACC should
-        # actually change (it no-ops the visible ACC while SYS mode is on,
-        # only remembering the user's pick in _USER_ACC for later). We must
-        # NOT set ACC/ACCH/SS ourselves before calling it — doing so used to
-        # bypass that guard entirely, which made picking any color (or even
-        # just restoring a saved accent_color from config while SYS mode was
-        # on) immediately stomp the system-derived accent, and then every
-        # subsequent theme refresh (which recomputes ACC via apply_theme())
-        # would race against config-restore recalling this method, producing
-        # the "colors keep flipping / following the picker" symptom.
+        # apply_accent() decides whether ACC really changes — under SYS mode it
+        # only records the pick. Setting ACC/ACCH/SS here would bypass that.
         apply_accent(color)
         if is_system_qt_theme_active():
-            # ACC didn't actually change (apply_accent() no-op'd it) — skip
-            # the cache clears, disk unlinks, and widget restyling below
-            # entirely. Without this, restoring a saved accent_color from
-            # config while SYS mode is on would still touch disk (unlinking
-            # default_cover_*.jpg, clearing several in-memory caches) for no
-            # visible effect every single startup.
+            # ACC did not change, so the cache clears, file deletions and
+            # restyling below would all be wasted work on every startup.
             return
         self._on_brightness_change(self._brightness_v)
         _cover_cache.clear()
-        _corner_frame_cache.clear()
         _default_cover_mem_cache.clear()
         _acc_lut_cache.clear()   # accent hue changed — rebuild LUT on next paint
-        # Invalidate cover-accent recolour cache (accent hue changed)
         self._cover_lbl._acc_pm = None
-        # Remove stale default cover disk cache (will regenerate with new color)
-        for f in CONFIG_PATH.parent.glob('default_cover_*.jpg'):
+        # Drop the placeholder-cover files; they are keyed by the old accent
+        for f in CONFIG_PATH.parent.glob('default_cover_*'):
             try: f.unlink()
             except Exception: pass
-        # Refresh inline-styled widgets (transport buttons use palette globals directly)
+        # Transport buttons read the palette globals inline
         _ts = (f'QPushButton#ctrl {{ background:transparent; border:none; color:{FG2};'
                f' font-size:20px; border-radius:{_r(22)}px; padding:0; text-align:center; }}'
                f'QPushButton#ctrl:hover {{ color:{FG}; background:{BG3}; }}'
@@ -1581,14 +1311,7 @@ class ControlBar(QFrame):
                f'QPushButton#ctrl:pressed {{ background:{BG4}; }}')
         for b in (self.btn_shuf, self.btn_prev, self.btn_next):
             b.setStyleSheet(_ts)
-        self.btn_play.setStyleSheet(
-            f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
-            f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
-            f' font-size:22px; padding:0 0 2px 5px; text-align:center; }}'
-            f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
-            f' background:{BG4}; }}'
-            f'QPushButton#play:pressed {{ background:{BG4}; }}')
+        self.btn_play.update()   # colors (BG3/ACC/ACCH/BG4) are read live in paintEvent
         self.accent_changed.emit(color)
     def _on_cover_toggle(self, on: bool, _emit: bool = True):
         self._cover_lbl.setVisible(on)
@@ -1596,30 +1319,35 @@ class ControlBar(QFrame):
             pm = get_cover_pixmap(self._cur_track.filepath, 64)
             self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64),
                                       self._cur_track.filepath)
-        # Propagate to main window via signal — suppressed when the overlay path
-        # will handle the library/playlist update to avoid double-updating.
+        # Skipped when the overlay path will already update the pages
         if _emit:
             self.cover_on_changed.emit(on)
 
     def _on_cover_acc_toggle(self, on: bool):
-        """Cover-accent switch toggled — set global flag and repaint all views."""
+        """Cover-accent switch toggled — set the flag and repaint all views."""
         import cover_art as _cover_art_mod
-        global _COVER_ACC_ON
         self._cover_acc_on = on
-        _COVER_ACC_ON = on
-        _cover_art_mod._COVER_ACC_ON = on   # update source module — get_cover_pixmap reads this
-        _acc_lut_cache.clear()   # force LUT rebuild with current accent
+        _cover_art_mod._COVER_ACC_ON = on   # get_cover_pixmap reads it from there
+        _acc_lut_cache.clear()   # rebuild the LUT for the current accent
         _cover_art_mod._acc_lut_cache.clear()
-        # Repaint cover label and emit so MainWindow can repaint library/gallery
         self._cover_lbl.set_cover_accent_mode(on)
         self.accent_changed.emit(ACC)   # triggers MainWindow gallery/list repaint
 
     def _on_seek_flush(self):
         """Mark viz as awaiting first post-seek frame."""
         self._player._viz_spec[:] = MIN_DB
+        self._player._viz_reset_queue()
         self._player._viz_bar_buf[:] = 0.0
-        # Force 150ms discard window in GLib thread too
+        # Drop spectrum frames for 150 ms so pre-seek audio never shows up
         self._player._viz_discard_until = _monotonic() + 0.15
+        # Also drop the delay-compensation ring buffer, or a nonzero Delay
+        # setting replays pre-seek frames for the next delay_ms. The display
+        # buffer itself must be cleared too — an empty ring buffer makes
+        # _render_tick fall back to "keep the previous frame" until a fresh
+        # one ages past delay_ms, which would still be this stale one.
+        self._viz_rbuf_head  = 0
+        self._viz_rbuf_count = 0
+        self._viz_display_buf[:] = 0.0
         self.update()
 
     def set_focus_paused(self, paused: bool):
@@ -1629,33 +1357,27 @@ class ControlBar(QFrame):
         if self._overlay_viz_enabled:
             self._player.set_overlay_needs_spectrum(True)
         if self._viz_paused:
-            self._render_timer.stop()
+            self._stop_render_timer()
             self._player._viz_spec[:] = MIN_DB
+            self._player._viz_reset_queue()
             self.update()
         elif (self._viz_on or self._overlay_viz_enabled) and self._player.playing:
             self._start_render_timer()
 
     def _render_tick(self):
-        # Main viz is suppressed when the overlay is open but overlay viz is off:
-        # ControlBar is completely hidden behind the overlay so updating it is wasted.
+        # Nothing to draw when the overlay covers the bar and its own viz is off
         needs_render = (self._viz_on and not self._overlay_open) or self._overlay_viz_enabled
         if not needs_render or self._viz_paused:
-            self._render_timer.stop()
-            _gc.enable()
+            self._stop_render_timer()
             return
-        # Only call _compute_viz_frame when new spectrum data has arrived.
-        # This avoids redundant numpy work on every tick when GStreamer hasn't
-        # delivered a new spectrum message yet (common during burst gaps).
-        if self._player._viz_has_new:
-            self._player._compute_viz_frame()
+        # Runs every tick: gating on message arrival would tie the frame rate to
+        # the codec's block size. _compute_viz_frame paces the queue itself.
+        self._player._compute_viz_frame()
         if not self._player._viz_has_any:
-            # No spectrum ever received for this track yet.
-            # Stop if: not playing, OR nothing needs rendering (viz off, overlay viz off).
-            # The needs_render guard here catches any stray timer starts when viz is
-            # disabled — belt-and-suspenders on top of the _on_playing_changed guard.
+            # No spectrum has arrived for this track yet — stop if playback ended
+            # or nothing needs rendering any more.
             if not self._player.playing or not needs_render:
-                self._render_timer.stop()
-                _gc.enable()
+                self._stop_render_timer()
                 if self._viz_on:
                     self.update()
             return
@@ -1666,50 +1388,88 @@ class ControlBar(QFrame):
         self._render_last_wt = _now
 
         # ── Delay: ring-buffer the viz frames, expose the one delay_ms in the past ─
-        # Same offset as _on_pos_for_lyrics so viz and lyrics stay in sync.
         delay_ms = self._delay_ms
         src      = self._player._viz_bar_buf
         if delay_ms > 0:
             N    = self._viz_rbuf_n
             head = self._viz_rbuf_head
-            # Write current frame into the ring buffer (in-place, no allocation).
             self._viz_rbuf[head]   = src
             self._viz_rbuf_ts[head] = _now
             self._viz_rbuf_head    = (head + 1) % N
             self._viz_rbuf_count   = min(self._viz_rbuf_count + 1, N)
-            # Scan valid slots for the most-recent frame that is >= delay_ms old.
-            # Scanning up to 70 slots at 60 fps is negligible vs the rest of render.
+            # Newest frame that is already at least delay_ms old. Masking then
+            # argmax keeps the timestamps in numpy instead of boxing each one.
             target_t = _now - delay_ms * 0.001
             count    = self._viz_rbuf_count
-            best_idx = -1
-            best_t   = -1.0
-            for i in range(count):
-                slot_t = self._viz_rbuf_ts[i]
-                if slot_t <= target_t and slot_t > best_t:
-                    best_t   = slot_t
-                    best_idx = i
-            if best_idx >= 0:
+            ts       = self._viz_rbuf_ts[:count]
+            eligible = ts <= target_t
+            if eligible.any():
+                best_idx = int(_np.argmax(_np.where(eligible, ts, -1.0)))
                 _np.copyto(self._viz_display_buf, self._viz_rbuf[best_idx])
-            # else: buffer not filled enough yet — keep previous display frame
+            # Otherwise the buffer is still filling — keep the previous frame
         else:
-            # No delay — reset ring buffer and mirror live frame directly.
             self._viz_rbuf_head  = 0
             self._viz_rbuf_count = 0
             _np.copyto(self._viz_display_buf, src)
 
+        if self._overlay_viz_enabled:
+            # Delay-adjusted frame, so the OLED overlay's bars line up with the
+            # docked bar's instead of racing ahead by delay_ms.
+            cb = self._player._viz_overlay_cb
+            if cb is not None:
+                cb(self._viz_display_buf)
+
         if self._viz_on:
-            self.update()
+            # update() invalidates the whole bar, repainting every child widget on
+            # top of the viz, which dominates a frame's cost. Comparing the integer
+            # bar heights the painter uses skips identical frames and absorbs
+            # sub-pixel drift, so quiet passages stop repainting altogether.
+            ih  = round(self.height() * self.devicePixelRatio())
+            cur = self._viz_px_cur
+            _np.multiply(self._viz_display_buf, ih, out=cur, casting='unsafe')
+            if ih != self._viz_last_ih or not _np.array_equal(cur, self._viz_px_last):
+                self._viz_last_ih = ih
+                _np.copyto(self._viz_px_last, cur)
+                self.update()
 
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        # Scale vertical margins so content never clips when bar is short
+        # Shrink the margins so content does not clip in a short bar
         h = self.height()
         v_margin = max(4, min(14, (h - 110) * 14 // 62))  # 0→4px at 110, 14px at 172+
         self._root_layout.setContentsMargins(18, v_margin, 18, v_margin)
         self._root_layout.setSpacing(max(2, min(10, (h - 110) * 10 // 62)))
-        # Recompute bar/cap geometry — debounced so resize drags don't thrash numpy
+        # The transport and icon buttons are already near their minimum, so at the
+        # window's 480px floor they alone can overflow the row. Cover art, the
+        # track-name column and the play button have headroom, so they shrink.
+        w = self.width()
+        cov_sz, title_max, play_sz = next(
+            (c, t, p) for wmin, c, t, p in self._NOWPLAYING_BREAKPOINTS if w >= wmin)
+        if cov_sz != self._cover_lbl._sz:
+            self._cover_lbl.set_size(cov_sz)
+            self._txt_w.setFixedHeight(cov_sz)
+        if title_max != self._lbl_title.maximumWidth():
+            self._lbl_title.setMaximumWidth(title_max)
+            self._lbl_artist.setMaximumWidth(title_max)
+            self._apply_now_playing_text()
+        self.btn_play.set_size(play_sz)
+        # The cached frame belongs to the old geometry — force a repaint
+        self._viz_px_last[:] = -1
+        # Debounced so a resize drag does not rebuild the tables per pixel
         self._resize_timer.start()
+
+    def _apply_now_playing_text(self):
+        """(Re-)elide title/artist against their current maximumWidth.
+        Called on track change and whenever resizeEvent's responsive
+        breakpoint changes that width, so text elides with '…' instead of
+        being abruptly clipped mid-character at narrow window widths."""
+        fm_t = QFontMetrics(self._lbl_title.font())
+        fm_a = QFontMetrics(self._lbl_artist.font())
+        self._lbl_title.setText(fm_t.elidedText(
+            self._now_title_raw, Qt.TextElideMode.ElideRight, self._lbl_title.maximumWidth()))
+        self._lbl_artist.setText(fm_a.elidedText(
+            self._now_artist_raw, Qt.TextElideMode.ElideRight, self._lbl_artist.maximumWidth()))
 
     def paintEvent(self, _):
         dpr = self.devicePixelRatio()
@@ -1722,9 +1482,8 @@ class ControlBar(QFrame):
         p.scale(1.0 / dpr, 1.0 / dpr)
 
         # ── Border pen / background brush cache — always valid, even in fallback ─
-        # Initialised here (before the viz branch) so the stopped/paused fallback
-        # path always has a valid QPen and QBrush even if the viz active path has
-        # never executed (e.g. first paint while stopped at startup).
+        # Built before the viz branch so the paused fallback below always has
+        # them, even on the very first paint.
         if self._paint_bord_key != BORD:
             self._paint_bord_key = BORD
             self._paint_bord_pen = QPen(QColor(BORD), 1)
@@ -1747,8 +1506,7 @@ class ControlBar(QFrame):
                                     | _bgc.green() << 8 | _bgc.blue())
                     self._px_bar = (0xFF << 24 | bc.red() << 16
                                     | bc.green() << 8 | bc.blue())
-                    # Also keep QBrush for border line
-                    # invalidate pixel buffer so it is reallocated with new colors
+                    # Reallocate the pixel buffer with the new colours
                     self._px_shape = (0, 0)
                 if self._viz_type == 'fill':
                     # ── FILL MODE ─────────────────────────────────────────────
@@ -1768,19 +1526,14 @@ class ControlBar(QFrame):
                         self._px_row_idx = _np.arange(ih, dtype=_np.int32)[:, _np.newaxis]
 
                     buf = self._px_buf
-                    buf[:] = self._px_bg
 
-                    # Use precomputed linear-interp tables (same as line mode) — zero allocation.
-                    cy_buf = self._line_cy_buf
-                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
-                    line_y_f = (cy_buf[self._line_bin_i]
-                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
-                                                      - cy_buf[self._line_bin_i]))
-                    line_y_i = line_y_f.astype(_np.int32)
-                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)
+                    # Same precomputed interpolation tables as line mode
+                    line_y_i = self._interp_line_y(bar_px_arr, ih)
 
-                    fill_mask = self._px_row_idx >= line_y_i
-                    buf[fill_mask] = self._px_bar
+                    # Background and bars composed in one sweep — this also
+                    # writes every pixel, so no separate buf[:] = bg memset.
+                    self._blend_rows(buf, line_y_i, ih, iw,
+                                     self._px_bg, self._px_bar)
 
                     p.drawImage(0, 0, self._px_qimg)
                     p.setPen(self._paint_bord_pen)
@@ -1790,11 +1543,9 @@ class ControlBar(QFrame):
 
                 if self._viz_type == 'line':
                     # ── LINE MODE — pixel-buffer + Bresenham span fill ─────────
-                    # No AA QPainter overhead; gaps on steep slopes are filled by
-                    # drawing a vertical span between each pair of consecutive y
-                    # values (classic connected-line rasterisation).
-                    # np.interp replaced by a cached-index manual lerp — zero
-                    # extra allocation for the interpolation tables.
+                    # Written straight into the pixel buffer, no antialiased
+                    # QPainter work. Steep slopes get a vertical span so the line
+                    # stays connected.
                     bar_px_arr = self._paint_bar_px
                     _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
 
@@ -1803,16 +1554,7 @@ class ControlBar(QFrame):
                         return
 
                     # ── Interpolation: VIZ_BANDS → iw y-positions ─────────────
-                    # Manual lerp with pre-cached bin_i / bin_f / bin_i1 arrays.
-                    # cy_buf reused in-place (no allocation).
-                    cy_buf = self._line_cy_buf
-                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
-                    # line_y_f = cy[bin_i] + frac * (cy[bin_i+1] - cy[bin_i])
-                    line_y_f = (cy_buf[self._line_bin_i]
-                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
-                                                      - cy_buf[self._line_bin_i]))
-                    line_y_i = line_y_f.astype(_np.int32)
-                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)   # in-place, no alloc
+                    line_y_i = self._interp_line_y(bar_px_arr, ih)
 
                     # ── Pixel buffer — reallocate only on resize / color change ─
                     if self._px_shape != (ih, iw):
@@ -1831,10 +1573,8 @@ class ControlBar(QFrame):
                     buf[line_y_i, col_i] = px_bar
 
                     # ── Gap fill: steep columns get a vertical span ────────────
-                    # For every adjacent pair where |Δy| > 1, fill all rows
-                    # between the two y values so the line is visually connected.
-                    # In a smooth audio viz only a handful of columns are steep,
-                    # so this Python loop runs very few iterations per frame.
+                    # Fill between adjacent y values wherever |Δy| > 1. Only a
+                    # handful of columns are ever that steep.
                     dy    = _np.diff(line_y_i)                    # (iw-1,) int32
                     steep = _np.flatnonzero(_np.abs(dy) > 1)
                     for idx in steep:
@@ -1858,16 +1598,8 @@ class ControlBar(QFrame):
                         p.end()
                         return
 
-                    # Interpolate VIZ_BANDS → iw y-positions (same as line mode)
-                    cy_buf = self._line_cy_buf
-                    _np.subtract(ih, bar_px_arr, out=cy_buf, casting='unsafe')
-                    line_y_f = (cy_buf[self._line_bin_i]
-                                + self._line_bin_f * (cy_buf[self._line_bin_i1]
-                                                      - cy_buf[self._line_bin_i]))
-                    line_y_i = line_y_f.astype(_np.int32)
-                    _np.clip(line_y_i, 0, ih - 1, out=line_y_i)
+                    line_y_i = self._interp_line_y(bar_px_arr, ih)
 
-                    # Pixel buffer — reallocate only on resize / color change
                     if self._px_shape != (ih, iw):
                         self._px_buf   = _np.full((ih, iw), self._px_bg, dtype=_np.uint32)
                         self._px_qimg  = QImage(self._px_buf.data, iw, ih,
@@ -1876,10 +1608,8 @@ class ControlBar(QFrame):
                         self._px_row_idx = _np.arange(ih, dtype=_np.int32)[:, _np.newaxis]
 
                     buf = self._px_buf
-                    buf[:] = self._px_bg
 
-                    # Fill colour — semi-transparent version of bar color (40% alpha blend onto BG).
-                    # Recompute only when bar color or BG changes (same key as px_bar/px_bg cache).
+                    # Bar colour blended onto BG, recomputed only when either changes
                     if getattr(self, '_px_fill_key', None) != (self._px_bg, self._px_bar_key):
                         _bc = self._bar_color
                         _bgc_r = (self._px_bg >> 16) & 0xFF
@@ -1894,8 +1624,8 @@ class ControlBar(QFrame):
                     px_fill = self._px_fill
 
                     # ── Fill: all rows at or below the line y ──────────────────
-                    fill_mask = self._px_row_idx >= line_y_i
-                    buf[fill_mask] = px_fill
+                    # Also writes the background, so no separate memset above.
+                    self._blend_rows(buf, line_y_i, ih, iw, self._px_bg, px_fill)
 
                     # ── Line: one pixel per column on top of fill ──────────────
                     col_i  = self._line_col_x_i
@@ -1935,36 +1665,41 @@ class ControlBar(QFrame):
                 bw         = self._bar_bw
                 bar_px_arr = self._paint_bar_px
                 _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
-                buf[:] = px_bg
 
                 cap_r    = self._cap_r_offsets   # (n_cap_pix,) int32
                 cap_c    = self._cap_c_offsets   # (n_cap_pix,) int32
                 radius   = self._cap_radius
                 use_caps = radius > 0 and len(cap_r) > 0 and bw > 4
 
-                # ── Body fill — fully vectorised 2-D broadcast ────────────────
-                # Step 1: per-column bar height via O(1) gather (precomputed maps).
+                # ── Body fill ─────────────────────────────────────────────────
+                # Step 1: per-column bar height, gathered through the column map
                 col_has  = self._col_has_bar
                 cb_safe  = self._col_bar_safe
-                # Guard: precomputed column maps may be stale if _precompute_bars()
-                # hasn't fired yet after a resize (debounced). Skip this frame to
-                # avoid a shape mismatch crash between buf (iw) and col_has (iw_old).
+                # The column map can still be the old width if the debounced
+                # _precompute_bars() has not run yet — skip rather than mismatch.
                 if len(col_has) != iw:
                     p.end()
                     return
-                col_h    = _np.where(col_has, bar_px_arr[cb_safe], 0)
-                # Step 2: body starts below cap top when caps are active.
-                body_offset  = radius if use_caps else 0
-                col_y0_body  = ih - _np.maximum(col_h - body_offset, 0)
-                # Step 3: single 2-D boolean mask — one numpy write for all bars.
-                fill_mask = col_has & (self._px_row_idx >= col_y0_body)
-                buf[fill_mask] = px_bar
+                # Written through preallocated buffers: the np.where/arithmetic
+                # chain this replaces built six (iw,) temporaries every frame.
+                col_h = self._col_h_buf
+                _np.take(bar_px_arr, cb_safe, out=col_h)
+                # Step 2: with caps on, the body starts below the cap. Empty
+                # columns get a top row of ih+1, which no row can reach, folding
+                # the "is there a bar" test into the same comparison.
+                body_offset = radius if use_caps else 0
+                _np.subtract(col_h, body_offset, out=col_h)
+                _np.maximum(col_h, 0, out=col_h)
+                col_y0_body = self._col_y0_buf
+                _np.subtract(ih, col_h, out=col_y0_body)
+                _np.copyto(col_y0_body, ih + 1, where=self._col_no_bar)
+                # Step 3: compose background and bars in one arithmetic sweep
+                self._blend_rows(buf, col_y0_body, ih, iw, px_bg, px_bar)
 
-                # ── Cap fill — fully vectorised, zero Python loops ─────────────
-                # For each eligible bar: y0s[i] is its top row, x0s[i] its left col.
-                # cap_r / cap_c are precomputed (row, col) offsets within the cap.
-                # Outer-product broadcast gives (n_elig × n_cap_pix) index grids;
-                # a single in-bounds boolean mask collapses it to a flat assignment.
+                # ── Cap fill ───────────────────────────────────────────────────
+                # y0s/x0s are each eligible bar's top-left; cap_r/cap_c the offsets
+                # within a cap. Broadcasting them gives the full index grid, and one
+                # in-bounds mask flattens it to a single write.
                 if use_caps:
                     elig = bar_px_arr >= radius          # (VIZ_BANDS,) bool
                     if elig.any():
@@ -1983,9 +1718,8 @@ class ControlBar(QFrame):
                 p.end()
                 return
 
-        # Viz off / paused — fill with background color across the full physical rect
-        # iw/ih are physical pixels (width * dpr); painter is pre-scaled by 1/dpr so
-        # QRectF(0, 0, iw, ih) maps to the correct physical extent on high-DPI screens.
+        # Viz off or paused. iw/ih are physical pixels and the painter is scaled by
+        # 1/dpr, so this rect covers the whole widget on a high-DPI screen.
         p.fillRect(QRectF(0, 0, iw, ih), self._paint_bg_brush)
         p.setPen(self._paint_bord_pen)
         p.drawLine(0, 0, iw, 0)
@@ -1996,22 +1730,19 @@ class ControlBar(QFrame):
             _focus_paused = getattr(self, '_focus_paused', False)
             self._viz_paused = _focus_paused
             self._player.set_viz_active(self._viz_on and not _focus_paused)
-            # Only start the render timer when there is actually something to render.
-            # Previously started unconditionally, which caused the 60 fps timer to
-            # spin on every track change when viz was disabled — _viz_has_any is reset
-            # to False in _destroy(), so _render_tick's early-exit path never stopped
-            # it and the timer kept firing until the first spectrum message arrived.
+            # Only start the timer when something needs rendering: _render_tick's
+            # early exit cannot stop one that should never have started.
             if (self._viz_on or self._overlay_viz_enabled) and not _focus_paused:
                 self._start_render_timer()
         else:
             self._viz_paused = True
-            # Silence the spectrum element immediately — before _destroy() hands the
-            # dying pipeline to GLib.idle_add(set_state, NULL).  Without this,
-            # the old pipeline's FFT can still be running at 30 fps during the
-            # async NULL transition, wasting CPU while the new pipeline prerolls.
+            # Silence the spectrum element before _destroy() hands the dying
+            # pipeline off for teardown, otherwise its FFT keeps running at
+            # 30 fps while the new pipeline prerolls.
             self._player.set_viz_active(False)
-            self._render_timer.stop()
+            self._stop_render_timer()
             self._player._viz_spec[:] = MIN_DB
+            self._player._viz_reset_queue()
             self._player._viz_bar_buf[:] = 0.0
             self.update()
             _bref = getattr(self, '_blackout_ref', None)
@@ -2024,7 +1755,7 @@ class ControlBar(QFrame):
             self._on_seek_flush()  # timestamp + clear spec
             seek_ms = int(self._seek.value() * self._dur_ms / 1000)
             self._player.seek(seek_ms)
-            # Anchor is updated inside seek() immediately — emit UI update now
+            # seek() has already moved the anchor, so the UI can update now
             self._on_pos(self._player.position_ms())
         self._seeking = False
 
@@ -2034,8 +1765,7 @@ class ControlBar(QFrame):
     def _on_pos(self, ms):
         if self._seeking or self._seek.isSliderDown() or self._dur_ms == 0: return
         new_val = int(ms * 1000 / self._dur_ms)
-        # Only update slider and label when value actually changes — avoids
-        # triggering a QSlider repaint and QString allocation on every tick
+        # Only touch the widgets on a real change, to avoid a repaint per tick
         if new_val != getattr(self, '_last_seek_val', -1):
             self._last_seek_val = new_val
             self._seek.setValue(new_val)
@@ -2043,6 +1773,15 @@ class ControlBar(QFrame):
         if new_txt != getattr(self, '_last_time_txt', ''):
             self._last_time_txt = new_txt
             self._lbl_cur.setText(new_txt)
+        # The AUDIO INFO rate label is a snapshot from load time. Under adaptive
+        # rate another app can retune the shared graph, quietly invalidating it and
+        # leaving a stale "bit-perfect" claim. Re-check every ~3 s while the popup
+        # is open; the underlying lookups are cached for 5 s, so it is cheap.
+        if self._settings_popup is not None and self._settings_popup.isVisible():
+            now = _monotonic()
+            if now - getattr(self, '_last_audio_info_refresh_wt', 0.0) >= 3.0:
+                self._last_audio_info_refresh_wt = now
+                self._refresh_audio_info()
 
     def _on_dur(self, ms): self._dur_ms = ms; self._lbl_tot.setText(self._fmt(ms))
 
@@ -2054,8 +1793,7 @@ class ControlBar(QFrame):
         """
         sz = self._cover_lbl._sz
         if self._cover_lbl._cover_acc_mode:
-            # Invalidate cached accent pixmap so _build_accent_pixmap rebuilds
-            # with the correct dark/light LUT on next paint.
+            # Drop the cached accent pixmap so it rebuilds with the new LUT
             self._cover_lbl._acc_pm = None
             self._cover_lbl._acc_pm_key = None
         if self._cover_lbl.isVisible() and self._cur_track is not None:
@@ -2065,162 +1803,35 @@ class ControlBar(QFrame):
             self._cover_lbl.setPixmap(draw_default_cover(sz))
 
     def set_track(self, t: Track):
-        self._lbl_title.setText(t.title or Path(t.filepath).name)
-        self._lbl_artist.setText(t.artist)
+        self._now_title_raw  = t.title or Path(t.filepath).name
+        self._now_artist_raw = t.artist
+        self._apply_now_playing_text()
         self._seek.setValue(0); self._lbl_cur.setText('0:00')
         self._dur_ms = int(t.duration*1000); self._lbl_tot.setText(t.dur_str())
         self._player._viz_spec[:] = MIN_DB
-        # Update cover thumbnail — always show whatever is in cache (or default)
+        self._player._viz_reset_queue()
+        # Delay-compensation ring buffer holds frames from the old track — drop
+        # them so a nonzero Delay setting does not replay the last track's viz
+        # into the first delay_ms of the new one. _viz_display_buf itself must
+        # go too: with the ring buffer empty, _render_tick finds nothing
+        # eligible until a fresh frame ages past delay_ms and, until then,
+        # falls back to "keep the previous frame" — which would still be this
+        # stale one.
+        self._viz_rbuf_head  = 0
+        self._viz_rbuf_count = 0
+        self._viz_display_buf[:] = 0.0
         if self._cover_lbl.isVisible():
             pm = get_cover_pixmap(t.filepath, 64)
             self._cover_lbl.setPixmap(pm if pm is not None else draw_default_cover(64), t.filepath)
         self._cur_track = t
-        # Keep AUDIO INFO labels current while the settings popup is open
         if self._settings_popup is not None and self._settings_popup.isVisible():
             self._refresh_audio_info()
 
     def set_play_icon(self, playing: bool):
-        self.btn_play.setText('⏸' if playing else '▶')
-        _pad = '0 0 2px 5px' if not playing else '0'
-        # Rebuild from scratch so palette globals (BG3/ACC/ACCH) are always current.
-        # Use _r(26) so the radius follows the global RAD_PCT setting instead of
-        # hardcoding 26 px (which would revert the radius every time play/pause fires).
-        self.btn_play.setStyleSheet(
-            f'QPushButton#play {{ background:{BG3}; color:{ACC};'
-            f' border:2px solid {ACC}; border-radius:{_r(26)}px;'
-            f' min-width:52px; max-width:52px; min-height:52px; max-height:52px;'
-            f' font-size:22px; padding:{_pad}; text-align:center; }}'
-            f'QPushButton#play:hover {{ border-color:{ACCH}; color:{ACCH};'
-            f' background:{BG4}; }}'
-            f'QPushButton#play:pressed {{ background:{BG4}; }}')
+        self.btn_play.set_playing_icon(playing)
 
     def set_play_busy(self, busy: bool):
         """Show/hide spinner on play button during pipeline reload."""
         self.btn_play.set_busy(busy)
 
     _fmt = staticmethod(_fmt_ms)   # alias for backward compatibility
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Titlebar constants
-# ══════════════════════════════════════════════════════════════════════════════
-_TB_BG      = '#000000'   # pure black background
-_TB_FG      = '#666666'   # title text
-_TB_ICO     = '#686868'   # window-control icons (visibly grey)
-_TB_ICO_HOV = '#aaaaaa'   # brighter on hover
-_TB_CLOSE_H = '#cc3333'   # close-button hover
-_TB_H       = 32          # titlebar height in px
-
-class TitleBarButton(QPushButton):
-    """Minimal frameless window-control button."""
-    def __init__(self, symbol: str, hover_color: str = _TB_ICO_HOV, parent=None):
-        super().__init__(symbol, parent)
-        self._hover_col = hover_color
-        self.setFixedSize(46, _TB_H)
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        self._refresh_style(_TB_ICO)
-
-    def _refresh_style(self, fg: str):
-        bg_hover  = BG3   # use palette global so light theme picks it up
-        bg_press  = BG4
-        self.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                border: none;
-                color: {fg};
-                font-size: 14px;
-                border-radius: 0;
-                padding: 0;
-            }}
-            QPushButton:hover  {{ background: {bg_hover}; color: {self._hover_col}; }}
-            QPushButton:pressed {{ background: {bg_press}; }}
-        """)
-
-class TitleBarCloseButton(TitleBarButton):
-    def __init__(self, parent=None):
-        super().__init__('✕', _TB_CLOSE_H, parent)
-
-class BlackTitleBar(QWidget):
-    """
-    Frameless custom title bar — adapts to dark/light theme via BG global.
-    """
-
-    def __init__(self, window: QWidget, parent=None):
-        super().__init__(parent)
-        self._win = window
-        self.setFixedHeight(_TB_H)
-        self.setAutoFillBackground(False)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._apply_bg()
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 0, 0, 0)
-        lay.setSpacing(0)
-
-        # App icon (music note)
-        self._ico_lbl = QLabel('♫')
-        self._ico_lbl.setStyleSheet(
-            f'color: {_TB_ICO}; font-size: 13px; background: transparent; padding-right: 6px;')
-        lay.addWidget(self._ico_lbl)
-
-        # Window title
-        self._title_lbl = QLabel('VoidPulse')
-        self._title_lbl.setStyleSheet(
-            f'color: {_TB_FG}; font-size: 12px; font-weight: normal; background: transparent;')
-        lay.addWidget(self._title_lbl)
-
-        lay.addStretch(1)
-
-        # Window-control buttons
-        self._btn_min   = TitleBarButton('―')
-        self._btn_max   = TitleBarButton('□')
-        self._btn_close = TitleBarCloseButton()
-
-        for btn in (self._btn_min, self._btn_max, self._btn_close):
-            lay.addWidget(btn)
-
-        self._btn_min.clicked.connect(self._win.showMinimized)
-        self._btn_max.clicked.connect(self._toggle_max)
-        self._btn_close.clicked.connect(self._win.close)
-
-    def set_title(self, text: str):
-        self._title_lbl.setText(text)
-
-    def _apply_bg(self):
-        """Apply current BG global to titlebar background."""
-        self.setStyleSheet(f'background: {BG}; border: none;')
-
-    def refresh_theme(self):
-        """Called by MainWindow after a theme switch to repaint titlebar."""
-        self._apply_bg()
-        self._title_lbl.setStyleSheet(
-            f'color: {FG2}; font-size: 12px; font-weight: normal; background: transparent;')
-        for btn in (self._btn_min, self._btn_max, self._btn_close):
-            btn._refresh_style(_TB_ICO)
-        self.repaint()
-
-    def _toggle_max(self):
-        if self._win.isMaximized():
-            self._win.showNormal()
-            self._btn_max.setText('□')   # maximize icon
-        else:
-            self._win.showMaximized()
-            self._btn_max.setText('❐')  # restore-down icon
-
-    def mousePressEvent(self, e: QMouseEvent):
-        if e.button() == Qt.MouseButton.LeftButton:
-            # Do not start a system-move drag when the press lands on a child
-            # widget (minimize / maximize / close buttons).  childAt() returns
-            # None when the click is on the bare titlebar background.
-            if self.childAt(e.position().toPoint()) is None:
-                handle = self._win.windowHandle()
-                if handle:
-                    handle.startSystemMove()
-        super().mousePressEvent(e)
-
-    def mouseDoubleClickEvent(self, e: QMouseEvent):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._toggle_max()
-        super().mouseDoubleClickEvent(e)
-
-# ══════════════════════════════════════════════════════════════════════════════
-

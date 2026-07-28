@@ -5,7 +5,7 @@ cover/theme reload, tag editing orchestration, "Open With" support.
 """
 from constants import *
 
-from constants import ACC, ACCH, BG2, BG3, BG4, BORD, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r
+from constants import ACC, ACCH, BG3, BG4, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r
 import constants as _const_mod
 from constants import is_system_qt_theme_active, resync_system_qt_theme, is_applying_own_palette, start_qt6ct_live_reload
 from metadata_online import embed_cover_bytes
@@ -14,15 +14,19 @@ from cover_art import (
     _ensure_async_cover_loader, _trim_cover_cache,
     _square_pixmap, _COVER_MASTER_SIZE, _cover_disk_key,
     _COVER_JPEG_QUALITY, _cover_disk_write_mtime, _COVER_DISK_DIR,
-    _cover_cache, _async_cover_loader, _cover_locked_set,
+    _cover_cache, _cover_locked_set,
 )
 from player import Player, RepeatMode
+from resampler import (invalidate_pipewire_rate_cache, invalidate_pipewire_sink_rate_cache,
+                        invalidate_pipewire_allowed_rates_cache)
 from mpris import MprisServer
-from views import TrackTable, PlaylistPage, Sidebar, COLS, C_TIT
-from controlbar import ControlBar, BlackTitleBar, _TB_H
+from views import TrackTable, PlaylistPage, COLS, C_TIT
+from sidebar import Sidebar
+from controlbar import ControlBar
+from titlebar import BlackTitleBar, _TB_H
 from lyrics import LyricsPanel
 from dialogs_edit import TagEditDialog
-from library import ConfigPlaylistLoader, ScanThread, _recover_rename_temps, _sanitize_filename_part
+from library import ConfigPlaylistLoader, ScanThread, _recover_rename_temps
 from blackout_overlay import BlackoutOverlay
 # SettingsPopup is instantiated lazily inside ControlBar._ensure_settings_popup
 from widgets_base import _ModalOverlay, DeviceBusyPopup, _SpinningOverlay
@@ -33,6 +37,11 @@ class MainWindow(QMainWindow):
         self._open_with_path = open_with   # file passed via "Open With" / CLI arg
         self._use_system_decorations = False  # overridden by _load_config if set
         self._use_system_qt_theme = False     # overridden by _load_config if set
+        # An unfocused window normally throttles position polling and pauses viz
+        # and lyrics highlighting to save CPU. Setting this keeps them running in
+        # the background instead — the settings popup's "BCK. OP." switch, stored
+        # inverted (switch on = optimizations on = this flag False).
+        self._disable_background_optimizations = False  # overridden by _load_config if set
         # Remove native decoration; draw our own black titlebar (default)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -58,15 +67,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._load_config()
-        # NOTE: do NOT clear _splash_ref here — ConfigPlaylistLoader.all_done
-        # fires asynchronously; _close_splash reads _splash_ref at that point.
-        # _close_splash calls deleteLater() so the object is GC'd safely.
+        # _splash_ref stays set here: ConfigPlaylistLoader.all_done fires later and
+        # _close_splash reads it at that point, then drops the reference itself.
         self._mpris = MprisServer(self._player, self)
         self._mpris.set_cover_on(self._ctrlbar.cover_on())
         self._player.sig_seek.connect(self._mpris.notify_seeked)
-        # Install app-level event filter to detect mouse/key activity for idle timer.
-        # Filtering at application level catches events on all child widgets
-        # without installing per-widget filters or enabling mouse-tracking everywhere.
+        # One application-level filter feeds the idle timer with activity from every
+        # child widget, instead of per-widget filters and mouse tracking everywhere.
         QApplication.instance().installEventFilter(self)
 
     def _build_ui(self):
@@ -90,14 +97,14 @@ class MainWindow(QMainWindow):
         rl.addWidget(self._tabs, 1)
         body.addWidget(right)
 
-        # ctrlbar created just before root.addWidget; use late binding
+        # ctrlbar does not exist yet; wired up below
         self._lyrics_panel = LyricsPanel(self._player, ctrlbar=None)
         self._lyrics_panel.setVisible(False)
         body.addWidget(self._lyrics_panel)
 
         body.setStretchFactor(0, 0); body.setStretchFactor(1, 1); body.setStretchFactor(2, 0)
         body.setSizes([230, 1050, 0])
-        # Debounce splitter moves so config is saved after the user stops dragging
+        # Debounced so config is written after the drag, not during it
         self._splitter_save_timer = QTimer(self)
         self._splitter_save_timer.setSingleShot(True)
         self._splitter_save_timer.setInterval(400)
@@ -115,8 +122,7 @@ class MainWindow(QMainWindow):
         self._ctrlbar = ControlBar(self._player)
         self._lyrics_panel._ctrlbar = self._ctrlbar
 
-        # Vertical splitter: body on top, ctrlbar on bottom.
-        # handleWidth(16) + stylesheet border:1px → thin visual line, fat 16px touch target.
+        # A 16px handle with a 1px border: thin line, comfortable touch target
         self._vsplit = QSplitter(Qt.Orientation.Vertical)
         self._vsplit.setHandleWidth(16)
         self._vsplit.setChildrenCollapsible(False)
@@ -128,13 +134,11 @@ class MainWindow(QMainWindow):
         self._vsplit.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
         root.addWidget(self._vsplit, 1)
         self._status = self.statusBar()
-        # Tab bar hidden; update count when tab changes programmatically
         self._tabs.currentChanged.connect(self._on_tab_change)
 
-        # Device-busy popup — child of central so it floats above all content
+        # Child of central so it floats above the content
         self._device_busy_popup = DeviceBusyPopup(central)
 
-    # Keep custom titlebar in sync with window title changes
     def setWindowTitle(self, title: str):
         super().setWindowTitle(title)
         if hasattr(self, '_titlebar'):
@@ -152,12 +156,10 @@ class MainWindow(QMainWindow):
         was_maximized = self.isMaximized()
 
         if use_system:
-            # Let the OS draw its own titlebar / decorations
             self.setWindowFlags(Qt.WindowType.Window)
             self._titlebar.setFixedHeight(0)
             self._titlebar.hide()
         else:
-            # Our custom frameless titlebar
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
                 Qt.WindowType.Window
@@ -165,7 +167,7 @@ class MainWindow(QMainWindow):
             self._titlebar.setFixedHeight(_TB_H)
             self._titlebar.show()
 
-        # setWindowFlags() hides the window; restore its previous state
+        # setWindowFlags() hid the window — put it back as it was
         if was_visible:
             if was_maximized:
                 self.showMaximized()
@@ -202,11 +204,8 @@ class MainWindow(QMainWindow):
         if not is_system_qt_theme_active():
             return
         if is_applying_own_palette():
-            # This paletteChanged came from our own app.setPalette() call
-            # inside _apply_app_palette() (Qt fires the signal for ANY
-            # setPalette(), not just external ones) — not a real desktop
-            # theme change. Ignoring it here is what breaks the feedback
-            # loop that otherwise made colors flicker/chase continuously.
+            # Qt emits paletteChanged for VoidPulse's own setPalette() too. Acting
+            # on that would loop, with colours chasing themselves.
             return
         if new_palette is not None:
             self._pending_system_palette = QPalette(new_palette)
@@ -247,9 +246,7 @@ class MainWindow(QMainWindow):
         timer.start(600)
 
     def _do_qt6ct_file_resync(self):
-        # apply_theme() already prefers a freshly-parsed qt6ct color-scheme
-        # file over the QPalette snapshot (see constants.apply_theme) —
-        # nothing else needs to change here.
+        # apply_theme() already prefers the freshly-parsed scheme file
         from constants import apply_theme, _DARK_MODE
         apply_theme(_DARK_MODE)
         self._refresh_theme_no_overlay()
@@ -277,19 +274,16 @@ class MainWindow(QMainWindow):
         self._device_busy_popup.switch_to_pipewire.connect(self._on_switch_to_pipewire)
         self._device_busy_popup.retry.connect(self._on_alsa_retry)
 
-        # _on_output_device_changed is a proper MainWindow method connected via
-        # _ensure_settings_popup (ControlBar) when the popup is first created.
-        # The old guard `if _settings_popup is not None` was always False at init.
+        # _on_output_device_changed is connected from ControlBar when the settings
+        # popup is first built — the popup does not exist yet here.
         self._ctrlbar.btn_play.clicked.connect(self._play_pause)
         self._ctrlbar.btn_prev.clicked.connect(self._prev_track)
         self._ctrlbar.btn_next.clicked.connect(self._next_track)
         self._ctrlbar.btn_shuf.toggled.connect(self._on_shuffle_toggled)
         self._ctrlbar.btn_rep.mode_changed.connect(self._on_repeat_changed)
         self._ctrlbar.btn_blackout.clicked.connect(self._blackout.show_blackout)
-        # Feed track info + position updates to the overlay — only when visible.
-        # The overlay is hidden the vast majority of the time; skipping the
-        # set_pos() call entirely avoids a Python function dispatch + attribute
-        # lookup on every 250 ms position tick while the user is in normal use.
+        # The overlay is hidden nearly all the time, so skip the call outright
+        # rather than pay a dispatch per position tick.
         self._player.sig_pos.connect(
             lambda ms: self._blackout.set_pos(ms, self._ctrlbar._dur_ms)
             if self._blackout.isVisible() else None)
@@ -300,24 +294,22 @@ class MainWindow(QMainWindow):
         self._lyrics_panel.status_msg.connect(
             lambda m: self._status.showMessage(m, 0) if m else self._status.clearMessage())
         self._lyrics_panel.seek_requested.connect(self._player.seek)
-        # Immediately refresh seekbar + time label on lyric-click seek so the
-        # position is visible even while paused (sig_pos stops ticking when paused).
+        # sig_pos stops while paused, so refresh the seekbar directly on a
+        # lyric-click seek.
         self._lyrics_panel.seek_requested.connect(self._ctrlbar._on_pos)
         self._lyrics_panel.lyrics_context.connect(self._blackout.set_lyrics_context)
         self._ctrlbar.set_blackout_ref(self._blackout)
 
-        # View mode + scale — connect settings popup signals after popup is ensured
         pop = self._ctrlbar._ensure_settings_popup()
         pop.view_mode_changed.connect(self._on_view_mode_changed)
         pop.list_scale_changed.connect(self._on_list_scale_changed)
         pop.gallery_scale_changed.connect(self._on_gallery_scale_changed)
-        # Auto-save config whenever any setting changes (debounced via QTimer)
+        # Any setting change schedules a debounced config save
         self._settings_save_timer = QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.setInterval(500)
         self._settings_save_timer.timeout.connect(self._save_config)
         self._ctrlbar.settings_changed.connect(self._settings_save_timer.start)
-        # Update ctrlbar cover thumbnail when async loader delivers a cover
         _ensure_async_cover_loader().cover_loaded.connect(self._on_cover_loaded_mw)
 
     def _on_cover_toggle(self, on: bool):
@@ -329,14 +321,12 @@ class MainWindow(QMainWindow):
 
     def _on_cover_toggle_with_overlay(self, on: bool, _overlay=None):
         """Cover toggle with async processing and optional overlay."""
-        # Start the cover processing
         self._lib_page.set_covers_on(on)
         
         playlists_to_process = list(self._playlists)
         
         def _process_playlists(idx: int):
             if idx >= len(playlists_to_process):
-                # All done — update MPRIS and close overlay
                 if hasattr(self, '_mpris'):
                     self._mpris.set_cover_on(on)
                 if _overlay is not None:
@@ -346,10 +336,9 @@ class MainWindow(QMainWindow):
             pl = playlists_to_process[idx]
             pl.set_covers_on(on)
             
-            # Continue to next playlist after a brief delay to let UI update
+            # One playlist per event-loop slot, so the UI keeps repainting
             QTimer.singleShot(16, lambda: _process_playlists(idx + 1))
         
-        # Start processing playlists after a short delay
         QTimer.singleShot(16, lambda: _process_playlists(0))
 
     def _on_cover_loaded_mw(self, fp: str, size: int):
@@ -362,8 +351,7 @@ class MainWindow(QMainWindow):
             return
 
         if size == 220:
-            # 220px master just landed — if cover-accent is on, invalidate the
-            # cached accent pixmap so next paint rebuilds from the real cover.
+            # Master arrived: drop the accent pixmap so it rebuilds from the cover
             if ctrlbar._cover_acc_on:
                 ctrlbar._cover_lbl._acc_pm = None
                 ctrlbar._cover_lbl.update()
@@ -373,7 +361,6 @@ class MainWindow(QMainWindow):
             pm = _cover_cache.get((fp, 64))
             if pm:
                 ctrlbar._cover_lbl.setPixmap(pm, fp)
-            # 64px derived after master — master already cached; rebuild accent.
             if ctrlbar._cover_acc_on:
                 ctrlbar._cover_lbl._acc_pm = None
                 ctrlbar._cover_lbl.update()
@@ -402,7 +389,7 @@ class MainWindow(QMainWindow):
         if not tags: return
         for page in [self._lib_page] + self._playlists:
             if page is None: continue
-            # O(1) lookup via TrackTable reverse index instead of O(n) enumerate scan
+            # TrackTable keeps a filepath→row index
             i = page.table._fp_to_row.get(fp, -1)
             if i < 0 or i >= len(page.tracks):
                 continue
@@ -423,7 +410,7 @@ class MainWindow(QMainWindow):
         The overlay must already be created and shown before calling this method;
         this method closes it when done.
         """
-        # Step 1: critical fast widgets — synchronous, immediately visible
+        # Step 1: the widgets the user sees first, done synchronously
         for lbl in (self._ctrlbar._lbl_title, self._ctrlbar._lbl_artist):
             lbl.setStyleSheet('background:transparent;')
         if self._cur_page is not None:
@@ -448,6 +435,8 @@ class MainWindow(QMainWindow):
         self._ctrlbar.refresh_theme()
         if hasattr(self, '_titlebar'):
             self._titlebar.refresh_theme()
+        if hasattr(self, '_device_busy_popup'):
+            self._device_busy_popup.refresh_theme()
         QApplication.processEvents()
 
         # Step 2: lyrics + popups — deferred
@@ -495,18 +484,17 @@ class MainWindow(QMainWindow):
         self._refresh_all_theme_widgets(_overlay=None)
 
     def _on_pos_for_lyrics(self, ms: int):
-        # Lyrics use raw playback position — viz audio-delay compensation must not
-        # be applied here (that offset only corrects spectrum-display latency).
-        # Skip when the panel is hidden: no visible output, no need to run bisect
-        # + QPropertyAnimation setup on every 250 ms tick.
-        # Also skip when the window is unfocused: _highlight triggers
-        # lyrics_context.emit → BlackoutOverlay.set_lyrics_context → update(),
-        # which is wasted work when neither the panel nor the overlay is visible.
+        # Shifted by the same Delay setting as the visualizer, so the highlighted
+        # line changes in step with the (deliberately delayed) viz rather than
+        # racing ahead of it. Skipped entirely when the panel is hidden, or when
+        # unfocused with the overlay closed, since nothing would be visible.
         if not self._lyrics_panel.isVisible():
             return
-        if not getattr(self, '_was_active', True) and not self._blackout.isVisible():
+        if (not getattr(self, '_was_active', True) and not self._blackout.isVisible()
+                and not getattr(self, '_disable_background_optimizations', False)):
             return
-        self._lyrics_panel.on_position(ms)
+        delay_ms = getattr(self._ctrlbar, '_delay_ms', 0)
+        self._lyrics_panel.on_position(max(0, ms - delay_ms))
 
     def _open_lyrics_panel_from_config(self):
         """Restore lyrics panel open state from config."""
@@ -542,7 +530,7 @@ class MainWindow(QMainWindow):
                     fps = {t.filepath for t in _pl.tracks}
                     if _tr.filepath not in fps:
                         tracks = list(_pl.tracks)
-                        # Insert at sorted position instead of full re-sort
+                        # Insert in place rather than re-sorting the playlist
                         sk = _tr.sort_key()
                         idx = bisect.bisect_left([t.sort_key() for t in tracks], sk)
                         tracks.insert(idx, _tr)
@@ -559,37 +547,36 @@ class MainWindow(QMainWindow):
             lambda: self._edit_tags(src_page, row))
         m.exec(pos)
 
-    def _invalidate_cover_cache(self, fp: str, pre_embed_mtime: float = None):  # noqa: pre_embed_mtime kept for API compat
-        """Remove all cached cover data for fp so the next paint reloads from disk.
+    def _invalidate_cover_cache(self, fp: str):
+        """Remove all cached cover data for fp so the next paint reloads it.
 
-        pre_embed_mtime is kept as a parameter for API compatibility but is no
-        longer used: the filename-based disk key does not encode mtime, so we
-        simply delete the disk files and update the sidecar .mtime files to force
-        a re-extract on next access.
+        The disk key carries no mtime, so the cached file is simply deleted along
+        with its sidecar and re-extracted on next access.
         """
-        # Clear ALL cached sizes for this fp (includes gallery's dynamic cover_sz)
+        # Every cached size, including the gallery's dynamic cover_sz
         for key in [k for k in _cover_cache if k[0] == fp]:
             _cover_cache.pop(key, None)
-        # Delete disk cover files for known fixed sizes; gallery sizes are evicted
-        # lazily (staleness detected via sidecar on next access).
-        stem = _sanitize_filename_part(Path(fp).stem)
-        if len(stem) > 120: stem = stem[:120]
-        if _COVER_DISK_DIR.exists():
-            for cover_file in list(_COVER_DISK_DIR.glob(f'{stem}_*.jpg')):
-                try:
-                    cover_file.unlink()
-                    sidecar = Path(str(cover_file) + '.mtime')
-                    if sidecar.exists():
-                        sidecar.unlink()
-                except Exception:
-                    pass
-        # Async loader's no-embed blacklist — remove so it retries on next paint
-        loader = _async_cover_loader
-        if loader is not None:
-            with loader._lock:
-                loader._no_embed.discard(fp)
-                for size in (28, 64):
-                    loader._in_flight.discard((fp, size))
+        # The exact disk key, never a stem glob: the key includes a path hash
+        # because filename stems are not unique across a library, and a stem glob
+        # would delete every same-named track's cover too.
+        cover_file = _COVER_DISK_DIR / f'{_cover_disk_key(fp)}.jpg'
+        if cover_file.exists():
+            try:
+                cover_file.unlink()
+                sidecar = Path(str(cover_file) + '.mtime')
+                if sidecar.exists():
+                    sidecar.unlink()
+            except Exception:
+                pass
+        # Drop fp from the loader's "has no embedded cover" set so it retries.
+        # Must go through _ensure_async_cover_loader(): the module-level
+        # _async_cover_loader name was still None when this module was imported,
+        # and that stale binding never sees the singleton created later.
+        loader = _ensure_async_cover_loader()
+        with loader._lock:
+            loader._no_embed.discard(fp)
+            for size in (28, 64):
+                loader._in_flight.discard((fp, size))
 
     def _edit_tags(self, page, row):
         track = page.tracks[row]
@@ -602,7 +589,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Cannot Edit Tags',
                 f'Cannot read file:\n{Path(track.filepath).name}\n\n{_oe}')
             return
-        # WebM/MKV container (EBML magic bytes 1A 45 DF A3) — mutagen cannot write tags
+        # EBML magic — mutagen cannot write tags into WebM/MKV
         if _magic == b'\x1a\x45\xdf\xa3':
             msg = QMessageBox(self)
             msg.setWindowTitle('Cannot Edit Tags')
@@ -616,11 +603,8 @@ class MainWindow(QMainWindow):
             msg.setTextFormat(Qt.TextFormat.RichText)
             msg.exec()
             return
-        # Fragmented/DASH MP4 — mutagen can read but save() often fails
-        if ext in ('.m4a', '.aac') and _magic[:8] in (
-                b'\x00\x00\x00\x18ftypdash', b'\x00\x00\x00\x18ftypiso'):
-            # Try anyway; error will be caught below with a clear message
-            pass
+        # Fragmented/DASH MP4 reads fine but often fails to save. It is attempted
+        # anyway; the af.save() handler below detects it and explains the fix.
 
         dlg = TagEditDialog(track, parent=self)
         dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
@@ -629,7 +613,6 @@ class MainWindow(QMainWindow):
             return
         new_title, new_artist, new_album = dlg.get_tags()
         cover_action, cover_bytes = dlg.get_cover_result()
-        # Write tags to file using mutagen
         try:
             af = _open_audio(track.filepath)
             if af is None:
@@ -641,14 +624,13 @@ class MainWindow(QMainWindow):
 
             if ext == '.mp3':
                 from mutagen.id3 import TIT2, TPE1, TALB
-                # Only write non-empty values; empty = leave tag unchanged
+                # An empty field leaves the existing tag alone
                 if new_title:  af.tags['TIT2'] = TIT2(encoding=3, text=new_title)
                 if new_artist: af.tags['TPE1'] = TPE1(encoding=3, text=new_artist)
                 if new_album:  af.tags['TALB'] = TALB(encoding=3, text=new_album)
 
             elif ext in ('.flac', '.ogg', '.opus'):
-                # Vorbis comments: normalise to lowercase keys
-                # First remove any uppercase duplicates so we don't double-write
+                # Keys are normalised to lowercase, so drop uppercase duplicates
                 for k_old in ('TITLE', 'ARTIST', 'ALBUM'):
                     try:
                         if k_old in af.tags: del af.tags[k_old]
@@ -679,17 +661,11 @@ class MainWindow(QMainWindow):
                 print(f'af.save() error [{ext}]: {_save_err}')
                 return
 
-            # Handle cover changes
             fp = track.filepath
             if cover_action == 'set' and cover_bytes:
-                try:
-                    _pre_embed_mtime = os.path.getmtime(fp)
-                except Exception:
-                    _pre_embed_mtime = None
                 embed_cover_bytes(fp, cover_bytes)
-                self._invalidate_cover_cache(fp, pre_embed_mtime=_pre_embed_mtime)
-                # Build pixmaps synchronously NOW — before any _fill_row / populate call.
-                # Write only the 220px master to disk; derive display sizes from it.
+                self._invalidate_cover_cache(fp)
+                # Built synchronously, before any repopulate below reads the cache
                 src_raw = QPixmap()
                 if src_raw.loadFromData(cover_bytes):
                     master_pm = _square_pixmap(src_raw, _COVER_MASTER_SIZE)
@@ -718,12 +694,11 @@ class MainWindow(QMainWindow):
                         af2.save()
                 except Exception:
                     pass
-                # Invalidate and pre-populate with default so _fill_row sees it immediately
+                # Pre-fill with the placeholder so the rows below pick it up
                 self._invalidate_cover_cache(fp)
                 for size in (28, 64):
                     _cover_cache[(fp, size)] = draw_default_cover(size)
 
-            # Re-read metadata to reflect changes in UI
             updated_track = read_metadata(fp)
 
             def _update_page(pg, idx):
@@ -734,24 +709,18 @@ class MainWindow(QMainWindow):
                     item = pg.table.item(idx, C_TIT)
                     if item:
                         item.setIcon(QIcon(pm28))
-                # Gallery: repopulate and force repaint so async cover_loaded
-                # is re-requested for the gallery's dynamic cover_sz key.
+                # Repopulate so the gallery re-requests its own cover size
                 pg.gallery.populate(pg.tracks, pg.playing_idx)
-                # Invalidate the fp→position cache so _on_cover_loaded re-maps
                 pg.gallery._fp_to_vis_positions = None
-                # Force a full canvas repaint — triggers get_cover_pixmap for
-                # the gallery's cover_sz, scheduling a new async load if needed.
                 pg.gallery._canvas.update()
 
             _update_page(page, row)
-            # Also update library page and any other playlist containing this track
             for pg in [self._lib_page] + self._playlists:
                 if pg is page:
                     continue
                 i = pg.table._fp_to_row.get(updated_track.filepath, -1)
                 if i >= 0 and i < len(pg.tracks) and pg.tracks[i].filepath == updated_track.filepath:
                     _update_page(pg, i)
-            # Update ctrlbar thumbnail only when the edited track is currently playing
             if (cover_action in ('set', 'remove')
                     and self._cur_track_mw is not None
                     and self._cur_track_mw.filepath == fp
@@ -763,7 +732,6 @@ class MainWindow(QMainWindow):
                 self._ctrlbar.set_track(updated_track)
                 self.setWindowTitle(f'{updated_track.title}  —  VoidPulse')
                 self._mpris.notify_track(updated_track)
-                # Reload lyrics panel so edits to embedded lyrics are reflected immediately
                 if self._lyrics_panel.isVisible():
                     self._lyrics_panel.set_track(updated_track)
 
@@ -779,30 +747,26 @@ class MainWindow(QMainWindow):
         if not ok or not name.strip():
             return
         name = name.strip()
-        # Find a writable folder — prefer first known non-m3u folder
+        # Prefer the first known folder that is not a playlist file
         save_dir = None
         for p in self._known_paths:
             if not p.endswith(('.m3u', '.m3u8')) and os.path.isdir(p):
                 save_dir = p; break
         if save_dir is None:
-            # No known folder: ask user
             save_dir = QFileDialog.getExistingDirectory(self, 'Select Playlist Folder')
             if not save_dir:
                 return
-        # Build safe filename
         safe = ''.join(c for c in name if c.isalnum() or c in ' _-').strip() or 'playlist'
         m3u_path = str(Path(save_dir) / f'{safe}.m3u8')
-        # Write empty M3U8
         try:
             with open(m3u_path, 'w', encoding='utf-8') as f:
                 f.write('#EXTM3U\n')
         except Exception as e:
             self._status.showMessage(f'Could not create M3U8: {e}', 4000); return
-        # Create empty PlaylistPage directly (no scan needed — file is empty)
+        # The file is empty, so there is nothing to scan
         page = PlaylistPage([], label=name)
         page.play_track.connect(self._play_from_page)
         page.ctx_requested.connect(self._show_ctx_menu)
-        # Apply current view settings to the new playlist page
         pop = self._ctrlbar._ensure_settings_popup()
         page.set_view_mode(pop.view_mode())
         page.set_list_scale(pop.list_scale())
@@ -813,9 +777,8 @@ class MainWindow(QMainWindow):
         ti = self._tabs.addTab(page, f' {name} ')
         self._sidebar.add_playlist(name)
         self._tabs.setCurrentIndex(ti)
-        # Remember the m3u8 path so "Refresh" can re-scan it
         self._known_paths.add(m3u_path)
-        # Store m3u path on page for later save
+        # _save_config writes the playlist back to this path
         page._m3u_path = m3u_path
         self._status.showMessage(f'"{name}" playlist created — {m3u_path}', 5000)
         self._save_config()
@@ -862,7 +825,7 @@ class MainWindow(QMainWindow):
         if not self._known_paths:
             self._status.showMessage('No folders added.', 3000); return
         self._status.showMessage('Refreshing library…')
-        # Clear memory cache — disk cache keys include mtime so they go stale automatically
+        # Only the memory cache: the disk entries carry mtime sidecars
         _cover_cache.clear()
         for path in list(self._known_paths):
             if not path.endswith(('.m3u', '.m3u8')):
@@ -892,13 +855,10 @@ class MainWindow(QMainWindow):
         page.ctx_requested.connect(self._show_ctx_menu)
         page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
         page.set_tracks(tracks)
-        # Restore saved column ratios to new page
         saved_ratios = getattr(self, '_last_col_widths', None) or TrackTable._DEFAULT_COL_RATIOS
         page.table.restore_col_widths(saved_ratios)
-        # Apply current cover preference
         pop = self._ctrlbar._ensure_settings_popup()
         page.set_covers_on(pop.cover_on())
-        # Apply current view mode + scale
         page.set_view_mode(pop.view_mode())
         page.set_list_scale(pop.list_scale())
         page.set_gallery_scale(pop.gallery_scale())
@@ -919,14 +879,12 @@ class MainWindow(QMainWindow):
                 all_tracks_for_recovery.extend(pl.tracks)
             recovered = _recover_rename_temps(all_tracks_for_recovery)
             if recovered:
-                # Update filepath on every Track object in every playlist so
-                # the restored name is reflected immediately in the UI and on
-                # the next _save_config() call.
+                # Point every Track at its restored name so the UI and the next
+                # config save both reflect it.
                 for pl in self._playlists:
                     for t in pl.tracks:
                         if t.filepath in recovered:
                             t.filepath = recovered[t.filepath]
-                # Persist the corrected paths right away.
                 QTimer.singleShot(0, self._save_config)
         # ── normal rebuild ───────────────────────────────────────────────────
         all_tracks = []
@@ -936,21 +894,18 @@ class MainWindow(QMainWindow):
             if t.filepath not in seen: seen.add(t.filepath); dedup.append(t)
         dedup.sort(key=lambda t: t.sort_key())
         fp_to_idx = {t.filepath: i for i, t in enumerate(dedup)}
-        # Resolve the playing row by the player's current filepath.
-        # Using _cur_idx (cursor/selection) was wrong: it is unrelated to
-        # which track is actually playing and goes stale after a rescan
-        # replaces all Track objects (e.g. after a batch rename).
+        # The playing row comes from the player's filepath, not _cur_idx: that is
+        # the selection, and it goes stale when a rescan replaces the Track objects.
         pidx = -1
         player_fp = getattr(getattr(self, '_player', None), '_last_filepath', '')
         if player_fp:
             pidx = fp_to_idx.get(player_fp, -1)
-        # Fall back to the existing lib-page playing_idx when nothing has
-        # been played yet in this session (player_fp is empty).
+        # Nothing played yet this session — fall back to the page's own index
         if pidx == -1 and 0 <= self._lib_page.playing_idx < len(self._lib_page.tracks):
             old_fp = self._lib_page.tracks[self._lib_page.playing_idx].filepath
             pidx = fp_to_idx.get(old_fp, -1)
         self._lib_page.set_tracks(dedup, pidx)
-        # Re-apply saved col widths after populate resets them
+        # populate() resets the column widths
         saved = getattr(self, '_last_col_widths', None)
         if saved:
             self._lib_page.table.restore_col_widths(saved)
@@ -959,37 +914,33 @@ class MainWindow(QMainWindow):
     def _remove_playlist(self, idx):
         if not (0 <= idx < len(self._playlists)): return
         page = self._playlists.pop(idx)
-        # Remove tab first (fast)
         for i in range(self._tabs.count()):
             if self._tabs.widget(i) is page:
                 self._tabs.removeTab(i)
                 break
         self._sidebar.remove_playlist(idx)
-        # Defer library rebuild so the UI unblocks immediately
+        # Deferred so the UI unblocks immediately
         QTimer.singleShot(0, lambda: (self._rebuild_library(), self._save_config()))
 
     def _rename_playlist(self, idx: int, new_label: str):
         if not (0 <= idx < len(self._playlists)): return
         page = self._playlists[idx]
         page.set_label(new_label)
-        # Update the tab title
         tab_idx = idx + 1   # tab 0 is the library page
         if 0 < tab_idx < self._tabs.count():
             self._tabs.setTabText(tab_idx, f' {new_label} ')
-        # Sidebar label is already updated by Sidebar._prompt_rename before emit
+        # Sidebar._prompt_rename already relabelled the row
         self._save_config()
 
     def _move_playlist(self, from_idx: int, to_idx: int):
         n = len(self._playlists)
         if not (0 <= from_idx < n and 0 <= to_idx < n): return
-        # Swap in the data list
         self._playlists[from_idx], self._playlists[to_idx] = (
             self._playlists[to_idx], self._playlists[from_idx])
-        # Swap tab widgets (tabs: 0=library, 1..n=playlists)
+        # Tab 0 is the library, playlists start at 1
         t_from = from_idx + 1
         t_to   = to_idx   + 1
-        # QTabWidget has no direct swap — remove the higher-index one first to
-        # avoid index shifting, then reinsert at the correct position.
+        # QTabWidget cannot swap, so remove the higher index first and reinsert
         hi = max(t_from, t_to); lo = min(t_from, t_to)
         hi_widget = self._tabs.widget(hi)
         hi_label  = self._tabs.tabText(hi)
@@ -999,7 +950,6 @@ class MainWindow(QMainWindow):
         self._tabs.removeTab(lo)
         self._tabs.insertTab(lo, hi_widget, hi_label)
         self._tabs.insertTab(hi, lo_widget, lo_label)
-        # Sidebar reorder
         self._sidebar.move_playlist_row(from_idx, to_idx)
         self._save_config()
 
@@ -1020,7 +970,7 @@ class MainWindow(QMainWindow):
         If the current output is ALSA, runs the hw:/plughw: probe on first use
         or after an error; subsequent plays use the confirmed device directly.
         """
-        # If the user has selected PipeWire, never touch _alsa_device.
+        # PipeWire selected — nothing to probe
         if not self._player._is_hw_device(self._player._alsa_device):
             self._start_playback()
             return
@@ -1045,7 +995,6 @@ class MainWindow(QMainWindow):
         self._player.load(t.filepath)
         self._ctrlbar.set_track(t); self._ctrlbar.set_play_icon(True)
         self._cur_track_mw = t
-        # Clear overlay lyrics immediately — new track starts fresh
         self._blackout.set_lyrics_context('', '', '')
         if self._lyrics_panel.isVisible():
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
@@ -1092,7 +1041,7 @@ class MainWindow(QMainWindow):
         """
         if not Player._is_hw_device(dev_id):
             return
-        # Derive hw:X,Y from the selected plughw:X,Y for the probe's first attempt.
+        # The probe tries bare hw: first, derived from the selected plughw:
         self._alsa_confirmed_device = dev_id.replace('plughw:', 'hw:', 1)
         self._alsa_selected_plughw  = dev_id
         if self._cur_track_mw is not None:
@@ -1111,6 +1060,132 @@ class MainWindow(QMainWindow):
             pop.set_output_device('pipewire')
             self._ctrlbar._refresh_audio_info()
         self._save_config()
+
+    _PW_ADAPTIVE_RATE_PATH = (Path.home() / '.config' / 'pipewire' / 'pipewire.conf.d'
+                               / '99-voidpulse-adaptive-rate.conf')
+    _PW_ADAPTIVE_RATE_CONTENT = (
+        "# Written by VoidPulse — safe to delete.\n"
+        "# Enables PipeWire's adaptive sample-rate feature so the whole graph\n"
+        "# can switch to match a connected device's native rate. This affects\n"
+        "# ALL applications sharing this PipeWire session, not just VoidPulse.\n"
+        "context.properties = {\n"
+        "    default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 ]\n"
+        "}\n"
+    )
+
+    def _sync_pipewire_adaptive_rate_file(self, on: bool) -> None:
+        """Write or remove the opt-in PipeWire adaptive-rate config drop-in.
+
+        Only ever called from an explicit user toggle (_on_adaptive_rate_toggled)
+        or, on startup, to re-sync the file with a *previously* saved opt-in
+        (see ControlBar.init_from_config) — never to silently turn the feature
+        on for a user who hasn't asked for it."""
+        path = self._PW_ADAPTIVE_RATE_PATH
+        try:
+            if on:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists() or path.read_text() != self._PW_ADAPTIVE_RATE_CONTENT:
+                    path.write_text(self._PW_ADAPTIVE_RATE_CONTENT)
+            else:
+                if path.exists():
+                    path.unlink()
+        except Exception as e:
+            print(f'[Config] PipeWire adaptive-rate drop-in write failed: {e}')
+
+    def _on_adaptive_rate_toggled(self, on: bool) -> None:
+        """User toggled 'ADAPTIVE RATE' in Settings — explicit action only."""
+        print(f'[AudioSwitch] PipeWire adaptive sample-rate -> {on}')
+        self._sync_pipewire_adaptive_rate_file(on)
+        self._player.set_pipewire_adaptive_rate(on)
+        invalidate_pipewire_rate_cache()
+        invalidate_pipewire_sink_rate_cache()
+        invalidate_pipewire_allowed_rates_cache()
+        verb = 'enabled' if on else 'disabled'
+        # A dialog rather than a status message: the drop-in just written only
+        # applies after PipeWire reloads, so this step is mandatory, and skipping it
+        # silently is what makes adaptive rate look like it did nothing.
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Adaptive Sample Rate')
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            f'<b>Adaptive sample-rate {verb}.</b><br><br>'
+            f'This only takes effect after PipeWire and WirePlumber reload '
+            f'their config — log out and back in, or restart them now:<br><br>'
+            f'<code>systemctl --user restart pipewire pipewire-pulse wireplumber</code>'
+            f'<br><br>Restarting drops audio for every app using PipeWire for a '
+            f'moment, not just VoidPulse. Until it happens, PipeWire keeps '
+            f'running at its previous allowed sample rate(s), and VoidPulse '
+            f'will keep resampling to match — this is expected, not a bug.')
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        restart_btn = msg.addButton('Restart PipeWire Now', QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        if msg.clickedButton() is restart_btn:
+            self._restart_pipewire()
+        self._save_config()
+
+    def _on_bg_opt_toggled(self, on: bool) -> None:
+        """User toggled 'BCK. OP.' in Settings.
+
+        Stored inverted, so the JSON key keeps naming the opt-out it always named.
+        Turning optimizations off resumes right away instead of waiting for the
+        next ActivationChange, which would only arrive once the window is
+        re-focused — by then there is nothing left to resume.
+        """
+        self._disable_background_optimizations = not on
+        if not on:
+            self._ctrlbar.set_focus_paused(False)
+            if self._player._pos_timer.isActive() and \
+                    self._player._pos_timer_burst == 0:
+                self._player._pos_timer.setInterval(250)
+        self._save_config()
+
+    def _restart_pipewire(self) -> None:
+        """Restart the user PipeWire/WirePlumber services so the adaptive-rate
+        config drop-in just written (or removed) actually takes effect,
+        without requiring a full logout.
+
+        systemctl blocks until the units report ready, and the restart itself
+        kills every client's connection (ours included) for a moment, so this
+        must run off the GUI thread — a blocking subprocess.run() here would
+        freeze the whole window for the restart's duration.
+        """
+        self._status.showMessage('⏳  Restarting PipeWire/WirePlumber …', 0)
+
+        def _run():
+            try:
+                r = subprocess.run(
+                    host_cmd('systemctl', '--user', 'restart',
+                             'pipewire', 'pipewire-pulse', 'wireplumber'),
+                    capture_output=True, text=True, timeout=20)
+                ok  = r.returncode == 0
+                err = (r.stderr or r.stdout or '').strip()
+            except Exception as e:
+                ok, err = False, str(e)
+            QTimer.singleShot(0, lambda: self._on_pipewire_restart_done(ok, err))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_pipewire_restart_done(self, ok: bool, err: str) -> None:
+        invalidate_pipewire_rate_cache()
+        invalidate_pipewire_sink_rate_cache()
+        invalidate_pipewire_allowed_rates_cache()
+        if not ok:
+            print(f'[AudioSwitch] PipeWire restart failed: {err}')
+            self._status.showMessage(f'⚠  PipeWire restart failed: {err[:120]}', 8000)
+            return
+        print('[AudioSwitch] PipeWire/WirePlumber restarted')
+        self._status.showMessage('✓  PipeWire/WirePlumber restarted', 5000)
+        # The restart tore down our own connection too, so reload rather than
+        # leave a dead pipeline behind.
+        if (self._player._out == 'pipewiresink' and not self._player._is_hw_device(self._player._alsa_device)
+                and self._player._last_filepath):
+            pos_ms = int(self._player.position_ms())
+            was_playing = self._player._playing
+            fp = self._player._last_filepath
+            self._player._destroy()
+            QTimer.singleShot(400, lambda: self._player._load_and_seek(
+                fp, pos_ms, paused=not was_playing))
 
     def _on_alsa_retry(self) -> None:
         """Called when the user clicks 'Retry' in DeviceBusyPopup."""
@@ -1146,7 +1221,7 @@ class MainWindow(QMainWindow):
         self._alsa_probe_error = ''
         self._alsa_probe_active = True   # tells _on_player_error we're inside a probe
 
-        # Consume saved position/state once; reused across all retries.
+        # Read once and reused by every retry below
         _probe_pos_ms = getattr(self._player, '_last_switch_pos_ms', None)
         _probe_was_playing = getattr(self._player, '_last_switch_was_playing', True)
         if _probe_pos_ms is None:
@@ -1182,9 +1257,8 @@ class MainWindow(QMainWindow):
                 combo_dev = FALLBACK if Player._is_hw_device(device) else device
                 pop.set_output_device(combo_dev)
                 self._ctrlbar._refresh_audio_info()
-            # Pipeline is PLAYING from position 0.  Mute, seek to original position,
-            # then unmute — ALSA device stays open (needs audio flowing) but user
-            # hears nothing from position 0.  After seek settles, restore play state.
+            # The pipeline is playing from 0. Mute, seek, unmute: an ALSA hw device
+            # needs audio flowing to stay open, but none of it should be heard.
             if _probe_pos_ms > 200 and self._player.has_pipe:
                 self._player._pipe.set_property('volume', 0.0)
                 self._player.seek(_probe_pos_ms)
@@ -1211,9 +1285,9 @@ class MainWindow(QMainWindow):
             self._status.showMessage('⚠  ALSA device unavailable — try Retry or switch to PipeWire', 6000)
             self._device_busy_popup.show_error(err)
 
-        # (device, delay_ms_before_attempt)
-        # hw: first (bit-perfect); plughw: as immediate fallback if hw: busy;
-        # then back off so PipeWire has time to release the hw: node.
+        # (device, delay before the attempt). hw: first for bit-perfect output,
+        # plughw: immediately after, then the same pair again with a back-off so
+        # PipeWire has time to release the hw: node.
         _schedule = [
             (PRIMARY,  0),
             (FALLBACK, 0),
@@ -1238,11 +1312,9 @@ class MainWindow(QMainWindow):
                 self._status.showMessage(
                     f'⏳  ALSA {idx + 1}/{len(_schedule)}: trying {device} …', 0)
                 if self._cur_track_mw is not None:
-                    # Load PLAYING — ALSA hw: closes the device when no audio flows,
-                    # so paused=True would cause the pipeline to drop to NULL/READY
-                    # and _confirm's play_pause() would hit the dead-pipe reload path.
-                    # Anchor to the original position first so the seekbar doesn't
-                    # snap to 0 during the probe window.
+                    # Loaded playing: an ALSA hw device closes when no audio flows,
+                    # which would drop the pipeline to NULL and send _confirm down
+                    # the dead-pipe path. The anchor keeps the seekbar in place.
                     if _probe_pos_ms > 0:
                         self._player._anchor_now(float(_probe_pos_ms))
                     self._player.load(self._cur_track_mw.filepath)
@@ -1274,14 +1346,12 @@ class MainWindow(QMainWindow):
         if using_alsa:
             self._alsa_probe_error = err
             self._alsa_probe_needed = True
-            # If this error fired during normal playback (not inside an active probe
-            # window), the pipeline is now dead and nobody will restart it.
-            # Re-probe immediately so the user doesn't get stuck silently.
-            # If a probe IS already running, _check() handles the error — don't
-            # start a second probe (that would cancel the first via gen increment).
+            # Outside a probe window nothing else will restart the dead pipeline,
+            # so re-probe here. During one, _check() already handles the error and a
+            # second probe would cancel the first.
             probe_running = getattr(self, '_alsa_probe_active', False)
             if not probe_running and self._cur_track_mw is not None:
-                # Save position before pipeline was destroyed so resume is accurate.
+                # Keep the pre-teardown position so the resume is accurate
                 if getattr(self._player, '_last_switch_pos_ms', None) is None:
                     saved = int(self._player._pos_anchor_ms)
                     if saved > 0:
@@ -1297,7 +1367,6 @@ class MainWindow(QMainWindow):
         self._ctrlbar.set_play_busy(busy)
         self._mpris.set_pipeline_busy(busy)
         if not busy:
-            # Sync play icon to actual state once reload is done
             self._ctrlbar.set_play_icon(self._player.playing)
             self._mpris.notify_status()
 
@@ -1319,7 +1388,6 @@ class MainWindow(QMainWindow):
             self._player.play_pause()
             self._ctrlbar.set_play_icon(self._player.playing)
             self._mpris.notify_status()
-        # Play/pause is an intentional user action — reset idle timer
         self._ctrlbar._reset_idle_timer()
 
     def _prev_track(self):
@@ -1347,11 +1415,19 @@ class MainWindow(QMainWindow):
         if not forced and repeat == RepeatMode.ONE: self._alsa_play(); return
         if self._shuffle:
             if n > 1:
-                # Pick random index != current without allocating a list
-                skip = random.randrange(n - 1)
-                self._cur_idx = skip if skip < self._cur_idx else skip + 1
-            # n==1: only one track; replay it (choices would be empty)
-            # repeat=NONE in shuffle mode: still play (no hard stop)
+                cur = self._cur_idx
+                if 0 <= cur < n:
+                    # A random index other than the current one, without building
+                    # a list: draw from n-1 and step over cur.
+                    skip = random.randrange(n - 1)
+                    self._cur_idx = skip if skip < cur else skip + 1
+                else:
+                    # No current track (-1 before the first play, or an index left
+                    # past the end by a shrunken playlist). There is nothing to
+                    # exclude, so draw from all n — the skip-over above would
+                    # otherwise shift the range and strand one track permanently.
+                    self._cur_idx = random.randrange(n)
+            # A single track just repeats, and shuffle ignores repeat=NONE
         else:
             self._cur_idx += 1
             if self._cur_idx >= n:
@@ -1360,7 +1436,7 @@ class MainWindow(QMainWindow):
                     self._player.stop(); self._ctrlbar.set_play_icon(False)
                     self._mpris.notify_status(); return
         if forced:
-            # Manual next: preserve playing/paused state
+            # Manual skip keeps the current playing/paused state
             self._navigate_track(self._player.playing)
         else:
             self._alsa_play()
@@ -1372,42 +1448,69 @@ class MainWindow(QMainWindow):
         super().changeEvent(e)
         if e.type() == QEvent.Type.WindowStateChange:
             if hasattr(self, '_titlebar'):
-                # Sync restore/maximize icon with the actual post-change window state
                 self._titlebar._btn_max.setText(
                     '❐' if self.isMaximized() else '□'
                 )
+            # Minimizing is handled here as well as in ActivationChange: some
+            # window managers minimize without dropping activation, which used
+            # to leave the 60 fps render loop and the spectrum FFT running for
+            # a window nobody can see.
+            self._update_activity_state()
         if e.type() == QEvent.Type.ActivationChange:
-            # Don't pause viz just because EQ/Settings Tool window is focused
-            eq_vis  = self._ctrlbar._eq_popup is not None and self._ctrlbar._eq_popup.isVisible()
-            set_vis = self._ctrlbar._settings_popup is not None and self._ctrlbar._settings_popup.isVisible()
-            blackout_vis = self._blackout.isVisible()
-            app_active = self.isActiveWindow() or eq_vis or set_vis or blackout_vis
-            was_active = getattr(self, '_was_active', False)
-            if not app_active and not blackout_vis:
+            self._update_activity_state()
+
+    def _update_activity_state(self):
+        """Pause/resume the render loop, spectrum and pos timer for visibility.
+
+        Driven by both ActivationChange and WindowStateChange, so it has to be
+        idempotent — it recomputes the desired state from scratch rather than
+        toggling, and the expensive calls below are themselves no-ops when the
+        state already matches.
+        """
+        # WindowStateChange can arrive while the window is still being built,
+        # before the control bar, player and overlay exist.
+        if not hasattr(self, '_ctrlbar') or not hasattr(self, '_blackout') \
+                or not hasattr(self, '_player'):
+            return
+        # A focused EQ or settings popup still counts as active
+        eq_vis  = self._ctrlbar._eq_popup is not None and self._ctrlbar._eq_popup.isVisible()
+        set_vis = self._ctrlbar._settings_popup is not None and self._ctrlbar._settings_popup.isVisible()
+        blackout_vis = self._blackout.isVisible()
+        # The OLED overlay is its own window and draws its own viz, so it keeps
+        # the app active even when the main window is minimized behind it.
+        app_active = blackout_vis or (
+            not self.isMinimized()
+            and (self.isActiveWindow() or eq_vis or set_vis))
+        # The config-only opt-out keeps viz and polling running while
+        # unfocused. The idle timer stops regardless: it schedules the OLED
+        # overlay, which should not count down for an unwatched window.
+        bg_opt_disabled = getattr(self, '_disable_background_optimizations', False)
+        was_active = getattr(self, '_was_active', False)
+        if not app_active and not blackout_vis:
+            self._ctrlbar._idle_timer.stop()   # pause countdown while unfocused
+            # Minimized is worth pausing for even with the opt-out set: the
+            # opt-out is about an unfocused but visible window.
+            if not bg_opt_disabled or self.isMinimized():
                 self._ctrlbar.set_focus_paused(True)
-                self._ctrlbar._idle_timer.stop()   # pause countdown while unfocused
-                # Throttle position timer: unfocused playback only needs 1 s
-                # resolution for MPRIS / stall-detection — saves ~3 Python wakeups/s.
-                # Only throttle when not in a burst sequence (burst needs 100 ms).
+                # Unfocused, 1 s resolution is enough for MPRIS and stall
+                # detection. Never during a burst, which needs 100 ms.
                 if self._player._pos_timer.isActive() and \
                         self._player._pos_timer_burst == 0:
                     self._player._pos_timer.setInterval(1000)
-            elif app_active:
-                self._ctrlbar.set_focus_paused(False)
-                # Restore position timer to normal 250 ms rate on focus gain
-                if self._player._pos_timer.isActive() and \
-                        self._player._pos_timer_burst == 0:
-                    self._player._pos_timer.setInterval(250)
-                # Restart idle timer only on the rising edge (focus gain)
-                if not was_active:
-                    self._ctrlbar._idle_last_mouse = None   # reset mouse anchor on focus gain
-                    self._ctrlbar._reset_idle_timer()
-                # Trigger deferred lyrics fetch if panel is visible
-                if self._lyrics_panel.isVisible():
-                    self._lyrics_panel.on_focus_gained()
-            self._was_active = app_active
+        elif app_active:
+            self._ctrlbar.set_focus_paused(False)
+            if self._player._pos_timer.isActive() and \
+                    self._player._pos_timer_burst == 0:
+                self._player._pos_timer.setInterval(250)
+            # Only on the rising edge
+            if not was_active:
+                self._ctrlbar._idle_last_mouse = None   # reset mouse anchor on focus gain
+                self._ctrlbar._reset_idle_timer()
+            if self._lyrics_panel.isVisible():
+                self._lyrics_panel.on_focus_gained()
+        self._was_active = app_active
 
-    def eventFilter(self, obj, event):  # noqa: N802
+    def eventFilter(self, obj, event):
         """Application-level filter: reset OLED idle timer on meaningful user activity.
 
         Design constraints (CPU / tick budget):
@@ -1443,19 +1546,18 @@ class MainWindow(QMainWindow):
 
         if etype == QEvent.Type.MouseMove:
             ctrlbar = self._ctrlbar
-            # Fast-path: bail immediately when feature is off or overlay is showing
+            # Nothing to do when the feature is off or the overlay is up
             if not ctrlbar._overlay_auto_open:
                 return False
             bref = getattr(ctrlbar, '_blackout_ref', None)
             if bref is not None and bref.isVisible():
                 return False
-            # Only react when our window is active
             if not self.isActiveWindow():
                 return False
             pos = QCursor.pos()   # global screen coords — no widget mapping needed
             last = ctrlbar._idle_last_mouse
             if last is None:
-                # First move after focus gain: anchor but don't reset yet
+                # First move after focus gain — anchor only
                 ctrlbar._idle_last_mouse = pos
             else:
                 dx = pos.x() - last.x()
@@ -1486,8 +1588,8 @@ class MainWindow(QMainWindow):
 
     def _on_tab_change(self, idx):
         page = self._tabs.widget(idx)
-        # _cur_page tracks the SOURCE playlist for playback (set in _play_from_page).
-        # Switching tabs only changes the *view* — it must NOT redirect the queue.
+        # _cur_page is the playback source, set in _play_from_page. Switching tabs
+        # changes the view only and must not redirect the queue.
         if isinstance(page, PlaylistPage): self._update_count(page)
 
     def _update_count(self, page=None):
@@ -1525,6 +1627,7 @@ class MainWindow(QMainWindow):
                 'lastfm_api_key':                _const_mod._lastfm_api_key,
                 'use_system_window_decorations': getattr(self, '_use_system_decorations', False),
                 'use_system_qt_theme':           getattr(self, '_use_system_qt_theme', False),
+                'disable_background_optimizations': getattr(self, '_disable_background_optimizations', False),
             }
             cfg.update(self._ctrlbar.config_state())
             cfg['playlists'] = [{'label': pl.label, 'tracks': [t.filepath for t in pl.tracks]}
@@ -1659,12 +1762,12 @@ class MainWindow(QMainWindow):
 
             self._cover_locked_paths = set(data.get('cover_locked_paths', []))
             _cover_locked_set.update(self._cover_locked_paths)
-            global _cover_fetch_on
-            _cover_fetch_on = data.get('cover_fetch_on', True)
             _const_mod._lastfm_api_key = data.get('lastfm_api_key', '')
             # Must run before init_from_config() applies dark/light theme, so
             # apply_theme() picks system-derived colors when this is enabled.
             self._use_system_qt_theme = data.get('use_system_qt_theme', False)
+            self._disable_background_optimizations = data.get(
+                'disable_background_optimizations', False)
             if self._use_system_qt_theme:
                 apply_system_qt_theme(True)
             self._ctrlbar.init_from_config(data)
@@ -1793,7 +1896,7 @@ class MainWindow(QMainWindow):
                 self._cur_page = None
             self._playlists.remove(ow_pl)
         self._save_config()
-        self._player.stop()
+        self._player.shutdown()   # stop() + hand any reserved ALSA card back
         super().closeEvent(e)
 
 # ══════════════════════════════════════════════════════════════════════════════

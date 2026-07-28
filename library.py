@@ -3,8 +3,10 @@ VoidPulse — library management: filename sanitising, rename worker/popup,
 scan_folder(), parse_m3u(), ScanThread, ConfigPlaylistLoader.
 """
 from constants import *
-from cover_art import Track, _COVER_DISK_DIR, _cover_cache, read_metadata
-from constants import ACC, B2, BG, BG3, FG, FG2, SUPPORTED_EXT, _apply_scroller_properties
+from cover_art import (Track, _COVER_DISK_DIR, _cover_cache, _cover_disk_key,
+                       read_metadata)
+from constants import (ACC, B2, BG, BG3, FG, FG2, SUPPORTED_EXT,
+                       _apply_scroller_properties, _sanitize_filename_part)
 import re as _re
 import concurrent.futures as _cf
 
@@ -12,15 +14,7 @@ import concurrent.futures as _cf
 #  Library Rename Worker + Popup
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _sanitize_filename_part(text: str) -> str:
-    """Remove characters that are illegal in filenames on Linux/POSIX.
-
-    Only '/' and null bytes are truly illegal on Linux, but we also strip
-    leading/trailing dots and spaces to avoid edge cases with hidden files
-    and Windows-incompatible names.
-    """
-    text = text.replace('/', '_').replace('\x00', '')
-    return text.strip('. ')
+_PLACEHOLDER_RE = _re.compile(r'%[FATC]')
 
 
 def _build_new_filename(pattern: str, track) -> str:
@@ -31,24 +25,49 @@ def _build_new_filename(pattern: str, track) -> str:
         %A  artist
         %T  title
         %C  album (Collection)
-    All other characters (including punctuation, spaces, emoji, etc.) are kept as-is.
-    Metadata values are sanitized so embedded '/' chars cannot break Path.with_name().
-    When a tag is missing its placeholder is replaced with an empty string and any
-    surrounding separator characters (space, hyphen, underscore, dot) that would
-    have connected it to adjacent tokens are collapsed away so the result stays clean.
-    Returns empty string when the pattern is empty.
+    All other characters (including punctuation, spaces, emoji, etc.) are kept
+    as-is. Metadata values are sanitized so embedded '/' chars cannot break
+    Path.with_name().
+
+    A placeholder whose tag is missing expands to nothing, and the separator
+    text that would have joined it to its neighbours (spaces, hyphens,
+    underscores, dots) is dropped with it — so '%A - %T' on a track with no
+    artist yields 'Title', not ' - Title'. Separators between two tags that are
+    both present are preserved exactly as written.
+
+    Returns an empty string when the pattern is empty or every tag is missing.
     """
-    stem   = _sanitize_filename_part(Path(track.filepath).stem)
-    result = pattern
-    result = result.replace('%F', stem)
-    result = result.replace('%A', _sanitize_filename_part(track.artist or ''))
-    result = result.replace('%T', _sanitize_filename_part(track.title  or ''))
-    result = result.replace('%C', _sanitize_filename_part(track.album  or ''))
-    # Collapse sequences of separator-only characters left by empty placeholders,
-    # e.g. " - " adjacent to another " - " or at the start/end of the string.
-    result = _re.sub(r'[\s\-_\.]{2,}', lambda m: m.group(0)[0], result)
-    result = result.strip(' -_.')
-    return result
+    values = {
+        '%F': _sanitize_filename_part(Path(track.filepath).stem),
+        '%A': _sanitize_filename_part(track.artist or ''),
+        '%T': _sanitize_filename_part(track.title  or ''),
+        '%C': _sanitize_filename_part(track.album  or ''),
+    }
+
+    def _sep_only(s: str) -> bool:
+        return not s.strip(' -_.')
+
+    # Walk literal and placeholder pieces in turn, holding each literal back
+    # until it is known to sit between two resolved values.
+    out, pending, emitted = [], '', False
+    pos = 0
+    for m in _PLACEHOLDER_RE.finditer(pattern):
+        pending += pattern[pos:m.start()]
+        pos = m.end()
+        val = values[m.group()]
+        if not val:
+            if _sep_only(pending):
+                pending = ''      # dangling separator — drop it with the tag
+            continue
+        if emitted or not _sep_only(pending):
+            out.append(pending)
+        out.append(val)
+        pending, emitted = '', True
+    pending += pattern[pos:]
+    if pending and not _sep_only(pending):
+        out.append(pending)
+
+    return ''.join(out).strip(' -_.')
 
 
 def _validate_rename_pattern(pattern: str):
@@ -89,7 +108,6 @@ def _recover_rename_temps(tracks: list) -> dict:
         original_name = p.name[: -len(_RENAME_TMP_SUFFIX)]
         original_path = p.with_name(original_name)
         if original_path.exists():
-            # Cannot restore — original already exists; leave as-is.
             print(f'[VoidPulse] rename-tmp recovery: cannot restore {p.name} '
                   f'(target already exists)')
             continue
@@ -120,12 +138,9 @@ class LibraryRenameWorker(QObject):
     def run(self):
         total   = len(self._tracks)
         renamed = 0
-        # Filename size limit constants (hoisted out of loop)
         _MAX_FILENAME_BYTES = 255
         _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
-        # ponytail: reverse-index cover cache keys by filepath once, instead of
-        # scanning the whole _cover_cache dict for every renamed track (was
-        # O(tracks * cache_size); large libraries + batch rename made this slow).
+        # One pass over the cache keys, so each rename below is a dict lookup
         _fp_to_sizes: dict = {}
         for (fp_key, sz_key) in _cover_cache.keys():
             _fp_to_sizes.setdefault(fp_key, []).append(sz_key)
@@ -147,20 +162,18 @@ class LibraryRenameWorker(QObject):
                 max_stem_bytes = _MAX_FILENAME_BYTES - len(ext_bytes) - _DEDUP_RESERVE
                 stem_encoded = new_stem.encode('utf-8')
                 if len(stem_encoded) > max_stem_bytes:
-                    # Truncate on byte boundary then decode losslessly.
                     stem_encoded = stem_encoded[:max_stem_bytes]
-                    # Step back until we land on a valid UTF-8 boundary.
+                    # Back off to a UTF-8 character boundary
                     while stem_encoded and (stem_encoded[-1] & 0xC0) == 0x80:
                         stem_encoded = stem_encoded[:-1]
                     new_stem = stem_encoded.decode('utf-8', errors='ignore').rstrip()
 
                 new_path = old_path.with_name(new_stem + ext)
                 if old_path == new_path:
-                    # Nothing to do
                     self.track_done.emit(str(old_path), str(new_path), True)
                     renamed += 1
                     continue
-                # Avoid overwriting existing files — append _(n) suffix
+                # Never overwrite: append _(n) until the name is free
                 counter = 1
                 candidate = new_path
                 try:
@@ -174,38 +187,30 @@ class LibraryRenameWorker(QObject):
                         _exists = candidate.exists()
                     except OSError:
                         _exists = False
-                # Atomic rename via a temp name in the same directory.
-                # If the process is killed mid-operation the file survives under
-                # its original name or the temp name — never lost or truncated.
+                # Via a temp name in the same directory: if the process dies
+                # mid-way the file survives under one name or the other.
                 tmp_path = old_path.with_name(old_path.name + '.__vprename_tmp__')
                 old_path.rename(tmp_path)       # step 1: original → temp
                 tmp_path.rename(candidate)      # step 2: temp → final
                 renamed += 1
-                # ── Rename cover disk-cache files to match new audio filename ──
-                # Cover disk files are named <sanitized_stem>_<size>.jpg so
-                # renaming the audio file means we rename the cover file(s) too.
-                # This keeps the cache persistent across batch rename operations.
+                # Move the cached cover to the new name so it survives the
+                # rename. The disk key hashes the file's full path, so it has to
+                # be recomputed from the new path — deriving it from the old key
+                # would leave the file under a name nothing looks up again.
+                old_fp_str = str(old_path)
+                new_fp_str = str(candidate)
                 try:
-                    old_stem = _sanitize_filename_part(old_path.stem)
-                    if len(old_stem) > 120: old_stem = old_stem[:120]
-                    new_stem_san = _sanitize_filename_part(new_stem)
-                    if len(new_stem_san) > 120: new_stem_san = new_stem_san[:120]
-                    if old_stem != new_stem_san and _COVER_DISK_DIR.exists():
-                        for cover_file in _COVER_DISK_DIR.glob(f'{old_stem}_*.jpg'):
-                            # e.g. "old_stem_64.jpg" → "new_stem_64.jpg"
-                            suffix_part = cover_file.stem[len(old_stem):]  # "_64"
-                            new_cover = cover_file.with_name(f'{new_stem_san}{suffix_part}.jpg')
-                            mtime_file = Path(str(cover_file) + '.mtime')
-                            new_mtime  = Path(str(new_cover)  + '.mtime')
-                            try:
-                                cover_file.rename(new_cover)
-                                if mtime_file.exists():
-                                    mtime_file.rename(new_mtime)
-                            except Exception:
-                                pass
-                    # Update in-memory cache keys
-                    old_fp_str = str(old_path)
-                    new_fp_str = str(candidate)
+                    old_cover = _COVER_DISK_DIR / f'{_cover_disk_key(old_fp_str)}.jpg'
+                    new_cover = _COVER_DISK_DIR / f'{_cover_disk_key(new_fp_str)}.jpg'
+                    if old_cover != new_cover and old_cover.exists():
+                        old_mtime = Path(str(old_cover) + '.mtime')
+                        new_mtime = Path(str(new_cover) + '.mtime')
+                        try:
+                            old_cover.replace(new_cover)
+                            if old_mtime.exists():
+                                old_mtime.replace(new_mtime)
+                        except Exception:
+                            pass
                     for sz_key in _fp_to_sizes.pop(old_fp_str, ()):
                         pm = _cover_cache.pop((old_fp_str, sz_key), None)
                         if pm is not None:
@@ -214,8 +219,7 @@ class LibraryRenameWorker(QObject):
                     pass
                 self.track_done.emit(str(old_path), str(candidate), True)
             except Exception as exc:
-                # If step 2 failed the file is still safe under tmp_path;
-                # try to restore it to old_path so the library stays intact.
+                # A failure after step 1 leaves the file under the temp name
                 tmp_path_maybe = Path(t.filepath).with_name(
                     Path(t.filepath).name + '.__vprename_tmp__')
                 try:
@@ -242,7 +246,6 @@ class RenamePopup(QDialog):
     The caller (ControlBar._on_rename_btn) uses this to rescan and update M3Us.
     """
 
-    # Class-level tracking of active rename worker
     _active_worker = None  # (instance, worker, thread) or None
 
     def __init__(self, tracks: list, parent=None):
@@ -255,9 +258,9 @@ class RenamePopup(QDialog):
         self._thread   = None
         self._worker   = None
         self._running  = False
-        # Collected as worker emits; available after exec() returns
+        # Filled in as the worker runs; readable once the dialog closes
         self.rename_map: dict = {}   # {old_path: new_path}
-        # Store background state for restoration
+        # Mirrored so a reopened dialog can restore the running operation
         self._bg_progress = 0
         self._bg_total = len(tracks)
         self._bg_track_name = ''
@@ -341,19 +344,15 @@ class RenamePopup(QDialog):
         self._btn_close.clicked.connect(self._on_close)
 
         self._on_pattern_changed('')
-        # Initialise close button to correct label (not running yet)
         self._update_close_btn()
 
-        # Check if there's an existing rename worker running in background and auto-restore
         self._check_and_restore_background_rename()
         QApplication.instance().installEventFilter(self)
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def eventFilter(self, obj, e: QEvent) -> bool:
-        # Only intercept clicks while the dialog is actually visible.
-        # self.geometry() is in parent-widget coords; convert our rect to global
-        # screen coords before comparing with the event's global position.
+        # geometry() is in parent coordinates, so compare in global ones
         if (self.isVisible() and
                 e.type() == QEvent.Type.MouseButtonPress):
             try:
@@ -403,15 +402,12 @@ class RenamePopup(QDialog):
         existing = RenamePopup._active_worker
         if existing:
             old_instance, old_worker, old_thread = existing
-            # Restore UI to show the existing running operation with full state
             self._thread = old_thread
             self._worker = old_worker
             self._running = True
             self._btn_start.setEnabled(False)
             self._btn_cancel.setEnabled(True)
-            # Restore progress and track info from background state
             self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
-            # Restore log items
             self._log.clear()
             for item_data in old_instance._bg_log_items:
                 text, ok_flag, old_name, new_name = item_data
@@ -423,33 +419,38 @@ class RenamePopup(QDialog):
                     item.setForeground(QColor('#bb3333'))
                 self._log.addItem(item)
             self._log.scrollToBottom()
-            # Restore result label if present
             if old_instance._bg_result:
                 self._result_lbl.setText(old_instance._bg_result)
-            # Emit progress to main window status bar
             self._emit_status_update_rename()
-            # Auto-show the dialog (it may have been hidden)
             self.show()
-            # Connect signals to restore live updates
+            # Detach the previous dialog first: leaving it connected would make
+            # every worker signal arrive twice, duplicating log rows and running
+            # _on_finished on both instances.
+            try: old_worker.progress.disconnect(old_instance._on_progress)
+            except Exception: pass
+            try: old_worker.track_done.disconnect(old_instance._on_track_done)
+            except Exception: pass
+            try: old_worker.finished.disconnect(old_instance._on_finished)
+            except Exception: pass
             self._worker.progress.connect(self._on_progress)
             self._worker.track_done.connect(self._on_track_done)
             self._worker.finished.connect(self._on_finished)
+            # This dialog now owns the worker, so register it as the live one —
+            # the next reopen must restore from state that is still being updated.
+            RenamePopup._active_worker = (self, old_worker, old_thread)
             self._update_close_btn()
 
     def _emit_status_update_rename(self):
         """Emit rename progress status to main window status bar."""
         if self._running and hasattr(self, '_bg_progress') and hasattr(self, '_bg_total'):
             msg = f"Rename: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
-            # Find main window and update status bar
             win = self.parent()
             while win and not hasattr(win, '_status'):
                 win = win.parent()
             if win and hasattr(win, '_status'):
-                # Remove old widget if exists
                 old_lbl = getattr(win, '_fetch_rename_lbl', None)
                 if old_lbl:
                     old_lbl.deleteLater()
-                # Create new permanent widget
                 lbl = QLabel(msg)
                 lbl.setStyleSheet(f'color:{FG}; font-size:11px; padding: 0 8px;')
                 win._status.addPermanentWidget(lbl, 0)
@@ -492,10 +493,8 @@ class RenamePopup(QDialog):
         worker.finished.connect(thread.quit)
         self._thread = thread
         self._worker = worker
-        # Register this worker as active
         RenamePopup._active_worker = (self, worker, thread)
         thread.start()
-        # Emit initial status update
         self._emit_status_update_rename()
 
     def _cancel(self):
@@ -511,32 +510,26 @@ class RenamePopup(QDialog):
 
     def _on_close(self):
         if self._running:
-            # Hide the dialog but keep the thread running in background.
-            # Remove the application-wide event filter so the hidden dialog
-            # does not continue swallowing all mouse events.
+            # Hide only — the rename worker keeps going in the background.
+            # The filter must come off too, or the hidden dialog keeps eating
+            # every mouse press in the application (see eventFilter above).
             QApplication.instance().removeEventFilter(self)
             self.hide()
         else:
-            # Nothing is running — just close the dialog
             self._really_close()
 
     def closeEvent(self, e):
+        QApplication.instance().removeEventFilter(self)
         if getattr(self, '_force_close', False) or not self._running:
-            # Allow genuine close when not running.
-            # Always remove the event filter on a real close.
-            QApplication.instance().removeEventFilter(self)
             self._force_close = False
             e.accept()
         else:
-            # Hide instead of closing — keeps thread alive.
-            # Remove the event filter so the hidden dialog does not swallow mouse events.
-            QApplication.instance().removeEventFilter(self)
+            # A running worker survives the dialog: hide instead of closing
             self.hide()
             e.ignore()
 
     def _on_progress(self, current: int, total: int, name: str):
         self._track_lbl.setText(f'[{current}/{total}]  {name}')
-        # Store state for background restoration
         self._bg_progress = current
         self._bg_total = total
         self._bg_track_name = name
@@ -554,27 +547,22 @@ class RenamePopup(QDialog):
             item.setForeground(QColor('#bb3333'))
         self._log.addItem(item)
         self._log.scrollToBottom()
-        # Store log item for background restoration
         self._bg_log_items.append((item.text(), ok, old_name, new_path if ok else ''))
 
     def _on_finished(self, renamed: int, total: int):
         self._running = False
-        # Clear active worker reference
         RenamePopup._active_worker = None
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._track_lbl.setText('Done.')
         result_msg = f'{renamed} / {total} files renamed.'
         self._result_lbl.setText(result_msg)
-        # Store result for background restoration
         self._bg_result = result_msg
-        # Clean up thread references
         self._thread = None
         self._worker = None
-        # Clear status bar message
         self._clear_status_update_rename()
         self._update_close_btn()
-        # Invoke post-finish callback if wired by caller (e.g. _on_rename_btn)
+        # Set by ControlBar._on_rename_btn to rescan the library afterwards
         cb = getattr(self, '_post_finish_cb', None)
         if cb:
             cb(renamed, total)
@@ -590,7 +578,7 @@ def scan_folder(folder: str) -> List[Track]:
                 fps.append(os.path.join(root, f))
     if not fps:
         return []
-    # Parallel mutagen reads — 4 workers balances HDD seek latency vs CPU saturation.
+    # 4 workers balances HDD seek latency against CPU saturation
     with _cf.ThreadPoolExecutor(max_workers=4) as pool:
         out = list(pool.map(read_metadata, fps))
     out.sort(key=lambda t: t.sort_key())
@@ -657,7 +645,6 @@ class ConfigPlaylistLoader(QThread):
             fps   = [fp for fp in pd.get('tracks', []) if os.path.isfile(fp)]
             if not fps:
                 continue
-            # Parallel mutagen reads — 4 workers is a good balance for HDDs and SSDs
             with _cf.ThreadPoolExecutor(max_workers=4) as pool:
                 results = list(pool.map(read_metadata, fps))
             tracks = sorted(results, key=lambda t: t.sort_key())
@@ -665,6 +652,3 @@ class ConfigPlaylistLoader(QThread):
                 self.playlist_ready.emit(tracks, label)
         self.all_done.emit()
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  GStreamer Player with Parametric EQ (using audioiirfilter with coefficient calculation)
-# ══════════════════════════════════════════════════════════════════════════════

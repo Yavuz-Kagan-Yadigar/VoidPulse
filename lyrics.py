@@ -4,30 +4,43 @@ VoidPulse — lyrics engine: LRC parser, embedded tag extractor, online sources
 LyricsFetcher worker, LyricsPanel display widget.
 """
 from constants import *
-from constants import ACC, B2, BG, BG2, BORD, FG2, _open_audio
-# embed_lyrics is imported lazily inside the function that uses it (below) to
-# avoid a circular import: metadata_online imports _get/_get_json from this
-# module at load time, so importing metadata_online back here at module level
-# fails depending on which module happens to be imported first.
+from constants import (ACC, B2, BG, BG2, BORD, FG2, _open_audio,
+                       _apply_scroller_properties, _get, _get_json)
+from metadata_online import embed_lyrics
 import re as _re
 import html as _html
-import urllib.request as _urlreq
 import urllib.parse as _urlparse
+import concurrent.futures as _cf
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Lyrics — fetch, parse, display
 # ══════════════════════════════════════════════════════════════════════════════
 # ── LRC parser ────────────────────────────────────────────────────────────────
-_LRC_LINE_RE = _re.compile(r'\[(\d+):(\d+(?:\.\d+)?)\](.*)')
+_LRC_STAMP_RE = _re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)\]')
 
 def _lrc_parse(text: str):
+    """Parse LRC text into sorted [(ms, line_text)].
+
+    A line may carry several timestamps — [00:12.00][01:45.00]Chorus is how LRC
+    files avoid repeating a chorus — so every leading stamp becomes its own
+    entry. Matching only the first would both lose the later timing and leave
+    its bracket sitting in the displayed text.
+    """
     lines = []
     for raw in text.splitlines():
-        m = _LRC_LINE_RE.match(raw.strip())
-        if m:
-            mm, ss_str, txt = m.groups()
-            ms = int(mm) * 60000 + round(float(ss_str) * 1000)
-            lines.append((ms, txt.strip()))
+        raw = raw.strip()
+        stamps = []
+        pos = 0
+        while (m := _LRC_STAMP_RE.match(raw, pos)):
+            mm, ss_str = m.groups()
+            # Some writers use mm:ss:cc instead of mm:ss.cc
+            stamps.append(int(mm) * 60000 + round(float(ss_str.replace(':', '.')) * 1000))
+            pos = m.end()
+        if not stamps:
+            continue   # metadata line ([ar:…]) or plain text
+        txt = raw[pos:].strip()
+        for ms in stamps:
+            lines.append((ms, txt))
     return sorted(lines, key=lambda x: x[0]) if lines else None
 
 # ── Embedded tags ─────────────────────────────────────────────────────────────
@@ -50,7 +63,7 @@ def _extract_embedded_lyrics(fp: str):
                     return (p, None) if p else (None, tag.text.strip())
         else:
             tg = af.tags
-            # Check synced-lyrics tags first (stored by LRC-aware taggers)
+            # LRC-aware taggers write these
             for key in ('syncedlyrics', 'SYNCEDLYRICS'):
                 v = tg.get(key)
                 if v:
@@ -59,7 +72,7 @@ def _extract_embedded_lyrics(fp: str):
                         p = _lrc_parse(text)
                         if p:
                             return p, None
-            # Fall back to plain/unsynced tags; try LRC parse in case they contain timestamps
+            # Plain tags, which may still hold timestamps
             for key in ('lyrics', 'LYRICS', 'unsyncedlyrics', 'UNSYNCEDLYRICS'):
                 v = tg.get(key)
                 if v:
@@ -71,38 +84,7 @@ def _extract_embedded_lyrics(fp: str):
         pass
     return None, None
 
-# ── Network helpers ───────────────────────────────────────────────────────────
-def _get(url, timeout=8, headers=None):
-    h = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) VoidPulse/2.0'}
-    if headers: h.update(headers)
-    req = _urlreq.Request(url, headers=h)
-    with _urlreq.urlopen(req, timeout=timeout) as r:
-        return r.read().decode('utf-8', errors='replace')
-
-def _get_json(url, timeout=8, headers=None):
-    return json.loads(_get(url, timeout, headers))
-
-def _apply_scroller_properties(widget, *, touch: bool = True):
-    """Apply standard kinetic-scroll properties to a viewport widget.
-
-    ``touch=True`` (default) adds the tight DragStartDistance / AcceleratingFlickMaximumTime
-    values that make touch flicks feel immediate.  Pass ``touch=False`` for mouse-only
-    scroll targets (e.g. the EQ band table) where a looser start distance is acceptable.
-    """
-    SM = QScrollerProperties.ScrollMetric
-    OP = QScrollerProperties.OvershootPolicy
-    sp = QScrollerProperties()
-    sp.setScrollMetric(SM.DecelerationFactor,           0.35)
-    sp.setScrollMetric(SM.MaximumVelocity,              0.8)
-    sp.setScrollMetric(SM.VerticalOvershootPolicy,      OP.OvershootAlwaysOff)
-    sp.setScrollMetric(SM.HorizontalOvershootPolicy,    OP.OvershootAlwaysOff)
-    if touch:
-        sp.setScrollMetric(SM.AcceleratingFlickMaximumTime, 0.15)
-        sp.setScrollMetric(SM.DragStartDistance,            0.005)
-    QScroller.scroller(widget).setScrollerProperties(sp)
-
-
-# ── Source functions — each returns (synced|None, plain|None) or (None, text) ─
+# ── Sources — each returns (synced, None) or (None, plain) ────────────────────
 
 def _src_lrclib_exact(artist, title, album, dur):
     try:
@@ -129,9 +111,9 @@ def _src_lrclib_search(artist, title):
             if sl.strip():
                 lrc = _lrc_parse(sl)
                 if lrc:
-                    return lrc, None          # synced found — return immediately
+                    return lrc, None
             if pl.strip() and best_plain is None:
-                best_plain = pl.strip()       # cache plain; keep searching for synced
+                best_plain = pl.strip()   # remember it, but keep looking for synced
         if best_plain:
             return None, best_plain
     except Exception:
@@ -160,17 +142,14 @@ def _src_chartlyrics(artist, title):
 
 
 def _src_genius_search(artist, title):
-    # Genius web scraping — no API key
     try:
         q = _urlparse.quote(f'{artist} {title}')
         html_txt = _get(f'https://genius.com/search?q={q}',
                         headers={'Accept': 'text/html'})
-        # Find first hit URL
         m = _re.search(r'"url":"(https://genius\.com/[^"]+lyrics[^"]*)"', html_txt)
         if not m: return None, None
         url = m.group(1)
         page = _get(url, headers={'Accept': 'text/html'})
-        # Extract lyrics containers
         parts = _re.findall(
             r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>',
             page, _re.DOTALL)
@@ -261,7 +240,7 @@ class LyricsFetcher(QObject):
         title  = (t.title  or '').strip()
         album  = (t.album  or '').strip()
 
-        # 1. Embedded tags — instant, no network required
+        # Embedded tags first — no network needed
         self.status.emit('Checking embedded tags…')
         synced, plain = _extract_embedded_lyrics(t.filepath)
         if synced or plain:
@@ -273,12 +252,10 @@ class LyricsFetcher(QObject):
             self.finished.emit(None, None)
             return
 
-        # 2. Two-phase online search:
-        #    Phase A — fast, reliable sources (LrcLib has synced, Lyrics.ovh is quick).
-        #              Return immediately on first synced result.  If Phase A finishes
-        #              with a plain result, skip slow sources — plain is sufficient.
-        #    Phase B — only when Phase A returns empty; web scrapers; wait up to 2 s
-        #              for synced after first plain result, then deliver whatever we have.
+        # Then two phases online. Phase A is the fast APIs, returning as soon as a
+        # synced result arrives and skipping phase B on any result at all. Phase B is
+        # the scrapers, which wait a further 2 s after a plain hit in case a synced
+        # one is still coming.
         fast_sources = [
             ('LrcLib (exact)',  lambda: _src_lrclib_exact(artist, title, album, t.duration)),
             ('LrcLib (search)', lambda: _src_lrclib_search(artist, title)),
@@ -297,7 +274,7 @@ class LyricsFetcher(QObject):
         best_plain   = [None]
 
         def _run_source(fn):
-            # Lock-free early exit — read-only check without lock is safe under CPython GIL
+            # Unlocked read: worst case is one redundant fetch
             if best_synced[0] is not None:
                 return
             try:
@@ -307,13 +284,12 @@ class LyricsFetcher(QObject):
             with result_lock:
                 if s and best_synced[0] is None:
                     best_synced[0] = s
-                # plain is only saved when synced has not been found;
-                # otherwise the receiver may choose the wrong format
+                # Plain is kept only while no synced result exists
                 elif p and best_plain[0] is None and best_synced[0] is None:
                     best_plain[0] = p
 
         def _emit_best():
-            """Determine and emit the result — if synced is present, plain is never emitted alongside it."""
+            """Emit whichever result is best; never both at once."""
             if best_synced[0] is not None:
                 self.was_online = True
                 self.finished.emit(best_synced[0], None)
@@ -359,7 +335,7 @@ class LyricsFetcher(QObject):
                             f.cancel()
                         break
                     if best_plain[0] is not None:
-                        # Plain found; give remaining futures 2 more seconds to find a synced result
+                        # Give the rest 2 s to turn up a synced version
                         remaining = [f for f in futs_b if not f.done()]
                         if remaining:
                             try:
@@ -393,16 +369,16 @@ class LyricsPanel(QWidget):
     def __init__(self, player, ctrlbar=None, parent=None):
         super().__init__(parent)
         self._player   = player
-        self._ctrlbar  = ctrlbar  # for lyrics_fetch_enabled flag
+        self._ctrlbar  = ctrlbar   # read for its lyrics_fetch_enabled flag
         self._synced   = []
-        self._synced_ts: list | None = None   # sorted timestamp list for bisect; None = not built
+        self._synced_ts: list | None = None   # timestamps for bisect, None until built
         self._plain    = ''
         self._cur_idx  = -1
         self._track    = None
         self._thread: QThread  = None
-        self._fetcher: LyricsFetcher = None   # keep ref to prevent GC
+        self._fetcher: LyricsFetcher = None
         self._pending_track = None
-        self._fetch_id: int = 0   # incremented on each new fetch; guards stale callbacks
+        self._fetch_id: int = 0   # bumped per fetch, to discard stale callbacks
 
         self.setObjectName('lyrics_panel')
         self.setMinimumWidth(180)
@@ -432,7 +408,6 @@ class LyricsPanel(QWidget):
             f'QScrollBar::handle:vertical{{background:{B2};border-radius:1px;min-height:20px;}}'
             f'QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}')
         
-        # Enable touch scrolling
         QScroller.grabGesture(self._scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
         _apply_scroller_properties(self._scroll.viewport())
 
@@ -445,14 +420,10 @@ class LyricsPanel(QWidget):
         root.addWidget(self._scroll, 1)
 
         self._lbls: list = []
-        # Lyrics position is driven by on_position() called from sig_pos (100 ms).
-        # No separate timer needed — avoids a redundant query_position() call per 80 ms.
+        # Position comes from on_position(), driven by the player's sig_pos
 
-        # Pre-allocate a single scroll animation; reuse it in _highlight to avoid
-        # constructing a new QPropertyAnimation (+ parent-lookup + signal-wire) on
-        # every lyric line change while music is playing.
-        # Target widget (_scroll.verticalScrollBar()) is wired lazily after the
-        # scroll area is fully initialised.
+        # One reused animation: _highlight would otherwise build a new
+        # QPropertyAnimation on every lyric line change.
         self._scroll_anim: QPropertyAnimation = QPropertyAnimation(
             self._scroll.verticalScrollBar(), b'value', self)
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -461,7 +432,7 @@ class LyricsPanel(QWidget):
     # ── public ──────────────────────────────────────────────────────────────
 
     def set_track(self, track, deferred=False):
-        # Increment fetch_id before aborting so any in-flight _done callback is discarded
+        # Bumped before the abort, so an in-flight _done() is discarded
         self._fetch_id += 1
         self._track = track
         self._synced = []; self._plain = ''; self._cur_idx = -1
@@ -517,7 +488,7 @@ class LyricsPanel(QWidget):
     def _abort(self):
         thread   = self._thread
         self._thread  = None
-        self._fetcher = None   # drop ref before quit so GC doesn't race
+        self._fetcher = None
         if thread is not None:
             try:
                 if thread.isRunning():
@@ -527,24 +498,21 @@ class LyricsPanel(QWidget):
                 pass  # C++ object already deleted
 
     def _start(self, track, fetch_online: bool = True):
-        # Capture the generation id set by set_track() — any in-flight callback
-        # with an older id will be discarded by the stale-guard in _done().
+        # The id set_track() just bumped; _done() drops anything older
         my_id = self._fetch_id
         thread  = QThread(self)
         fetcher = LyricsFetcher(track, fetch_online=fetch_online)
         fetcher.moveToThread(thread)
         thread.started.connect(fetcher.run)
-        # Wrap _done with the current fetch_id so stale callbacks are ignored
         fetcher.finished.connect(lambda s, p, fid=my_id: self._done(s, p, fid))
         fetcher.finished.connect(thread.quit)
         fetcher.status.connect(self.status_msg)   # forward to status bar
         thread.finished.connect(thread.deleteLater)
         self._thread  = thread
-        self._fetcher = fetcher   # prevent GC!
+        self._fetcher = fetcher
         thread.start()
 
     def _done(self, synced, plain, fetch_id: int = -1):
-        # Ignore callbacks from previous fetch cycles (stale results)
         if fetch_id != self._fetch_id:
             return
         fetcher = self._fetcher; self._fetcher = None
@@ -553,7 +521,6 @@ class LyricsPanel(QWidget):
             self._synced = synced
             self._src_lbl.setText('synced')
             self._build_synced()
-            # Jump to current playback position immediately
             try:
                 ok, p = self._player._pipe.query_position(Gst.Format.TIME)
                 if ok: self._highlight(p // Gst.MSECOND)
@@ -569,10 +536,9 @@ class LyricsPanel(QWidget):
             self._show_status(msg)
             self._src_lbl.setText('')
             return
-        # Embed into file if fetched from network (fetcher flag) and not already embedded
+        # A network result is written back into the file
         if fetcher and fetcher.was_online and self._track:
             fp = self._track.filepath
-            from metadata_online import embed_lyrics
             threading.Thread(
                 target=embed_lyrics, args=(fp, synced, plain or ''),
                 daemon=True).start()
@@ -582,7 +548,7 @@ class LyricsPanel(QWidget):
             it = self._cl.takeAt(0)
             if it.widget(): it.widget().deleteLater()
         self._lbls = []
-        self._synced_ts = None   # invalidate bisect index
+        self._synced_ts = None
 
     def _show_status(self, msg):
         self._clear()
@@ -614,7 +580,7 @@ class LyricsPanel(QWidget):
             self._lbls.append(lbl)
             self._cl.addWidget(lbl)
         self._cl.addStretch()
-        # Pre-build sorted timestamp list for O(log N) binary search in _highlight
+        # Timestamps for _highlight's binary search
         self._synced_ts = [t for t, _ in self._synced]
 
     def _build_plain(self):
@@ -629,7 +595,6 @@ class LyricsPanel(QWidget):
 
     def _highlight(self, ms: int):
         if not self._synced or not self._lbls: return
-        # O(log N) binary search — replaces O(N) linear scan called every 250 ms
         if self._synced_ts is None:
             return
         pos = bisect.bisect_right(self._synced_ts, ms) - 1
@@ -643,9 +608,7 @@ class LyricsPanel(QWidget):
         cur_t  = self._synced[idx][1]
         nxt_t  = self._synced[idx+1][1] if idx < len(self._synced)-1 else ''
         self.lyrics_context.emit(prev_t, cur_t, nxt_t)
-        # Reuse the pre-allocated animation — stop if running, then retarget.
-        # This avoids allocating a new QPropertyAnimation + signal connection on
-        # every lyric-line change (called up to 10× per second while playing).
+        # Retarget the shared animation rather than building a new one
         step   = self._LINE_H + self._LINE_SP
         target = max(0, idx * step - self._scroll.height() // 2 + self._LINE_H // 2)
         bar    = self._scroll.verticalScrollBar()

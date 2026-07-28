@@ -8,6 +8,82 @@ from constants import ACC, B2, BG2, BG3, BG4, BORD, FG, FG2, _r
 import concurrent.futures as _cf
 from metadata_online import embed_lyrics, fetch_cover_online, lookup_tags_online
 
+class _CoverPreview(QWidget):
+    """Full-dialog cover zoom shown when the cover thumbnail is clicked.
+
+    Sits over the whole dialog as a dimmed backdrop with the artwork centred at
+    its native aspect ratio. Any mouse press or key press dismisses it, and it
+    follows the dialog if that is resized while open.
+    """
+
+    _MARGIN_PCT = 0.06   # empty border kept around the artwork
+
+    def __init__(self, pixmap: QPixmap, parent: QWidget):
+        super().__init__(parent)
+        self._pm = pixmap
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+
+    def eventFilter(self, obj, ev):
+        if obj is self.parent() and ev.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parent().rect())
+        return False
+
+    def _dismiss(self):
+        p = self.parent()
+        if p is not None:
+            p.removeEventFilter(self)
+        self.hide()
+        self.deleteLater()
+
+    def mousePressEvent(self, e):
+        self._dismiss()
+
+    def keyPressEvent(self, e):
+        self._dismiss()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        scrim = QColor(0, 0, 0, 200)
+        p.fillRect(self.rect(), scrim)
+
+        if self._pm.isNull():
+            return
+        m = int(min(self.width(), self.height()) * self._MARGIN_PCT)
+        avail = self.rect().adjusted(m, m, -m, -m)
+        shown = self._pm.scaled(avail.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+        x = avail.x() + (avail.width()  - shown.width())  // 2
+        y = avail.y() + (avail.height() - shown.height()) // 2
+
+        # Same corner treatment as the thumbnail
+        r = _r(10)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(x, y, shown.width(), shown.height()), r, r)
+        p.save()
+        p.setClipPath(path)
+        p.drawPixmap(x, y, shown)
+        p.restore()
+        p.setPen(QPen(QColor(ACC), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+
+
+class _ClickableCoverLabel(QLabel):
+    """Cover thumbnail that emits `clicked` when pressed."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
 class TagEditDialog(QDialog):
     """Tag editor with cover art management."""
     def __init__(self, track: 'Track', parent=None):
@@ -23,23 +99,19 @@ class TagEditDialog(QDialog):
 
         # ── Cover row ──────────────────────────────────────────────────────
         cover_row = QHBoxLayout(); cover_row.setSpacing(12)
-        self._cover_lbl = QLabel()
+        self._cover_full: Optional[QPixmap] = None   # full-res source for the zoom view
+        self._cover_lbl = _ClickableCoverLabel()
         self._cover_lbl.setFixedSize(96, 96)
         self._cover_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._cover_lbl.setStyleSheet(
             f'background:{BG3}; border:1px solid {B2}; border-radius:{_r(8)}px;')
-        # Load current cover
+        self._cover_lbl.clicked.connect(self._show_cover_preview)
         raw = extract_cover_bytes(track.filepath)
         if raw:
             pm = QPixmap(); pm.loadFromData(raw)
-            self._cover_lbl.setPixmap(
-                pm.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                          Qt.TransformationMode.SmoothTransformation).copy(0,0,96,96))
+            self._set_cover_pixmap(pm)
         else:
-            self._cover_lbl.setText('No Cover')
-            self._cover_lbl.setStyleSheet(
-                f'background:{BG3}; border:1px solid {B2}; border-radius:6px;'
-                f' color:{FG2}; font-size:11px;')
+            self._show_no_cover('No Cover')
         cover_row.addWidget(self._cover_lbl)
 
         # ── 2-column × 4-row action button grid ───────────────────────────
@@ -59,13 +131,10 @@ class TagEditDialog(QDialog):
 
         cover_grid = QGridLayout()
         cover_grid.setSpacing(5)
-        # Row 0
         cover_grid.addWidget(self._btn_cover_file,   0, 0)
         cover_grid.addWidget(self._btn_cover_search, 0, 1)
-        # Row 1
         cover_grid.addWidget(self._btn_cover_remove, 1, 0)
         cover_grid.addWidget(self._btn_lyrics_edit,   1, 1)
-        # Row 2
         cover_grid.addWidget(self._btn_tag_fetch,    2, 0)
         cover_grid.addWidget(self._btn_lyrics_fetch, 2, 1)
 
@@ -86,7 +155,6 @@ class TagEditDialog(QDialog):
         self._btn_lyrics_fetch.clicked.connect(self._fetch_lyrics_online)
         self._btn_lyrics_edit.clicked.connect(self._edit_lyrics)
 
-        # Divider
         div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
         div.setStyleSheet(f'color:{BORD};'); layout.addWidget(div)
 
@@ -107,14 +175,10 @@ class TagEditDialog(QDialog):
         layout.addWidget(btn_box)
 
     def changeEvent(self, e):
-        # On Wayland the overlay cannot receive input when a top-level QDialog has
-        # focus, so we close on window deactivation instead.  We guard against
-        # spurious deactivations that happen while a child dialog (file picker,
-        # QMessageBox) is open by checking whether the application's active window
-        # is still this dialog or one of its children.
-        # _child_dialog_open is set True around any exec() call for a child dialog
-        # (e.g. LyricsEditDialog) to suppress the spurious deactivation that fires
-        # when focus returns to this dialog after the child closes.
+        # On Wayland the modal overlay cannot receive input while a top-level
+        # QDialog holds focus, so the dialog closes on deactivation instead. A
+        # child dialog (file picker, message box) also deactivates this one, so
+        # those cases are filtered out below and by _child_dialog_open.
         if e.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
             if getattr(self, '_child_dialog_open', False):
                 super().changeEvent(e)
@@ -131,6 +195,38 @@ class TagEditDialog(QDialog):
                 self.reject()
         super().changeEvent(e)
 
+    def _set_cover_pixmap(self, pm: QPixmap):
+        """Show pm as the 96px thumbnail and keep the original for the zoom view."""
+        self._cover_full = pm
+        self._cover_lbl.setText('')
+        self._cover_lbl.setToolTip('Click to enlarge')
+        self._cover_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cover_lbl.setStyleSheet(
+            f'background:{BG3}; border:1px solid {B2}; border-radius:{_r(8)}px;')
+        self._cover_lbl.setPixmap(
+            pm.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                      Qt.TransformationMode.SmoothTransformation).copy(0, 0, 96, 96))
+
+    def _show_no_cover(self, text: str):
+        """Put the label into its empty state — nothing to enlarge."""
+        self._cover_full = None
+        self._cover_lbl.clear()
+        self._cover_lbl.setText(text)
+        self._cover_lbl.setToolTip('')
+        self._cover_lbl.setCursor(Qt.CursorShape.ArrowCursor)
+        self._cover_lbl.setStyleSheet(
+            f'background:{BG3}; border:1px solid {B2}; border-radius:{_r(8)}px;'
+            f' color:{FG2}; font-size:11px;')
+
+    def _show_cover_preview(self):
+        """Open the full-size cover view; ignored when there is no artwork."""
+        if self._cover_full is None or self._cover_full.isNull():
+            return
+        view = _CoverPreview(self._cover_full, self)
+        view.show()
+        view.raise_()
+        view.setFocus()
+
     def _pick_cover_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, 'Select Cover Image', '',
@@ -142,10 +238,7 @@ class TagEditDialog(QDialog):
         if pm.loadFromData(data):
             self._new_cover_bytes = data
             self._cover_action = 'set'
-            self._cover_lbl.setPixmap(
-                pm.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                          Qt.TransformationMode.SmoothTransformation).copy(0,0,96,96))
-            self._cover_lbl.setText('')
+            self._set_cover_pixmap(pm)
 
     def _search_cover_online(self):
         """Fetch cover from online sources for this specific track in a background thread."""
@@ -177,15 +270,9 @@ class TagEditDialog(QDialog):
                 if pm.loadFromData(data):
                     self._new_cover_bytes = data
                     self._cover_action    = 'set'
-                    self._cover_lbl.setPixmap(
-                        pm.scaled(96, 96,
-                                  Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                  Qt.TransformationMode.SmoothTransformation).copy(0, 0, 96, 96))
-                    self._cover_lbl.setText('')
-                    self._cover_lbl.setStyleSheet(
-                        f'background:{BG3};border:1px solid {B2};border-radius:6px;')
+                    self._set_cover_pixmap(pm)
                 else:
-                    self._cover_lbl.setText('Load error')
+                    self._show_no_cover('Load error')
             else:
                 self._btn_cover_search.setText('Not found')
                 QTimer.singleShot(2000,
@@ -322,8 +409,7 @@ class TagEditDialog(QDialog):
     def _remove_cover(self):
         self._cover_action = 'remove'
         self._new_cover_bytes = None
-        self._cover_lbl.clear()
-        self._cover_lbl.setText('Removed')
+        self._show_no_cover('Removed')
 
     def _edit_lyrics(self):
         """Open lyrics editor popup with current embedded lyrics."""

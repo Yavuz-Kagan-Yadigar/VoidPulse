@@ -1,15 +1,14 @@
 """
-VoidPulse — track metadata + cover art: Track dataclass, read_metadata(),
-disk-cache helpers, _CoverTask, AsyncCoverLoader, _BaseFetchPopup,
-LibraryCoverFetchWorker, CoverFetchPopup.
+VoidPulse — track metadata and cover art: the Track dataclass, read_metadata(),
+cover extraction and rendering, the memory/disk cover caches, and the
+background cover loader (_CoverTask, AsyncCoverLoader).
+
+The batch cover-fetch UI lives in fetch_popups.py.
 """
 from constants import *
-from constants import ACC, B2, BG, BG3, CONFIG_PATH, FG, FG2, _DARK_MODE, _apply_scroller_properties, _sanitize_filename_part
-import constants as _const_mod
-from metadata_online import fetch_cover_online, embed_cover_bytes
+from constants import (ACC, BG, CONFIG_PATH, _DARK_MODE,
+                       _sanitize_filename_part, _open_audio)
 import re as _re
-import urllib.request as _urlreq
-import urllib.parse as _urlparse
 import numpy as _np
 
 @dataclass
@@ -22,6 +21,9 @@ class Track:
     sample_rate: int   = 0
     bit_depth:   int   = 0
     file_type:   str   = ''
+    # ReplayGain track gain in dB. 0.0 means absent, which is also a no-op gain,
+    # so callers need not tell untagged from an explicit 0 dB.
+    rg_track_gain_db: float = 0.0
 
     def dur_str(self):
         t = int(self.duration); h, r = divmod(t, 3600); m, s = divmod(r, 60)
@@ -49,12 +51,7 @@ def _tag(tags, *keys):
     return ''
 
 def _vtag(tags, *keys):
-    """Case-insensitive tag lookup for Vorbis comment tags (FLAC/OGG/OPUS).
-    Avoids rebuilding a lowercase dict by iterating tags directly.
-    For the small tag sets typical of audio files this is faster.
-    Pre-lowercases each search key once instead of re-lowercasing it per tag.
-    """
-    # Pre-lower each tag key once so the inner loop only lowers per-tag items.
+    """Case-insensitive tag lookup for Vorbis comments (FLAC/OGG/OPUS)."""
     lc_tags = [(tk.lower(), tv) for tk, tv in tags.items()]
     for k in keys:
         kl = k.lower()
@@ -66,31 +63,14 @@ def _vtag(tags, *keys):
                     return s
     return ''
 
-def _open_audio(fp: str):
-    """Open an audio file with mutagen, trying format-specific classes as fallback.
-    Returns a mutagen File object or None."""
-    af = MutagenFile(fp, easy=False)
-    if af is not None:
-        return af
-    ext = Path(fp).suffix.lower()
-    try:
-        if ext == '.opus':
-            from mutagen.oggopus import OggOpus;    return OggOpus(fp)
-        if ext == '.ogg':
-            from mutagen.oggvorbis import OggVorbis; return OggVorbis(fp)
-        if ext == '.flac':
-            from mutagen.flac import FLAC;           return FLAC(fp)
-        if ext == '.mp3':
-            from mutagen.mp3 import MP3;             return MP3(fp)
-        if ext in ('.m4a', '.aac'):
-            from mutagen.mp4 import MP4;             return MP4(fp)
-        if ext in ('.wav', '.wave'):
-            from mutagen.wave import WAVE;           return WAVE(fp)
-        if ext in ('.aiff', '.aif'):
-            from mutagen.aiff import AIFF;           return AIFF(fp)
-    except Exception:
-        pass
-    return None
+def _parse_gain_db(s: str):
+    """Parse a ReplayGain tag value like '-3.20 dB' or '-3.20' into a float,
+    or None if s doesn't contain a number (missing/malformed tag)."""
+    if not s:
+        return None
+    m = _re.search(r'[-+]?\d+(?:\.\d+)?', s)
+    return float(m.group(0)) if m else None
+
 
 def read_metadata(fp: str) -> Track:
     p = Path(fp); ext = p.suffix.lower()
@@ -109,56 +89,76 @@ def read_metadata(fp: str) -> Track:
         if ext == '.mp3':
             tr.title  = _tag(tg, 'TIT2') or tr.title
             tr.artist = _tag(tg, 'TPE1', 'TPE2'); tr.album = _tag(tg, 'TALB')
+            # A TXXX frame keyed 'TXXX:<description>', whose casing is not
+            # standardised — hence the case-insensitive scan.
+            for k in tg.keys():
+                if isinstance(k, str) and k.upper() == 'TXXX:REPLAYGAIN_TRACK_GAIN':
+                    frame = tg[k]
+                    txt = str(frame.text[0]) if getattr(frame, 'text', None) else ''
+                    g = _parse_gain_db(txt)
+                    if g is not None:
+                        tr.rg_track_gain_db = g
+                    break
         elif ext in ('.flac', '.opus', '.ogg'):
             tr.title  = _vtag(tg, 'title') or tr.title
             tr.artist = _vtag(tg, 'artist', 'albumartist')
             tr.album  = _vtag(tg, 'album')
+            g = _parse_gain_db(_vtag(tg, 'REPLAYGAIN_TRACK_GAIN'))
+            if g is not None:
+                tr.rg_track_gain_db = g
         elif ext in ('.m4a', '.aac'):
             tr.title  = _tag(tg, '\xa9nam') or tr.title
             tr.artist = _tag(tg, '\xa9ART', 'aART'); tr.album = _tag(tg, '\xa9alb')
+            # MP4 has no standard atom: it is a freeform '----:...' one
+            for k, v in tg.items():
+                if isinstance(k, str) and k.lower().endswith('replaygain_track_gain') and v:
+                    try:
+                        raw = v[0]
+                        txt = raw.decode('utf-8', 'ignore') if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    except Exception:
+                        txt = ''
+                    g = _parse_gain_db(txt)
+                    if g is not None:
+                        tr.rg_track_gain_db = g
+                    break
         else:
             tr.title  = _tag(tg, 'title',  'TITLE') or tr.title
             tr.artist = _tag(tg, 'artist', 'ARTIST'); tr.album = _tag(tg, 'album', 'ALBUM')
+            g = _parse_gain_db(_tag(tg, 'replaygain_track_gain', 'REPLAYGAIN_TRACK_GAIN'))
+            if g is not None:
+                tr.rg_track_gain_db = g
     except Exception:
         pass
     return tr
 
 # ── Cover art ─────────────────────────────────────────────────────────────────
-_cover_cache: OrderedDict = OrderedDict()  # (fp, size) → QPixmap (LRU-ordered via move_to_end)
-                                           # Radius is NOT stored here — applied at draw time via _draw_cover_rounded()
+_cover_cache: OrderedDict = OrderedDict()  # (fp, size) → QPixmap, LRU-ordered
 _COVER_SENTINEL = object()  # distinguishes cache miss from cached None
 
-# Master resolution stored on disk — one file per track regardless of how many
-# display sizes are requested.  All smaller sizes are derived in-memory by
-# downscaling from this master; no per-size disk files are written.
-# 220px is the maximum gallery card cover size so it is the natural upper bound.
+# One master per track on disk; every smaller size is downscaled from it in
+# memory. 220px is the largest gallery card cover, so it is the upper bound.
 _COVER_MASTER_SIZE = 220
 
-# Memory cache limit.  With one master per track in memory plus a handful of
-# derived sizes (28, 64, gallery size), 2000 entries covers ~400 tracks at
-# ~5 sizes each with comfortable headroom.
+# 2000 entries is roughly 400 tracks at a master plus four derived sizes each
 _COVER_CACHE_MAX = 2000
 
 def _trim_cover_cache() -> None:
-    """Evict oldest quarter of entries when cache exceeds _COVER_CACHE_MAX.
+    """Evict from the front once the cache exceeds _COVER_CACHE_MAX.
 
-    Python dicts are insertion-ordered (3.7+).  Trimming from the front evicts
-    the least-recently-inserted entries.  Good enough for a cover cache where
-    recency roughly correlates with 'currently visible in gallery/table'.
+    The dict is LRU-ordered, so the oldest entries go first — close enough to
+    "no longer on screen" for a cover cache.
     """
     overflow = len(_cover_cache) - _COVER_CACHE_MAX
     if overflow > 0:
-        trim = overflow + _COVER_CACHE_MAX // 4   # remove 25% extra to avoid thrash
+        trim = overflow + _COVER_CACHE_MAX // 4   # extra headroom, to avoid thrashing
         for key in list(_cover_cache.keys())[:trim]:
             _cover_cache.pop(key, None)
 
 def _purge_orphan_disk_covers() -> None:
-    """Delete disk cover files that are not the 220px master (_220.jpg).
+    """Delete disk covers that are not the 220px master.
 
-    Old versions wrote a separate <stem>_<size>.jpg for every display size.
-    This one-time startup sweep removes those stale files so the covers
-    directory converges to exactly one file per track.
-    Runs in a daemon thread — never blocks the UI.
+    Older versions wrote one file per display size; this startup sweep removes
+    them so the directory converges on a single file per track.
     """
     if not _COVER_DISK_DIR.exists():
         return
@@ -205,21 +205,15 @@ def extract_cover_bytes(fp: str) -> Optional[bytes]:
 def _square_pixmap(pm: QPixmap, size: int) -> QPixmap:
     """Scale pm to size×size and centre-crop to an exact square.
 
-    No rounded corners are applied here — the result is a plain opaque JPEG-
-    compatible square.  Corner rounding is done at draw time by
-    _draw_cover_rounded() so we never need transparency in the disk cache and
-    one cached pixmap serves every radius value.
-
-    Note: KeepAspectRatioByExpanding can produce a result 1px smaller than
-    requested due to float→int truncation (e.g. 220*(28/220) = 27.999…→27).
-    The IgnoreAspectRatio fallback guarantees exact size×size output.
+    Corners stay square here and are rounded at draw time by
+    _draw_cover_rounded(), so the disk cache needs no transparency and one
+    cached pixmap serves every radius setting.
     """
     pm = pm.scaled(size, size,
                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                    Qt.TransformationMode.SmoothTransformation)
-    # Guard: float→int truncation in Qt scaling can produce a result 1px
-    # smaller than requested (e.g. 220px master → 28px target).
-    # If either dimension fell short, force an exact square via IgnoreAspectRatio.
+    # KeepAspectRatioByExpanding can land 1px short through float→int truncation
+    # (220 * 28/220 = 27.999…). Force the exact square when it does.
     if pm.width() < size or pm.height() < size:
         pm = pm.scaled(size, size,
                        Qt.AspectRatioMode.IgnoreAspectRatio,
@@ -228,62 +222,30 @@ def _square_pixmap(pm: QPixmap, size: int) -> QPixmap:
     y = max(0, (pm.height() - size) // 2)
     return pm.copy(x, y, size, size)
 
-# Pre-cached corner-frame pixmaps: (size, radius, bg_color) → QPixmap
-# Each is a size×size ARGB pixmap that is fully transparent in the rounded-rect
-# interior and bg_color in the four corner areas.  Painting it on top of a
-# square cover produces the rounded-corner illusion with zero transparency in
-# the cover cache files.  Frames are tiny (a few KB each) and keyed by
-# (size, radius, bg_color) — only a handful ever exist at runtime.
-_corner_frame_cache: dict = {}
-
-def _get_corner_frame(size: int, radius: int, bg_color: str) -> QPixmap:
-    """Return (or build + cache) the corner-masking overlay frame.
-
-    The frame is size×size with transparent interior (shows cover below) and
-    bg_color corners.  Composited on top of the square cover to fake rounded
-    corners without any ARGB data in the cover cache.
-    """
-    key = (size, radius, bg_color)
-    pm = _corner_frame_cache.get(key)
-    if pm is not None:
-        return pm
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    # 1. Fill everything with bg_color
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(QColor(bg_color)))
-    p.drawRect(0, 0, size, size)
-    # 2. Clear (transparent) the rounded-rect interior so the cover shows through
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-    p.setBrush(Qt.BrushStyle.SolidPattern)
-    p.drawRoundedRect(0, 0, size, size, radius, radius)
-    p.end()
-    _corner_frame_cache[key] = pm
-    return pm
-
 def _draw_cover_rounded(painter: QPainter, pm: QPixmap,
-                        x: int, y: int, size: int, radius: int,
-                        bg_color: str) -> None:
-    """Draw *pm* at (x,y) with rounded corners, no transparency in cover cache.
+                        x: int, y: int, size: int, radius: int) -> None:
+    """Draw *pm* at (x,y) clipped to a rounded rect.
 
-    Strategy: draw the square cover pixmap, then draw a pre-built corner-frame
-    overlay on top.  The frame is ARGB with transparent interior and bg_color
-    corners — it costs one extra drawPixmap() call but avoids storing ARGB
-    data in the disk/memory cover cache and keeps the cache key radius-free.
+    Clipping rather than masking the corners with a matching-coloured overlay:
+    the clip is correct whatever is painted behind the cover (fill, hover,
+    selection, playing highlight, accent tint), with nothing to keep in sync.
     """
+    if radius <= 0:
+        painter.drawPixmap(x, y, size, size, pm)
+        return
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(x, y, size, size), radius, radius)
+    painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
     painter.drawPixmap(x, y, size, size, pm)
-    if radius > 0:
-        frame = _get_corner_frame(size, radius, bg_color)
-        painter.drawPixmap(x, y, frame)
+    painter.restore()
 
 
 def _default_cover_disk_path(acc: str, bg: str, size: int) -> Path:
     safe_acc = acc.lstrip('#')
     safe_bg  = bg.lstrip('#')
-    # PNG for the 220px master (lossless); kept as .jpg key for back-compat
-    # but the new master always uses .png extension.
+    # The master is PNG (lossless); derived sizes were JPEG in older versions
     if size == 220:
         return CONFIG_PATH.parent / f'default_cover_{safe_acc}_{safe_bg}_{size}.png'
     return CONFIG_PATH.parent / f'default_cover_{safe_acc}_{safe_bg}_{size}.jpg'
@@ -308,20 +270,15 @@ def _render_default_cover_master(size: int = _DEFAULT_COVER_MASTER_SIZE) -> QPix
     return pm
 
 def draw_default_cover(size: int) -> QPixmap:
-    """Return (or build) the clef-placeholder cover as a plain square pixmap.
+    """Return the clef-placeholder cover as a plain square pixmap.
 
-    Uses the same master-size (220px) + downscale architecture as real covers:
-      • 220px master is rendered once and cached in memory (keyed by ACC + BG).
-      • Requested sizes are derived by downscaling the master — no per-size
-        disk files, no JPEG round-trips at small dimensions.
-    The default cover is stored without rounded corners — like all covers —
-    so the same pixmap serves every radius setting.  Callers that need rounded
-    display use _draw_cover_rounded() or _get_corner_frame().
+    Same master-and-downscale scheme as real covers: one 220px master per
+    (accent, background) pair, cached in memory and on disk, with every other
+    size derived from it.
     """
     master_key = ('__default__', _DEFAULT_COVER_MASTER_SIZE, ACC, BG)
     master_pm = _default_cover_mem_cache.get(master_key)
     if master_pm is None:
-        # Build 220px master; also try disk cache for it
         disk = _default_cover_disk_path(ACC, BG, _DEFAULT_COVER_MASTER_SIZE)
         if disk.exists():
             pm = QPixmap()
@@ -329,7 +286,7 @@ def draw_default_cover(size: int) -> QPixmap:
                 master_pm = pm
         if master_pm is None:
             master_pm = _render_default_cover_master(_DEFAULT_COVER_MASTER_SIZE)
-            # Persist master to disk (PNG — lossless, one file per theme combo)
+            # PNG so the master stays lossless
             try:
                 disk.parent.mkdir(parents=True, exist_ok=True)
                 master_pm.save(str(disk), 'PNG')
@@ -340,7 +297,6 @@ def draw_default_cover(size: int) -> QPixmap:
     if size == _DEFAULT_COVER_MASTER_SIZE:
         return master_pm
 
-    # Derive requested size by downscaling the in-memory master (no disk I/O)
     mem_key = ('__default__', size, ACC, BG)
     pm = _default_cover_mem_cache.get(mem_key)
     if pm is None:
@@ -353,40 +309,39 @@ _cover_fetch_on  = True   # module-level flag — updated by ControlBar
 _cover_locked_set: set = set()   # filepaths that must not auto-fetch
 _COVER_JPEG_QUALITY = 80
 
-# Pre-create cover cache dir; non-fatal if it fails (e.g. read-only Flatpak sandbox)
+# Non-fatal if it fails, e.g. in a read-only sandbox
 try:
     _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
     pass
 
 def _cover_disk_key(fp: str) -> str:
-    """Persistent filename-based disk cache key: <sanitized_stem>_220.
+    """Persistent disk cache key: <sanitized_stem>_<path_hash>_220.
 
-    One master file per track at _COVER_MASTER_SIZE (220px).  All smaller
-    display sizes are derived in-memory by downscaling; no per-size files.
+    One master file per track at _COVER_MASTER_SIZE (220px); smaller display
+    sizes are derived in memory, so no per-size files exist.
 
-    Using the audio filename stem (not a SHA1 hash) means:
-    - The disk key is human-readable and survives process restarts.
-    - Batch rename can update cover filenames by a simple rename on disk.
-    - Stale covers (file replaced with different content) are detected by
-      comparing the embedded-cover mtime via a sidecar .mtime file written
-      alongside the JPEG.  If the audio mtime changed we re-extract.
+    The hash of the full path is what makes the key unique: two tracks with the
+    same filename in different folders (a studio and a live version, the same
+    track on two albums) would otherwise share one cache file and end up showing
+    each other's artwork. The stem prefix is only there to keep the directory
+    readable.
 
-    The key is sanitized with the same rules as _sanitize_filename_part so
-    characters illegal on Linux/Windows are stripped.
+    A sidecar <name>.mtime file records the audio file's mtime at extraction
+    time, so a re-tagged file is detected as stale and re-read.
     """
     stem = _sanitize_filename_part(Path(fp).stem)
-    # Truncate very long stems to keep filenames under 200 chars
-    if len(stem) > 120:
-        stem = stem[:120]
-    return f'{stem}_{_COVER_MASTER_SIZE}'
+    # Cap the readable part; the hash suffix is what guarantees uniqueness.
+    if len(stem) > 100:
+        stem = stem[:100]
+    path_hash = hashlib.sha1(str(Path(fp).resolve()).encode('utf-8', 'surrogateescape')).hexdigest()[:10]
+    return f'{stem}_{path_hash}_{_COVER_MASTER_SIZE}'
 
 def _cover_disk_is_stale(fp: str, disk_path: Path) -> bool:
-    """Return True if the cover on disk is older than the audio file's mtime.
+    """True when the cached cover predates the audio file's current mtime.
 
-    A sidecar file ``<disk_path>.mtime`` holds the mtime string at the time
-    the cover was extracted.  If the audio file has been re-tagged since then
-    the sidecar will differ and we re-extract.  Missing sidecar → stale.
+    The mtime at extraction time lives in a ``<disk_path>.mtime`` sidecar; a
+    mismatch or a missing sidecar counts as stale.
     """
     sidecar = Path(str(disk_path) + '.mtime')
     try:
@@ -407,23 +362,59 @@ def _cover_disk_write_mtime(fp: str, disk_path: Path) -> None:
     except Exception:
         pass
 
-# Global flag — toggled by ControlBar._on_cover_acc_toggle
+# Toggled by ControlBar._on_cover_acc_toggle
 _COVER_ACC_ON: bool = False
 
-# LUT cache: acc_h → (lut_r, lut_g, lut_b) uint8 arrays of length 256
-# Built once per accent hue, reused across all cover sizes.
-_acc_lut_cache: dict = {}   # acc_h → (lut_r, lut_g, lut_b)
+# Brightness → colour lookup tables, built once per accent and theme and shared
+# across every cover size. Key: (hue, saturation, dark mode).
+_acc_lut_cache: dict = {}   # (acc_h, acc_s, dark) → (lut_r, lut_g, lut_b)
+
+# Recoloured results. Without this every get_cover_pixmap() hit re-ran the whole
+# LUT pass — six image copies per call — so each visible row paid for it again
+# on every repaint and every scroll frame.
+#
+# Keyed on (file, size, palette), i.e. the cover's own identity, NOT on
+# QPixmap.cacheKey(): Qt recycles a cache key once its pixmap is freed, so a
+# key-based memo eventually hands a newly created cover the recoloured image
+# belonging to a long-gone one. The source's cacheKey is still stored alongside
+# the result and re-checked on every hit, so a cover re-read at the same size
+# (new artwork for the same file) misses instead of serving the old picture.
+_recolor_cache: OrderedDict = OrderedDict()  # (fp, size, hue, sat, dark) → (src key, QPixmap)
+_RECOLOR_CACHE_MAX = 512
+
+
+def _trim_recolor_cache() -> None:
+    overflow = len(_recolor_cache) - _RECOLOR_CACHE_MAX
+    if overflow > 0:
+        for _ in range(overflow + _RECOLOR_CACHE_MAX // 4):
+            if not _recolor_cache:
+                break
+            _recolor_cache.popitem(last=False)
+
+
+def _recolor_cached(fp: str, size: int, pm: QPixmap) -> QPixmap:
+    """Memoized _recolor_pixmap for the cover *fp* at *size*."""
+    acc_h, acc_s, _, _ = QColor(ACC).getHsv()
+    key = (fp, size, acc_h, acc_s, _DARK_MODE)
+    src_key = pm.cacheKey()
+    hit = _recolor_cache.get(key)
+    if hit is not None and hit[0] == src_key:
+        _recolor_cache.move_to_end(key)   # most recently used
+        return hit[1]
+    out = _recolor_pixmap(pm)
+    _recolor_cache[key] = (src_key, out)
+    _trim_recolor_cache()
+    return out
+
 
 def _recolor_pixmap(pm: QPixmap) -> QPixmap:
     """Return pm recoloured using a luminance LUT.
 
     Dark mode:  black (v=0)  → accent (v=255)
     Light mode: accent (v=0) → white  (v=255)
-
-    LUT is cached per (acc_h, dark_mode) pair and rebuilt when either changes.
     """
     acc_h, acc_s, _, _ = QColor(ACC).getHsv()
-    cache_key = (acc_h, _DARK_MODE)
+    cache_key = (acc_h, acc_s, _DARK_MODE)
     lut = _acc_lut_cache.get(cache_key)
     if lut is None:
         lut_r = _np.empty(256, dtype=_np.uint8)
@@ -452,13 +443,11 @@ def _recolor_pixmap(pm: QPixmap) -> QPixmap:
     w, h = img.width(), img.height()
     stride = img.bytesPerLine()   # may be > w*4 due to Qt row alignment
     ptr = img.bits(); ptr.setsize(h * stride)
-    # Read as (h, stride) byte array so row padding is preserved in the copy,
-    # then slice out only the w*4 pixel bytes per row — avoids stride mismatch
-    # that causes cross-row garbage when bytesPerLine != w*4.
+    # Read whole rows including any padding, then slice the pixel bytes out:
+    # bytesPerLine can exceed w*4 and a plain reshape would smear rows.
     raw = _np.frombuffer(ptr, dtype=_np.uint8).reshape(h, stride).copy()
-    # img no longer needed after copy() — release before heavy numpy work
     del img
-    arr = raw[:, : w * 4].reshape(h * w, 4)   # exact pixel columns only
+    arr = raw[:, : w * 4].reshape(h * w, 4)   # pixel columns only
     # Qt RGB32 LE layout: B G R 0xFF
     y8 = ((arr[:, 2].astype(_np.uint16) * 2 +
            arr[:, 1].astype(_np.uint16) * 5 +
@@ -467,41 +456,40 @@ def _recolor_pixmap(pm: QPixmap) -> QPixmap:
     out[:, 0] = lut_b[y8]
     out[:, 1] = lut_g[y8]
     out[:, 2] = lut_r[y8]
-    return QPixmap.fromImage(QImage(out.tobytes(), w, h, w * 4, QImage.Format.Format_RGB32))
+    # .copy() forces the pixels into Qt-owned memory before the pixmap is built.
+    # QImage does not take ownership of the bytes it is handed, so without this
+    # the pixmap aliases a temporary that is freed the moment this returns —
+    # harmless when the result is drawn immediately, but the caller caches it,
+    # and a cached pixmap over freed memory paints as garbage.
+    img_out = QImage(out.tobytes(), w, h, w * 4, QImage.Format.Format_RGB32).copy()
+    return QPixmap.fromImage(img_out)
 
 def get_cover_pixmap(fp: str, size: int = 48) -> Optional[QPixmap]:
-    """Return cached square QPixmap (memory-only, non-blocking).
+    """Return a cached square pixmap, or None. Memory only, never blocks.
 
-    The returned pixmap is a plain square — no rounded corners baked in.
-    Callers paint the rounded-corner overlay frame themselves via
-    _draw_cover_rounded(), so one pixmap serves all radius values.
+    Corners stay square; callers round them at draw time with
+    _draw_cover_rounded(), so one pixmap serves every radius.
 
-    Architecture (master-size cache):
-      L1  Exact-size memory hit → return immediately.
-      L2  Master (220px) already in memory → downscale on main thread,
-          cache the result, return immediately.  No disk I/O.
-      L3  Any other larger cached size for this fp → downscale, cache, return.
-      L4  Cache miss → schedule async load.  The worker always fetches/stores
-          the 220px master on disk and posts it back; the main thread derives
-          the requested size and caches both master + requested size.
+    In order: an exact-size hit, a downscale of the cached 220px master, a
+    downscale of any larger cached size, or None plus a queued async load that
+    reads the master from disk or the file's tags.
     """
     key = (fp, size)
     cached = _cover_cache.get(key, _COVER_SENTINEL)
     if cached is not _COVER_SENTINEL:
-        _cover_cache.move_to_end(key)   # LRU: mark as recently used
-        return _recolor_pixmap(cached) if (_COVER_ACC_ON and cached is not None) else cached
+        _cover_cache.move_to_end(key)   # most recently used
+        return (_recolor_cached(fp, size, cached)
+                if (_COVER_ACC_ON and cached is not None) else cached)
 
-    # L2: master already in memory — cheapest derive path
     master = _cover_cache.get((fp, _COVER_MASTER_SIZE), _COVER_SENTINEL)
     if master is not _COVER_SENTINEL and master is not None:
         if size == _COVER_MASTER_SIZE:
-            return _recolor_pixmap(master) if _COVER_ACC_ON else master
+            return _recolor_cached(fp, size, master) if _COVER_ACC_ON else master
         pm = _square_pixmap(master, size)
         _cover_cache[key] = pm
         _trim_cover_cache()
-        return _recolor_pixmap(pm) if _COVER_ACC_ON else pm
+        return _recolor_cached(fp, size, pm) if _COVER_ACC_ON else pm
 
-    # L3: any other larger cached size for this fp (covers sizes > master too)
     best_pm: Optional[QPixmap] = None
     best_sz = 0
     for (cached_fp, cached_sz), cached_pm in _cover_cache.items():
@@ -513,9 +501,8 @@ def get_cover_pixmap(fp: str, size: int = 48) -> Optional[QPixmap]:
         pm = _square_pixmap(best_pm, size)
         _cover_cache[key] = pm
         _trim_cover_cache()
-        return _recolor_pixmap(pm) if _COVER_ACC_ON else pm
+        return _recolor_cached(fp, size, pm) if _COVER_ACC_ON else pm
 
-    # L4: schedule async load — worker will fetch/cache master, then derive size
     _ensure_async_cover_loader().request(fp, size)
     return None
 
@@ -531,32 +518,18 @@ class _CoverTask(QRunnable):
     def run(self):
         fp, size = self._fp, self._size
         try:
-            # Master disk path — always 220px regardless of requested size.
-            # All display sizes are derived from this one file.
             master_dkey = _cover_disk_key(fp)
             master_disk_path = _COVER_DISK_DIR / f'{master_dkey}.jpg'
 
-            # L1.5: master already in memory (race with another task that just
-            # finished) — re-emit the 220px master via _master_ready so the
-            # main thread derives the requested size cleanly with _square_pixmap.
-            # Never encode a downscaled derived size as JPEG here: JPEG 8x8 DCT
-            # block artefacts at 28-44px are visible and get amplified by
-            # _recolor_pixmap when cover-accent mode is on.
-            master_pm = _cover_cache.get((fp, _COVER_MASTER_SIZE))
-            if master_pm is not None:
-                buf    = QByteArray()
-                buf_io = QBuffer(buf)
-                buf_io.open(QIODeviceBase.OpenModeFlag.WriteOnly)
-                master_pm.save(buf_io, 'JPEG', _COVER_JPEG_QUALITY)
-                buf_io.close()
-                raw = bytes(buf)
-                if raw:
-                    # Emit as master (empty disk_path = already on disk).
-                    # _on_master_ready will derive the target size losslessly.
-                    self._loader._master_ready.emit(fp, size, raw, '')
-                    return
+            # Another task may already have loaded the master while this one was
+            # queued. QPixmap must not be touched outside the GUI thread, so let
+            # the main thread scale the cached master instead of re-encoding it
+            # here; that also skips a pointless lossy JPEG round trip.
+            if (fp, _COVER_MASTER_SIZE) in _cover_cache:
+                self._loader._derive_ready.emit(fp, size)
+                return
 
-            # L2: master disk cache — one file per track, already square 220px.
+            # The master on disk is already a square 220px JPEG
             if master_disk_path.exists() and not _cover_disk_is_stale(fp, master_disk_path):
                 try:
                     with open(str(master_disk_path), 'rb') as f:
@@ -566,19 +539,15 @@ class _CoverTask(QRunnable):
                         if not sidecar.exists():
                             _cover_disk_write_mtime(fp, master_disk_path)
                         if size == _COVER_MASTER_SIZE:
-                            # Requested size IS the master — emit directly.
                             self._loader._raw_ready.emit(fp, size, master_raw, '')
                         else:
-                            # Decode master, downscale to requested size, emit.
-                            # master_disk_path is passed so main thread also
-                            # stores the master in _cover_cache.
                             self._loader._post_raw_master(fp, size, master_raw,
                                                           str(master_disk_path))
                         return
                 except Exception:
                     pass  # fall through to full load
 
-            # L3: embedded cover — decode, write 220px master to disk, derive size.
+            # Nothing cached — read the cover out of the file's tags
             data = extract_cover_bytes(fp)
             if data:
                 img = QImage()
@@ -587,7 +556,6 @@ class _CoverTask(QRunnable):
                     self._loader._post_image(fp, size, img, str(master_disk_path))
                     return
 
-            # Nothing found
             self._loader._post_miss(fp, size)
         except Exception:
             self._loader._post_miss(fp, size)
@@ -606,6 +574,8 @@ class AsyncCoverLoader(QObject):
     _master_ready = pyqtSignal(str, int, bytes, str)  # fp, requested_size, master_raw, disk_path
     # derived signal — worker posts already-scaled bytes for a specific size (no disk write)
     _raw_ready    = pyqtSignal(str, int, bytes, str)  # fp, size, data, disk_path (unused)
+    # the master is already cached in memory; the main thread just rescales it
+    _derive_ready = pyqtSignal(str, int)  # fp, requested_size
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -616,6 +586,7 @@ class AsyncCoverLoader(QObject):
         self._pool.setMaxThreadCount(max(2, self._pool.maxThreadCount()))
         self._master_ready.connect(self._on_master_ready, Qt.ConnectionType.QueuedConnection)
         self._raw_ready.connect(self._on_raw_ready, Qt.ConnectionType.QueuedConnection)
+        self._derive_ready.connect(self._on_derive_ready, Qt.ConnectionType.QueuedConnection)
 
     def request(self, fp: str, size: int):
         key = (fp, size)
@@ -647,15 +618,11 @@ class AsyncCoverLoader(QObject):
 
     def _post_raw_master(self, fp: str, size: int,
                          master_raw: bytes, master_disk_path: str):
-        """Cache master in memory and derive requested size.  Worker thread.
+        """Hand a master read from disk to the main thread. Worker thread.
 
-        Called when the 220px disk file exists and size != _COVER_MASTER_SIZE.
-        Emits _master_ready with the master bytes; _on_master_ready caches the
-        master, derives the requested size, and emits cover_loaded exactly once.
-        No disk write — the master file is already fresh.
+        The empty disk path tells _on_master_ready the file is already there, so
+        it caches, derives the requested size and skips the write.
         """
-        # Just forward to the master path — _on_master_ready handles the derive.
-        # Empty disk_path means: master is already on disk, skip the write.
         self._master_ready.emit(fp, size, master_raw, '')
 
     def _post_miss(self, fp, size):
@@ -679,14 +646,11 @@ class AsyncCoverLoader(QObject):
             with self._lock:
                 self._no_embed.add(fp)
             return
-        # Cache master
         _cover_cache[(fp, _COVER_MASTER_SIZE)] = master_pm
-        # Derive requested size from master (in-memory — very cheap)
         if size != _COVER_MASTER_SIZE:
             pm = _square_pixmap(master_pm, size)
             _cover_cache[(fp, size)] = pm
         _trim_cover_cache()
-        # Persist master to disk (one file per track)
         if master_disk_path:
             try:
                 _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
@@ -695,6 +659,18 @@ class AsyncCoverLoader(QObject):
                 _cover_disk_write_mtime(fp, Path(master_disk_path))
             except Exception:
                 pass
+        self.cover_loaded.emit(fp, size)
+
+    def _on_derive_ready(self, fp: str, size: int):
+        """Scale the already-cached 220px master down to size. Main thread."""
+        with self._lock:
+            self._in_flight.discard((fp, size))
+        master_pm = _cover_cache.get((fp, _COVER_MASTER_SIZE))
+        if master_pm is None:
+            return   # evicted between the worker's check and this call
+        if size != _COVER_MASTER_SIZE:
+            _cover_cache[(fp, size)] = _square_pixmap(master_pm, size)
+            _trim_cover_cache()
         self.cover_loaded.emit(fp, size)
 
     def _on_raw_ready(self, fp: str, size: int, data: bytes, _disk_path: str):
@@ -715,7 +691,7 @@ class AsyncCoverLoader(QObject):
         _trim_cover_cache()
         self.cover_loaded.emit(fp, size)
 
-# Module-level singleton — created once, shared by all gallery views
+# Shared by every view; use _ensure_async_cover_loader() to reach it
 _async_cover_loader: Optional['AsyncCoverLoader'] = None
 
 def _ensure_async_cover_loader() -> 'AsyncCoverLoader':
@@ -724,533 +700,6 @@ def _ensure_async_cover_loader() -> 'AsyncCoverLoader':
         _async_cover_loader = AsyncCoverLoader()
     return _async_cover_loader
 
-class _BaseFetchPopup(QDialog):
-    """Shared base for CoverFetchPopup, TagFetchPopup, LyricsFetchPopup.
-
-    Subclasses must implement:
-        _make_worker()  -> QObject worker with .run(), .progress(int,int,str),
-                           .track_done(...), .finished(int,int), .cancel()
-        _on_track_done(fp, *args)
-    And may override _on_finished(found, total) to customise the result label.
-    """
-
-    # Class-level tracking of active workers per popup type (supports multiple concurrent workers)
-    _active_workers = {}  # key: popup_type_name, value: list of (instance, worker, thread)
-
-    def __init__(self, tracks: list, title: str, info_text: str, needs_count: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(450)
-        self.setMinimumHeight(600)
-        self._tracks   = list(tracks)
-        self._thread   = None
-        self._worker   = None
-        self._running  = False
-        self._popup_type = self.__class__.__name__
-        # Store background state for restoration
-        self._bg_progress = 0
-        self._bg_total = needs_count
-        self._bg_track_name = ''
-        self._bg_log_items = []  # list of (text, ok_flag)
-        self._bg_result = ''
-        self._worker_id = None  # Will be set when worker is created or restored
-        self._status_widget_key = None  # Key for status bar widget
-
-        root = QVBoxLayout(self)
-        root.setSpacing(10)
-        root.setContentsMargins(20, 18, 20, 18)
-
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(f'font-size:14px;font-weight:bold;color:{FG};')
-        root.addWidget(title_lbl)
-
-        # ── Last.fm API Key row ───────────────────────────────────────────────
-        lfm_row = QHBoxLayout(); lfm_row.setSpacing(6)
-        lfm_lbl = QLabel('Last.fm key:')
-        lfm_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
-        lfm_lbl.setFixedWidth(72)
-        lfm_row.addWidget(lfm_lbl)
-        self._lfm_edit = QLineEdit()
-        self._lfm_edit.setPlaceholderText('API key (optional)')
-        self._lfm_edit.setFixedHeight(22)
-        self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._lfm_edit.setText(_const_mod._lastfm_api_key)
-        self._lfm_edit.setStyleSheet(
-            f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
-            f'border-radius:4px;padding:0 6px;font-size:11px;}}'
-            f'QLineEdit:focus{{border-color:{ACC};}}'
-        )
-        lfm_row.addWidget(self._lfm_edit, 1)
-        root.addLayout(lfm_row)
-
-        self._lfm_edit.textChanged.connect(self._on_lfm_text_changed)
-        if len(_const_mod._lastfm_api_key) == 32:
-            self._set_lfm_border(True)
-        # ─────────────────────────────────────────────────────────────────────
-
-        info_lbl = QLabel(info_text)
-        info_lbl.setWordWrap(True)
-        info_lbl.setStyleSheet(f'color:{FG2};font-size:12px;')
-        root.addWidget(info_lbl)
-
-        self._track_lbl = QLabel('')
-        self._track_lbl.setStyleSheet(f'color:{FG};font-size:12px;')
-        self._track_lbl.setWordWrap(True)
-        root.addWidget(self._track_lbl)
-
-        self._progress = QProgressBar()
-        self._progress.setRange(0, max(1, needs_count))
-        self._progress.setValue(0)
-        self._progress.setTextVisible(True)
-        self._progress.setFixedHeight(22)
-        self._progress.setStyleSheet(
-            f'QProgressBar{{background:{BG3};border:1px solid {B2};border-radius:4px;'
-            f'color:{FG};font-size:11px;text-align:center;}}'
-            f'QProgressBar::chunk{{background:{ACC};border-radius:3px;}}')
-        root.addWidget(self._progress)
-
-        self._log = QListWidget()
-        self._log.setFixedHeight(140)
-        self._log.setStyleSheet(
-            'QListWidget{background:' + BG + ';border:1px solid ' + B2 + ';border-radius:4px;'
-            'color:' + FG2 + ';font-size:10px;outline:none;}'
-            'QListWidget::item{padding:1px 6px;border:none;}'
-            'QListWidget::item:selected{background:transparent;color:' + FG2 + ';}'
-        )
-        self._log.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        QScroller.grabGesture(self._log.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        _apply_scroller_properties(self._log.viewport(), touch=False)
-        root.addWidget(self._log)
-
-        self._result_lbl = QLabel('')
-        self._result_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
-        root.addWidget(self._result_lbl)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        self._btn_start  = QPushButton('Start')
-        self._btn_cancel = QPushButton('Cancel')
-        self._btn_cancel.setEnabled(False)
-        self._btn_close  = QPushButton('Close')
-        self._force_cb   = QCheckBox('Force (re-fetch all)')
-        self._force_cb.setStyleSheet(f'color:{FG2};font-size:11px;')
-        
-        btn_row.addWidget(self._btn_start)
-        btn_row.addWidget(self._btn_cancel)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(self._force_cb)
-        btn_row.addStretch()
-        btn_row.addWidget(self._btn_close)
-        root.addLayout(btn_row)
-
-        self._btn_start.clicked.connect(self._start)
-        self._btn_cancel.clicked.connect(self._cancel)
-        self._btn_close.clicked.connect(self._on_close)
-        self._force = False   # set just before _make_worker() is called
-        # Initialise close button to correct label (not running yet)
-        self._update_close_btn()
-
-        # Check if there's an existing worker running in background and auto-start
-        self._check_and_restore_background()
-        QApplication.instance().installEventFilter(self)
-
-    def _on_lfm_text_changed(self, text: str):
-        """Automatically test when 32 characters are reached, reset border if incomplete."""
-        if len(text) == 32:
-            self._test_lastfm_key()
-        else:
-            self._lfm_edit.setStyleSheet(
-                f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
-                f'border-radius:4px;padding:0 6px;font-size:11px;}}'
-                f'QLineEdit:focus{{border-color:{ACC};}}'
-            )
-
-    def _test_lastfm_key(self):
-        """Test the API key, set textbox border to green/red based on result and save."""
-        key = self._lfm_edit.text().strip()
-        if not key:
-            self._set_lfm_border(False)
-            return
-        result = [None]
-
-        def _check():
-            try:
-                q = _urlparse.quote('Radiohead'); tk = _urlparse.quote('Creep')
-                url = (f'https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
-                       f'&artist={q}&track={tk}&api_key={key}&format=json')
-                req = _urlreq.Request(url, headers={'User-Agent': 'VoidPulse/2.0'})
-                with _urlreq.urlopen(req, timeout=6) as r:
-                    d = json.loads(r.read())
-                result[0] = 'error' not in d and 'track' in d
-            except Exception:
-                result[0] = False
-
-        thr = threading.Thread(target=_check, daemon=True)
-        thr.start()
-
-        def _poll():
-            if thr.is_alive():
-                QTimer.singleShot(150, _poll)
-                return
-            if not self.isVisible(): return
-            ok = result[0]
-            self._set_lfm_border(ok)
-            if ok:
-                _const_mod._lastfm_api_key = key
-
-        QTimer.singleShot(150, _poll)
-
-    def _set_lfm_border(self, ok: bool):
-        color = '#44bb44' if ok else '#bb3333'
-        self._lfm_edit.setStyleSheet(
-            f'QLineEdit{{background:{BG3};color:{FG};border:2px solid {color};'
-            f'border-radius:4px;padding:0 6px;font-size:11px;}}'
-        )
-
-    def _make_worker(self):
-        raise NotImplementedError
-
-    def _on_track_done(self, *_args):
-        raise NotImplementedError
-
-    def _update_close_btn(self):
-        """Show 'Run in\nbackground' while running, 'Close' otherwise."""
-        if self._running:
-            self._btn_close.setText('Run in\nbackground')
-        else:
-            self._btn_close.setText('Close')
-
-    def _check_and_restore_background(self):
-        """Check if there's an existing worker running in background and auto-restore UI."""
-        workers_list = _BaseFetchPopup._active_workers.get(self._popup_type, [])
-        if workers_list:
-            # Find the most recent worker for this popup type
-            old_instance, old_worker, old_thread = workers_list[-1]
-            # Restore UI to show the existing running operation with full state
-            self._thread = old_thread
-            self._worker = old_worker
-            self._running = True
-            self._worker_id = old_instance._worker_id  # Reuse same worker ID
-            self._status_widget_key = old_instance._status_widget_key
-            self._btn_start.setEnabled(False)
-            self._btn_cancel.setEnabled(True)
-            # Restore progress, log, and track info from background state
-            self._progress.setValue(old_instance._bg_progress)
-            self._track_lbl.setText(f'[{old_instance._bg_progress}/{old_instance._bg_total}]  {old_instance._bg_track_name}')
-            # Restore log items
-            self._log.clear()
-            for text, ok_flag in old_instance._bg_log_items:
-                item = QListWidgetItem(text)
-                item.setForeground(QColor('#55bb55') if ok_flag else QColor('#bb3333'))
-                self._log.addItem(item)
-            self._log.scrollToBottom()
-            # Restore result label if present
-            if old_instance._bg_result:
-                self._result_lbl.setText(old_instance._bg_result)
-            # Emit progress to main window status bar (reuses existing widget)
-            self._emit_status_update()
-            # Auto-show the dialog (it may have been hidden) - but don't auto-start since it's already running
-            self.show()
-            # Disconnect the old instance's UI slots before connecting this instance's slots.
-            # Without this, both the old popup and the new popup would receive every signal,
-            # causing progress updates, log entries and _on_finished to fire twice.
-            try: old_worker.progress.disconnect(old_instance._on_progress)
-            except Exception: pass
-            try: old_worker.track_done.disconnect(old_instance._on_track_done)
-            except Exception: pass
-            try: old_worker.finished.disconnect(old_instance._on_finished)
-            except Exception: pass
-            # Connect this instance's slots
-            self._worker.progress.connect(self._on_progress)
-            self._worker.track_done.connect(self._on_track_done)
-            self._worker.finished.connect(self._on_finished)
-            self._update_close_btn()
-
-    # ── common implementation ────────────────────────────────────────────────
-
-    def _log_add(self, text: str, ok: bool):
-        item = QListWidgetItem(text)
-        item.setForeground(QColor('#55bb55') if ok else QColor('#bb3333'))
-        self._log.addItem(item)
-        self._log.scrollToBottom()
-        # Store log item for background restoration
-        self._bg_log_items.append((text, ok))
-
-    def _start(self):
-        if self._running:
-            return
-        
-        self._running = True
-        self._force   = self._force_cb.isChecked()   # subclasses read self._force in _make_worker
-        self._log.clear()
-        self._progress.setValue(0)
-        self._result_lbl.setText('')
-        self._btn_start.setEnabled(False)
-        self._btn_cancel.setEnabled(True)
-        self._update_close_btn()
-
-        worker = self._make_worker()
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._on_progress)
-        worker.track_done.connect(self._on_track_done)
-        worker.finished.connect(self._on_finished)
-        worker.finished.connect(thread.quit)
-        self._thread = thread
-        self._worker = worker
-        # Generate unique ID for this worker instance if not already set
-        if self._worker_id is None:
-            self._worker_id = id(worker)
-        if self._status_widget_key is None:
-            self._status_widget_key = f"_fetch_widget_{self._worker_id}"
-        # Register this worker as active for this popup type (support multiple concurrent workers)
-        if self._popup_type not in _BaseFetchPopup._active_workers:
-            _BaseFetchPopup._active_workers[self._popup_type] = []
-        _BaseFetchPopup._active_workers[self._popup_type].append((self, worker, thread))
-        thread.start()
-        # Emit initial status update
-        self._emit_status_update()
-
-    def _cancel(self):
-        if self._worker:
-            self._worker.cancel()
-        self._btn_cancel.setEnabled(False)
-        self._track_lbl.setText('Cancelling…')
-
-    def _really_close(self):
-        """Actually close the dialog (bypassing the hide-guard in closeEvent)."""
-        self._force_close = True
-        self.reject()
-
-    def _on_close(self):
-        if self._running:
-            # Hide the dialog but keep the thread running in background.
-            # Remove the application-wide event filter so the hidden dialog
-            # does not continue swallowing all mouse events.
-            QApplication.instance().removeEventFilter(self)
-            self.hide()
-        else:
-            # Nothing is running — just close the dialog
-            self._really_close()
-
-    def closeEvent(self, e):
-        if getattr(self, '_force_close', False) or not self._running:
-            # Allow genuine close when not running.
-            # Always remove the event filter on a real close.
-            QApplication.instance().removeEventFilter(self)
-            self._force_close = False
-            e.accept()
-        else:
-            # Hide instead of closing — keeps thread alive.
-            # Remove the event filter so the hidden dialog does not swallow mouse events.
-            QApplication.instance().removeEventFilter(self)
-            self.hide()
-            e.ignore()
-
-    def _on_progress(self, current: int, total: int, name: str):
-        if self._progress.maximum() != max(1, total):
-            self._progress.setRange(0, max(1, total))
-        self._progress.setValue(current)
-        self._track_lbl.setText(f'[{current}/{total}]  {name}')
-        # Store state for background restoration
-        self._bg_progress = current
-        self._bg_total = total
-        self._bg_track_name = name
-        # Emit progress to main window status bar
-        self._emit_status_update()
-
-    def _on_finished(self, found: int, total: int):
-        self._running = False
-        # Remove this specific worker from active workers list
-        workers_list = _BaseFetchPopup._active_workers.get(self._popup_type, [])
-        # Find and remove this worker by identity
-        for i, (inst, wk, th) in enumerate(workers_list):
-            if inst is self or wk is self._worker:
-                workers_list.pop(i)
-                break
-        # Clean up empty lists
-        if not workers_list:
-            _BaseFetchPopup._active_workers.pop(self._popup_type, None)
-        self._btn_start.setEnabled(True)
-        self._btn_cancel.setEnabled(False)
-        self._track_lbl.setText('Done.')
-        self._progress.setValue(total)
-        result_msg = self._finished_msg(found, total)
-        self._result_lbl.setText(result_msg)
-        # Store result for background restoration
-        self._bg_result = result_msg
-        # Clean up thread references but don't quit (already quit via signal)
-        self._thread = None
-        self._worker = None
-        # Clear status bar message
-        self._emit_status_clear()
-        self._update_close_btn()
-
-    def _emit_status_update(self):
-        """Emit progress status to main window status bar - shows all concurrent fetches."""
-        if not self._running or not self._worker_id:
-            return
-        if not (hasattr(self, '_bg_progress') and hasattr(self, '_bg_total')):
-            return
-        
-        # Determine fetch type label from the already-stored popup type name
-        _TYPE_LABELS = {
-            'CoverFetchPopup':  'Covers',
-            'TagFetchPopup':    'Tags',
-            'LyricsFetchPopup': 'Lyrics',
-        }
-        type_label = _TYPE_LABELS.get(self._popup_type, 'Fetch')
-        
-        msg = f"{type_label}: [{self._bg_progress}/{self._bg_total}] {self._bg_track_name}"
-        # Find main window and update status bar
-        win = self.parent()
-        while win and not hasattr(win, '_status'):
-            win = win.parent()
-        if win and hasattr(win, '_status'):
-            # Use unique widget key for this specific worker instance
-            widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
-            # Check if widget already exists
-            old_lbl = getattr(win, widget_key, None)
-            if old_lbl:
-                # Update existing widget text instead of creating new one
-                old_lbl.setText(msg)
-            else:
-                # Create new permanent widget
-                lbl = QLabel(msg)
-                lbl.setStyleSheet(f'color:{FG}; font-size:11px; padding: 0 8px;')
-                win._status.addPermanentWidget(lbl, 0)
-                setattr(win, widget_key, lbl)
-
-    def _emit_status_clear(self):
-        """Clear status bar message for this specific fetch instance when finished."""
-        # Use unique widget key for this instance
-        widget_key = self._status_widget_key or f"_fetch_widget_{self._worker_id}"
-        
-        win = self.parent()
-        while win and not hasattr(win, '_status'):
-            win = win.parent()
-        if win:
-            old_lbl = getattr(win, widget_key, None)
-            if old_lbl:
-                old_lbl.deleteLater()
-                setattr(win, widget_key, None)
-
-    def _finished_msg(self, found: int, total: int) -> str:
-        return f'Processed {found} out of {total}.' 
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Library Cover Fetch Popup
-# ══════════════════════════════════════════════════════════════════════════════
-class LibraryCoverFetchWorker(QObject):
-    """Fetches covers for an entire track list sequentially in a worker thread.
-    Emits raw bytes per track so the UI thread builds QPixmap objects."""
-    progress    = pyqtSignal(int, int, str)   # current_index, total, track_name
-    track_done  = pyqtSignal(str, bytes, bool) # filepath, raw_bytes, found_flag
-    finished    = pyqtSignal(int, int)        # found_count, total_count
-
-    def __init__(self, tracks: list, force: bool = False):
-        super().__init__()
-        self._tracks    = list(tracks)
-        self._force     = force
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        # In force mode, process all tracks; otherwise skip tracks that already have a cover.
-        if self._force:
-            needs_fetch = [t for t in self._tracks if t.filepath not in _cover_locked_set]
-        else:
-            needs_fetch = [t for t in self._tracks
-                           if extract_cover_bytes(t.filepath) is None
-                           and t.filepath not in _cover_locked_set]
-        total = len(needs_fetch)
-        found = 0
-        done  = 0
-        for t in needs_fetch:
-            if self._cancelled:
-                break
-            name = t.title or Path(t.filepath).stem
-            done += 1
-            self.progress.emit(done, total, name)
-            data = fetch_cover_online(t.artist or '', t.title or '', t.album or '',
-                                      stop=lambda: self._cancelled)
-            if data:
-                found += 1
-                self.track_done.emit(t.filepath, data, True)
-            else:
-                self.track_done.emit(t.filepath, b'', False)
-        self.finished.emit(found, total)
-
-class CoverFetchPopup(_BaseFetchPopup):
-    """Modal dialog that fetches covers for tracks missing a cover."""
-
-    def __init__(self, tracks: list, table_pages: list, ctrlbar, parent=None):
-        self._pages   = table_pages
-        self._ctrlbar = ctrlbar
-        # ponytail: same fix as LyricsFetchPopup — don't synchronously scan every
-        # track's embedded cover on the UI thread here (extract_cover_bytes does
-        # disk I/O via mutagen). Show total count; worker computes the real
-        # "needs" list and corrects the progress bar range via the progress signal.
-        info = (f'Checking <b>{len(tracks)}</b> tracks for missing covers…')
-        super().__init__(tracks, 'Fetch Covers', info, len(tracks), parent)
-        self._needs = list(tracks)  # placeholder only; not used for worker logic
-
-    def _make_worker(self):
-        return LibraryCoverFetchWorker(self._tracks, force=self._force)
-
-    def set_tracks(self, tracks: list):
-        self._tracks = list(tracks)
-        self._needs  = list(tracks)  # placeholder; corrected once the worker reports real total
-        self._progress.setRange(0, max(1, len(self._needs)))
-
-    def _finished_msg(self, found: int, total: int) -> str:
-        return f'Found covers for {found} out of {total} tracks.'
-
-    def _on_track_done(self, fp: str, data: bytes, found: bool):
-        name = Path(fp).stem
-        if not found:
-            self._log_add(f'FAIL  {name}', False)
-            return
-        self._log_add(f'OK    {name}', True)
-        # Decode raw bytes to QPixmap — scale to master, then derive display sizes
-        src_pm = QPixmap()
-        if not src_pm.loadFromData(data):
-            return
-        # Store 220px master in memory and on disk
-        master_pm = _square_pixmap(src_pm, _COVER_MASTER_SIZE)
-        _cover_cache[(fp, _COVER_MASTER_SIZE)] = master_pm
-        try:
-            master_dkey = _cover_disk_key(fp)
-            master_disk_path = _COVER_DISK_DIR / f'{master_dkey}.jpg'
-            if not (master_disk_path.exists() and not _cover_disk_is_stale(fp, master_disk_path)):
-                _COVER_DISK_DIR.mkdir(parents=True, exist_ok=True)
-                master_pm.save(str(master_disk_path), 'JPEG', _COVER_JPEG_QUALITY)
-                _cover_disk_write_mtime(fp, master_disk_path)
-        except Exception:
-            pass
-        # Derive display sizes from master (in-memory — no extra disk I/O)
-        for size in (28, 64):
-            _cover_cache[(fp, size)] = _square_pixmap(master_pm, size)
-        _trim_cover_cache()
-        threading.Thread(target=embed_cover_bytes, args=(fp, data), daemon=True).start()
-        for page in self._pages:
-            tracks = page.tracks if hasattr(page, 'tracks') else []
-            for r, t in enumerate(tracks):
-                if t.filepath == fp and r < page.table.rowCount():
-                    item = page.table.item(r, 1)  # 1 = C_TIT
-                    pm28 = _cover_cache.get((fp, 28))
-                    if item and pm28:
-                        item.setIcon(QIcon(pm28))
-                    break
-        if self._ctrlbar and self._ctrlbar._cur_track:
-            if self._ctrlbar._cur_track.filepath == fp:
-                pm64 = _cover_cache.get((fp, 64))
-                if pm64 and self._ctrlbar._cover_lbl.isVisible():
-                    self._ctrlbar._cover_lbl.setPixmap(pm64)
 
 
 

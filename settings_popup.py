@@ -7,8 +7,8 @@ from player import Player
 from eq import TouchComboBox
 from constants import ACC, RAD_PCT, _r, apply_theme, apply_system_qt_theme
 import constants as _c   # live module reference — paintEvent/refresh_theme read _c.ACC etc.
-import re as _re
 from widgets_base import ToggleSwitch, TriSwitch, JumpSlider, SliderRow, _SpinningOverlay
+from alsa import probe_alsa_devices
 
 class SettingsPopup(QFrame):
     viz_toggled    = pyqtSignal(bool)
@@ -31,24 +31,26 @@ class SettingsPopup(QFrame):
     lyric_fetch_action  = pyqtSignal()   # emitted when user clicks "Fetch Lyrics" button
     tag_fetch_toggled    = pyqtSignal()   # emitted when user clicks "Fetch Tags" button
     rename_toggled       = pyqtSignal()   # emitted when user clicks "Rename…" button
+    gain_fetch_action    = pyqtSignal()   # emitted when user clicks "Fetch Gain" button
     view_mode_changed    = pyqtSignal(str)   # 'classic' | 'gallery_z' | 'gallery_s'
     list_scale_changed   = pyqtSignal(int)   # row height px
     gallery_scale_changed = pyqtSignal(int)  # card size px
     viz_type_changed     = pyqtSignal(str)   # 'bars' | 'line'
     radius_changed       = pyqtSignal(int)   # 0..100 corner-radius percentage
     output_device_changed = pyqtSignal(str)  # 'pipewire' | 'plughw:X,Y'
+    adaptive_rate_toggled = pyqtSignal(bool)  # PipeWire adaptive sample-rate opt-in
+    bg_opt_toggled        = pyqtSignal(bool)  # True = throttle viz/polling while unfocused
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('settings_popup')
-        # Child widget (no top-level flags) — works on Wayland with move()
+        # A child widget, not a top-level one, so move() works on Wayland
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAutoFillBackground(True)
         self.hide()  # start hidden
-        # Timestamp of last outside-click hide; used to suppress the toggle
-        # that fires on the same click (avoids the "double-tap to open" bug).
+        # When the last outside click hid the popup, so the button's own toggle
+        # from that same click does not reopen it.
         self._hide_timestamp_ms: int = 0
-        # Close when user clicks outside the popup
         QApplication.instance().installEventFilter(self)
 
 
@@ -61,20 +63,18 @@ class SettingsPopup(QFrame):
         hdr.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(hdr)
 
-        # Full-width divider below title
         title_div = QFrame(); title_div.setFixedHeight(1)
         title_div.setStyleSheet(f'background:{_c.BORD}; margin:0;')
         root.addWidget(title_div)
         self._themed_dividers = []   # populated by _hdivider()/_vdivider() below
         self._section_lbls   = []   # populated by _section() below
 
-        # Two-column body
         columns = QHBoxLayout()
         columns.setSpacing(12)
         columns.setAlignment(Qt.AlignmentFlag.AlignTop)
         root.addLayout(columns)
 
-        # Collect dividers and section labels so refresh_theme() can re-colour them
+        # Collected so refresh_theme() can re-colour them
         def _vdivider():
             d = QFrame()
             d.setFrameShape(QFrame.Shape.VLine)
@@ -164,8 +164,12 @@ class SettingsPopup(QFrame):
         self._gallery_scale_row.valueChanged.connect(self.gallery_scale_changed)
         left.addWidget(self._gallery_scale_row)
 
-        # Accent + theme + cover row
-        acc_row = QHBoxLayout(); acc_row.setSpacing(10)
+        # Accent + theme + cover row. Four controls (swatch, DARK/LIGHT, SYS and
+        # the cover TriSwitch) ask for more than the left column's ~300px at the
+        # usual 10px spacing, and the shortfall used to make the SYS switch
+        # overlap and cut off the 'LIGHT' label — hence the tight spacing and
+        # the reduced label gap on the two switches below.
+        acc_row = QHBoxLayout(); acc_row.setSpacing(4)
         acc_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._accent_color = ACC
         self._accent_btn = QPushButton()
@@ -178,14 +182,14 @@ class SettingsPopup(QFrame):
             f'  padding:0;'
             f'}}')
         self._accent_btn.clicked.connect(self._pick_accent)
-        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True, label_point_size=7)
+        self._theme_sw = ToggleSwitch('DARK', 'LIGHT', self, muted_labels=True,
+                                      label_point_size=7, pad=3, track_w=36)
         self._theme_sw.setChecked(False)
         self._theme_sw.toggled.connect(self._on_theme_toggle)
-        # System Qt theme: when on, colors are sampled from the desktop's
-        # live Qt palette (via qt6ct / xdg-desktop-portal) instead of
-        # VoidPulse's built-in DARK/LIGHT palettes. DE-agnostic — works
-        # under any Qt-aware desktop, not just KDE/Plasma.
-        self._system_theme_sw = ToggleSwitch('', 'SYS', self, muted_labels=True, label_point_size=7)
+        # When on, colours come from the desktop's live Qt palette instead of the
+        # built-in dark/light ones. Works under any Qt-aware desktop.
+        self._system_theme_sw = ToggleSwitch('', 'SYS', self, muted_labels=True,
+                                             label_point_size=7, pad=3, track_w=36)
         self._system_theme_sw.setChecked(False)
         self._system_theme_sw.toggled.connect(self._on_system_theme_toggle)
         self._system_theme_sw.setToolTip(
@@ -194,7 +198,7 @@ class SettingsPopup(QFrame):
             '(KDE Plasma, GNOME, etc.) — updates automatically if you change\n'
             'the system color scheme while VoidPulse is running.'
         )
-        # 3-position cover switch: 0=no cover · 1=cover · 2=cover+accent
+        # 0 = no cover, 1 = cover, 2 = cover recoloured to the accent
         self._cover_tri = TriSwitch(self)
         self._cover_tri.setState(1)   # default: cover on, no accent
         self._cover_tri.stateChanged.connect(self._on_cover_tri_changed)
@@ -208,8 +212,8 @@ class SettingsPopup(QFrame):
         self._radius_row.valueChanged.connect(self.radius_changed)
         left.addWidget(self._radius_row)
 
-        # ── AUDIO INFO (format / EQ / device) ────────────────────────────────
-        # Labels are refreshed via update_audio_info() called from ControlBar.
+        # ── AUDIO INFO ───────────────────────────────────────────────────────
+        # ControlBar._refresh_audio_info() fills these in.
         left.addWidget(_hdivider())
         left.addWidget(_section('AUDIO INFO'))
 
@@ -229,7 +233,6 @@ class SettingsPopup(QFrame):
 
         self._info_fmt, _ = _info_row('Format')
 
-        # DSP + Stereo Exp on one row, no DSP label
         _dsp_stereo_row = QHBoxLayout(); _dsp_stereo_row.setSpacing(4)
         _dsp_stereo_row.setContentsMargins(0, 0, 0, 0)
         self._info_eq = QLabel('—'); self._info_eq.setObjectName('setting_lbl')
@@ -242,7 +245,6 @@ class SettingsPopup(QFrame):
 
         self._info_dev, _ = _info_row('Device')
 
-        # Vertical separator
         columns.addWidget(_vdivider())
 
         # ── RIGHT COLUMN: VISUALIZATION + FETCH + VOLUME ─────────────────────
@@ -254,14 +256,31 @@ class SettingsPopup(QFrame):
         # VISUALIZATION section
         right.addWidget(_section('VISUALIZATION'))
 
-        viz_sw_row = QHBoxLayout(); viz_sw_row.setSpacing(16)
+        # Same squeeze as the accent row on the left: at 16px spacing these three
+        # switches ask for ~314px of a ~295px column, which ran 'Bck. Opt.' off
+        # the popup's right edge.
+        viz_sw_row = QHBoxLayout(); viz_sw_row.setSpacing(8)
         viz_sw_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self._viz_sw = ToggleSwitch('VIZ', self)
-        self._log_sw = ToggleSwitch('LIN', 'LOG', self, muted_labels=True)
+        self._viz_sw = ToggleSwitch('VIZ', self, pad=4)
+        self._log_sw = ToggleSwitch('LIN', 'LOG', self, muted_labels=True, pad=4)
+        # Abbreviated so the third switch fits beside VIZ and LIN/LOG without
+        # widening the popup. The tooltip carries the full name.
+        self._bg_opt_sw = ToggleSwitch('Bck. Opt.', self, pad=4)
+        self._bg_opt_sw.setToolTip(
+            'Background optimizations.\n\n'
+            'On (default): while the window is unfocused the visualizer and\n'
+            'lyrics highlighting pause and position polling drops to 1 s, so an\n'
+            'idle VoidPulse costs almost no CPU.\n\n'
+            'Off: everything keeps running in the background — useful when the\n'
+            'visualizer is captured by another app or shown on a second screen.'
+        )
         self._viz_sw.setChecked(True); self._log_sw.setChecked(True)
+        self._bg_opt_sw.setChecked(True)
         self._viz_sw.toggled.connect(self.viz_toggled)
         self._log_sw.toggled.connect(self.log_toggled)
+        self._bg_opt_sw.toggled.connect(self.bg_opt_toggled)
         viz_sw_row.addWidget(self._viz_sw); viz_sw_row.addWidget(self._log_sw)
+        viz_sw_row.addWidget(self._bg_opt_sw)
         right.addLayout(viz_sw_row)
 
         viz_type_row = QHBoxLayout(); viz_type_row.setSpacing(8)
@@ -313,19 +332,29 @@ class SettingsPopup(QFrame):
         self._btn_fetch_covers = QPushButton('Covers')
         self._btn_fetch_lyrics = QPushButton('Lyrics')
         self._btn_fetch_tags   = QPushButton('Tags')
+        self._btn_fetch_gain   = QPushButton('Gain')
         self._btn_rename       = QPushButton('Rename')
         for b in (self._btn_fetch_covers, self._btn_fetch_lyrics,
-                  self._btn_fetch_tags, self._btn_rename):
+                  self._btn_fetch_tags, self._btn_fetch_gain, self._btn_rename):
             b.setMinimumHeight(22); b.setMaximumHeight(26)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            b.setStyleSheet('font-size:10px; padding:1px 3px;')
+            # The global QPushButton rule sets min-height:36px, which beats
+            # setMinimumHeight()/setMaximumHeight() unless a per-instance
+            # stylesheet restates the size — so restate it. The radius is
+            # computed from this button's own 26px height rather than
+            # inheriting r_btn, which is calibrated for 36px buttons.
+            b.setStyleSheet(
+                f'font-size:10px; padding:1px 3px; min-height:22px; max-height:26px;'
+                f' border-radius:{_r(13)}px;')
         self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
         self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
         self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
+        self._btn_fetch_gain.clicked.connect(self.gain_fetch_action)
         self._btn_rename.clicked.connect(self.rename_toggled)
         action_row.addWidget(self._btn_fetch_covers)
         action_row.addWidget(self._btn_fetch_lyrics)
         action_row.addWidget(self._btn_fetch_tags)
+        action_row.addWidget(self._btn_fetch_gain)
         action_row.addWidget(self._btn_rename)
         right.addLayout(action_row)
 
@@ -348,7 +377,6 @@ class SettingsPopup(QFrame):
 
         # ── AUDIO OUTPUT (bottom of right column) ────────────────────────────
         right.addWidget(_hdivider())
-        right.addWidget(_section('AUDIO OUTPUT'))
 
         out_row = QHBoxLayout(); out_row.setSpacing(8)
         out_lbl = QLabel('Device'); out_lbl.setObjectName('setting_lbl')
@@ -356,13 +384,13 @@ class SettingsPopup(QFrame):
         out_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._out_dev_combo = TouchComboBox()
         self._out_dev_combo.setStyleSheet(self._viz_combo_ss())
-        # Block signals while populating so addItem never triggers the change slot.
+        # Signals blocked so addItem never fires the change handler
         self._out_dev_combo.blockSignals(True)
-        # First item: show the current software sink (PulseAudio or PipeWire)
+        # First entry is the software sink, whichever one was detected
         _sw_sink = Player._OUTS[0] if Player._OUTS else 'autoaudiosink'
         _sw_label = {'pulsesink': 'PulseAudio', 'pipewiresink': 'PipeWire'}.get(_sw_sink, _sw_sink)
         self._out_dev_combo.addItem(_sw_label, userData='pipewire')
-        for _card_name, _card_id in SettingsPopup._probe_alsa_devices():
+        for _card_name, _card_id in probe_alsa_devices():
             self._out_dev_combo.addItem(_card_name, userData=_card_id)
         self._out_dev_combo.blockSignals(False)
         def _on_out_dev_changed(_):
@@ -372,45 +400,34 @@ class SettingsPopup(QFrame):
             self.output_device_changed.emit(dev_id)
         self._out_dev_combo.currentIndexChanged.connect(_on_out_dev_changed)
         out_row.addWidget(out_lbl)
-        out_row.addWidget(self._out_dev_combo, 1)   # stretch=1: fills full column width
+        out_row.addWidget(self._out_dev_combo, 1)
         right.addLayout(out_row)
+        right.addSpacing(10)
 
-        self.setFixedWidth(580)
+        adaptive_row = QHBoxLayout(); adaptive_row.setSpacing(8)
+        adaptive_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._adaptive_sw = ToggleSwitch('Adaptive Sample Rate', self)
+        self._adaptive_sw.setChecked(False)   # off by default — explicit opt-in
+        self._adaptive_sw.setToolTip(
+            "Lets PipeWire switch its whole audio graph to match a device's "
+            "native sample rate (e.g. 44.1 kHz) instead of always running at "
+            "48 kHz, so VoidPulse's resampler can do the full conversion in "
+            "one pass. Affects ALL apps sharing PipeWire, not just VoidPulse. "
+            "Writes ~/.config/pipewire/pipewire.conf.d/99-voidpulse-adaptive-rate.conf "
+            "— requires restarting PipeWire/WirePlumber (or logging out and "
+            "back in) to take effect.")
+        self._adaptive_sw.toggled.connect(self.adaptive_rate_toggled)
+        adaptive_row.addWidget(self._adaptive_sw)
+        right.addLayout(adaptive_row)
+
+        # Narrower than this clips the accent row's TriSwitch and the Type combo
+        self.setFixedWidth(640)
         self.adjustSize()
 
 
-    @staticmethod
-    def _probe_alsa_devices() -> list:
-        """Return list of (display_name, device_id) tuples for available ALSA PCM
-        playback devices.  Parses 'aplay -l' output which works reliably across
-        all kernel drivers (sof-hda-dsp, USB audio, etc.) regardless of
-        /proc/asound/card*/pcm*p directory naming conventions."""
-        devices = []
-        seen = set()
-        try:
-            out = subprocess.check_output(
-                ['aplay', '-l'], stderr=subprocess.DEVNULL, text=True)
-            # Match lines like: card 1: SIMGOT [SIMGOT], device 0: USB Audio [USB Audio]
-            for m in _re.finditer(
-                    r'^card\s+(\d+):\s+(\S+)\s+\[([^\]]+)\],\s*device\s+(\d+):',
-                    out, _re.MULTILINE):
-                # m.group(1) is the numeric card index — not used; key uses string card_id
-                card_id   = m.group(2).strip()
-                card_name = m.group(3).strip()
-                dev_num   = m.group(4)
-                key = (card_id, dev_num)
-                if key in seen:
-                    continue
-                seen.add(key)
-                label = f'{card_name}'[:32]
-                devices.append((f'ALSA: {label}', f'plughw:{card_id},{dev_num}'))
-        except Exception:
-            pass
-        return devices
-
     def output_device(self) -> str:
         """Return currently selected output device id: 'pipewire' or 'plughw:X,Y'."""
-        return self._out_dev_combo.currentData() or 'pipewire'  # 'pipewire' = software sink sentinel
+        return self._out_dev_combo.currentData() or 'pipewire'
 
     def set_output_device(self, device_id: str):
         """Set combobox to the given device_id without emitting the signal."""
@@ -419,20 +436,27 @@ class SettingsPopup(QFrame):
         if idx >= 0:
             self._out_dev_combo.setCurrentIndex(idx)
         else:
-            # Saved device no longer present — stay on PipeWire
+            # The saved device is gone — fall back to the software sink
             self._out_dev_combo.setCurrentIndex(0)
         self._out_dev_combo.blockSignals(False)
+
+    def adaptive_rate_enabled(self) -> bool:
+        return self._adaptive_sw.isChecked()
+
+    def set_adaptive_rate_enabled(self, on: bool):
+        """Set the toggle without emitting the signal (config restore)."""
+        self._adaptive_sw.blockSignals(True)
+        self._adaptive_sw.setChecked(on)
+        self._adaptive_sw.blockSignals(False)
 
     def _on_theme_toggle(self, light: bool):
         """Switch between dark (light=False) and light (light=True) themes."""
         apply_theme(dark=not light)
         win = self.window()
         if win and hasattr(win, '_refresh_all_theme_widgets'):
-            # Create overlay, place over window, start async refresh
             overlay = _SpinningOverlay(win)
             overlay.show(); overlay.raise_()
-            # Defer work until after the overlay's first paint so it is
-            # visible before the (blocking) stylesheet refresh begins.
+            # Deferred so the overlay paints before the blocking refresh starts
             QTimer.singleShot(32, lambda: win._refresh_all_theme_widgets(_overlay=overlay))
         self.repaint()
 
@@ -469,11 +493,9 @@ class SettingsPopup(QFrame):
         acc_on   = state == 2
         win = self.window()
         if win and hasattr(win, '_on_cover_toggle_with_overlay'):
-            # Update ctrlbar cover label directly without emitting cover_on_changed —
-            # the overlay path (_on_cover_toggle_with_overlay) will update the library
-            # and playlists.  Emitting cover_toggled would cascade to _on_cover_toggle
-            # (via signal slot) which emits cover_on_changed → MainWindow._on_cover_toggle,
-            # double-updating every playlist before the overlay path runs.
+            # The overlay path updates the library and playlists itself, so the
+            # ctrlbar label is set directly here; emitting cover_toggled would
+            # cascade into MainWindow and update every playlist twice.
             ctrlbar = getattr(win, '_ctrlbar', None)
             if ctrlbar is not None:
                 ctrlbar._on_cover_toggle(cover_on, _emit=False)
@@ -482,14 +504,13 @@ class SettingsPopup(QFrame):
             QTimer.singleShot(
                 32, lambda: win._on_cover_toggle_with_overlay(cover_on, _overlay=overlay))
         else:
-            # No overlay — emit signal so all handlers (including MainWindow) fire.
+            # No overlay available, so let the normal signal path handle it
             self.cover_toggled.emit(cover_on)
         self.cover_accent_toggled.emit(acc_on)
         self.repaint()
 
     def _pick_accent(self):
-        # Must hide the Popup window before showing QColorDialog;
-        # otherwise the Popup flag causes Qt to close the dialog immediately.
+        # Hidden first: with the popup still up, Qt closes the colour dialog at once
         saved_color = self._accent_color
         self.hide()
         dlg = QColorDialog(QColor(saved_color))
@@ -502,7 +523,7 @@ class SettingsPopup(QFrame):
                 self._accent_color = c.name()
                 self._accent_btn.setStyleSheet(
                     f'QPushButton#accent_swatch {{'
-                    f'  background:{self._accent_color}; border-radius:16px; border:2px solid #666;'
+                    f'  background:{self._accent_color}; border-radius:{_r(16)}px; border:2px solid #666;'
                     f'  min-width:32px; max-width:32px; min-height:32px; max-height:32px;'
                     f'  padding:0;'
                     f'}}')
@@ -513,11 +534,10 @@ class SettingsPopup(QFrame):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         cr = _r(11)   # respect global corner-radius percentage
-        # Fill background — read live module globals so dark/light + accent changes are reflected
+        # Read live from the module so theme and accent changes show up
         p.setBrush(QBrush(QColor(_c.BG)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(r, cr, cr)
-        # Accent border 3px
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(_c.ACC), 3.0))
         p.drawRoundedRect(r, cr, cr)
@@ -528,6 +548,7 @@ class SettingsPopup(QFrame):
     def inertia(self)    -> int: return self._inertia_row.value()
     def viz_on(self)     -> bool: return self._viz_sw.isChecked()
     def log_on(self)     -> bool: return self._log_sw.isChecked()
+    def bg_opt_on(self)  -> bool: return self._bg_opt_sw.isChecked()
 
     def set_volume(self, v): self._vol.setValue(v)
     def set_delay(self, v):  self._delay_row.setValue(v)
@@ -536,7 +557,6 @@ class SettingsPopup(QFrame):
     def set_brightness(self, v): self._bright_row.setValue(v)
     def cover_on(self) -> bool:        return self._cover_tri.state() >= 1
     def set_cover(self, v: bool):
-        # Preserve accent state when re-enabling cover
         if not v:
             self._cover_tri.setState(0)
         elif self._cover_tri.state() == 0:
@@ -560,6 +580,7 @@ class SettingsPopup(QFrame):
     def set_radius(self, v: int): self._radius_row.setValue(max(0, min(100, v)))
     def set_viz(self, v):    self._viz_sw.setChecked(v)
     def set_log(self, v):    self._log_sw.setChecked(v)
+    def set_bg_opt(self, v): self._bg_opt_sw.setChecked(v)
     def viz_type(self)   -> str:
         t = self._viz_type_combo.currentText()
         return ('bars' if t == 'Bars' else
@@ -622,35 +643,31 @@ class SettingsPopup(QFrame):
 
     @staticmethod
     def _viz_combo_ss() -> str:
-        # Read from live module globals so theme/accent changes are reflected immediately
+        # Reads the live module globals so theme and accent changes show up at
+        # once. The radius is restated to match the global QComboBox rule: a
+        # per-instance stylesheet that sets padding but not border-radius does
+        # not reliably inherit the global radius (see #eq_type_combo).
         return (f'QComboBox {{ background:{_c.BG3}; color:{_c.FG}; border:1px solid {_c.B2};'
-                f' border-radius:{_r(6)}px; padding:4px 8px; font-size:12px; }}'
+                f' border-radius:{_r(15)}px; padding:4px 8px; font-size:12px; }}'
                 f'QComboBox:hover {{ border-color:{_c.ACC}; }}'
                 f'QComboBox::drop-down {{ border:none; width:20px; }}'
                 f'QComboBox::down-arrow {{ color:{_c.FG2}; }}'
                 f'QComboBox QAbstractItemView {{ background:{_c.BG3}; color:{_c.FG};'
                 f' selection-background-color:{_c.SEL}; border:1px solid {_c.B2}; }}')
 
-    # Legacy static-call alias kept for code that calls SettingsPopup._viz_combo_ss()
-    # from outside — the method is now an instance-compatible staticmethod so no change
-    # in call-site syntax is needed.
-
     def refresh_theme(self):
         """Re-apply inline stylesheets that bake palette globals at construction time."""
         self._viz_type_combo.setStyleSheet(self._viz_combo_ss())
         self._out_dev_combo.setStyleSheet(self._viz_combo_ss())
-        # Refresh dividers (VLine and HLine both bake BORD at init)
         for d in self._themed_dividers:
             shape = d.frameShape()
             if shape == QFrame.Shape.VLine:
                 d.setStyleSheet(f'color:{_c.BORD};')
             else:
                 d.setStyleSheet(f'background:{_c.BORD}; margin:0;')
-        # Refresh section header labels (bake FG2 at init)
         for lbl in self._section_lbls:
             lbl.setStyleSheet(
                 f'color:{_c.FG2};font-size:9px;letter-spacing:2px;background:transparent;')
-        # Also refresh the accent swatch border colour
         self._accent_btn.setStyleSheet(
             f'QPushButton#accent_swatch {{'
             f'  background:{self._accent_color}; border-radius:{_r(16)}px; border:2px solid #666;'
@@ -665,15 +682,13 @@ class SettingsPopup(QFrame):
                 QApplication.activePopupWidget() is None and
                 obj is not self and
                 not (isinstance(obj, QWidget) and self.isAncestorOf(obj))):
-            # Do not close if a child QComboBox has its dropdown open —
-            # on touch the combo's popup may already be hidden before this event
-            # arrives (touch double-fire), but a freshly-opened combo stores its
-            # open timestamp; guard against that window so the settings stay visible.
+            # A combo box that just opened its dropdown must not close this popup.
+            # On touch the dropdown can already be hidden by the time this arrives,
+            # so the combo's open timestamp is what is checked.
             for combo in self.findChildren(QComboBox):
                 if hasattr(combo, '_popup_opened_ms'):
                     if QDateTime.currentMSecsSinceEpoch() - combo._popup_opened_ms < 600:
                         return False
-            # For child widget: map click to our coords
             try:
                 gpt = e.globalPosition().toPoint()
                 local = self.mapFromGlobal(gpt)
@@ -686,30 +701,28 @@ class SettingsPopup(QFrame):
         return False  # never swallow events
 
     def show_above(self, btn: QWidget):
-        # Position as a child widget inside the main window — works on Wayland
+        # Positioned inside the main window, which Wayland allows
         win = btn.window()
         if self.parent() is not win:
             self.setParent(win)
             self.setWindowFlags(Qt.WindowType.Widget)  # ensure child
-        # Restore any previously constrained height so adjustSize() gets a clean run
+        # Drop any height cap from a previous show before measuring
         self.setMaximumHeight(16777215)
         self.adjustSize()
         btn_in_win = btn.mapTo(win, QPoint(0, 0))
         x = btn_in_win.x() + btn.width()//2 - self.width()//2
-        # Available vertical space above and below the button
         space_above = btn_in_win.y() - 8
         space_below = win.height() - (btn_in_win.y() + btn.height()) - 8
         prefer_above = space_above >= self.height()
         available = space_above if prefer_above else space_below
         if self.height() > available:
-            # Constrain height so popup stays within the window; content scrolls
+            # Cap the height so the popup stays inside the window
             self.setMaximumHeight(max(80, available))
             self.adjustSize()
         if prefer_above:
             y = btn_in_win.y() - self.height() - 6
         else:
             y = btn_in_win.y() + btn.height() + 6
-        # clamp inside window
         x = max(4, min(x, win.width()  - self.width()  - 4))
         y = max(4, min(y, win.height() - self.height() - 4))
         self.move(x, y)
