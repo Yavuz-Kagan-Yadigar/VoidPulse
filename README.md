@@ -9,6 +9,7 @@ Advanced Music Player for OLED and Touchscreens on Linux
 If it does support same sample rate as file sets it and pipewire to it: File (44.1khz) -> Pipewire (44.1khz) -> Output Device (44.1khz). No resampling.
 If it doesn't support same sampel rate as file, it sets device to its max sample rate, then upsamples to it with builtin Soxr resampler (since upsampling results better than downsample) while settigns Pipewire to same sample rate as output device: File (44.1khz) --(Voidpulse Soxr resample)-> Pipewire (96khz) -> Output Device (96khz).
 - Limitter and Stereo Expander
+- Loudness normalization (Replay Gain) and batch gain fetcher for files that doesn't have gain tag.
 - OLED burn-in protection overlay with optional auto timer
 - Cover, lyrics and tag fetching and embedding to music files
 - Batch file rename 
@@ -23,8 +24,8 @@ If it doesn't support same sampel rate as file, it sets device to its max sample
 - MPRIS2 desktop environment integration
 - Basic tag and lyrics editing
 - M3u8 and folder playlist support
-- Visualization stops when overlay is active or focus lost to reduce CPU usage
-- Ability to use system window decorations or custom OLED friendly one with config
+- Visualization stops when overlay is active or focus lost to reduce CPU usage, togglable with Bck. Opt. switch.
+- Ability to use system window decorations or built-in OLED friendly one with config
   
 Dependencies (You can use packages from releases for ease of installation->):
 
