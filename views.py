@@ -987,8 +987,7 @@ class TrackTable(QTableWidget):
         for r in range(self.rowCount()):
             if r >= len(tracks): self.setRowHidden(r, True); continue
             t = tracks[r]
-            ok = (not q or q in t.title.lower() or q in t.artist.lower()
-                  or q in t.album.lower() or q in Path(t.filepath).name.lower())
+            ok = not q or q in t.search_key()
             self.setRowHidden(r, not ok)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1282,11 +1281,8 @@ class GalleryView(QWidget):
     def _apply_filter_and_layout(self):
         q = self._filter_query
         if q:
-            self._vis_idx = [
-                i for i, t in enumerate(self._tracks)
-                if (q in t.title.lower() or q in t.artist.lower()
-                    or q in t.album.lower()
-                    or q in Path(t.filepath).name.lower())]
+            self._vis_idx = [i for i, t in enumerate(self._tracks)
+                             if q in t.search_key()]
         else:
             self._vis_idx = list(range(len(self._tracks)))
         # Both lazy position maps belong to the old layout

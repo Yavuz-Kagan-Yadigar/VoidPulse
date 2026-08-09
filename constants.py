@@ -2,12 +2,15 @@
 """
 VoidPulse — constants, palette, theme helpers, and global stylesheet.
 """
+# Every other VoidPulse module does `from constants import *`, so the stdlib
+# names below are deliberate re-exports: they are what `math`, `Path`, `Gst`
+# etc. resolve to in those modules. A linter will report most of them as
+# unused here — do not "fix" that, it breaks all 26 importers. Only
+# underscore-prefixed aliases are private (star-import skips them).
 import sys, os, re, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
 from collections import OrderedDict
-import concurrent.futures as _cf
 import urllib.request as _urlreq
 
-import numpy as _np
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List

@@ -53,6 +53,7 @@ PKG_LABELS = {
     'deb':      'Deb',
     'rpm':      'RPM',
     'apk':      'Apk',
+    'pacman':   'Pacman',
     'source':   'Source checkout',
 }
 
@@ -143,6 +144,10 @@ def _owner_package(path: Path) -> Optional[str]:
         rc, out = _run(['apk', 'info', '--who-owns', p])
         if rc == 0 and 'voidpulse' in out.lower():
             return 'apk'
+    if shutil.which('pacman'):
+        rc, out = _run(['pacman', '-Qo', p])
+        if rc == 0 and 'voidpulse' in out.lower():
+            return 'pacman'
     return None
 
 
@@ -155,6 +160,8 @@ def _distro_guess() -> Optional[str]:
         return None
     if 'alpine' in rel:
         return 'apk'
+    if any(k in rel for k in ('arch', 'manjaro', 'endeavour')):
+        return 'pacman'
     if any(k in rel for k in ('debian', 'ubuntu', 'mint', 'pop')):
         return 'deb'
     if any(k in rel for k in ('fedora', 'rhel', 'centos', 'suse', 'mageia')):
@@ -224,7 +231,7 @@ def resolve_package() -> dict:
             # A record written by a dev run of the checkout must never pin a
             # later packaged install, which shares ~/.config with it.
             stale = True
-        if stored['type'] in ('deb', 'rpm', 'apk') and \
+        if stored['type'] in ('deb', 'rpm', 'apk', 'pacman') and \
                 not str(_module_dir()).startswith(('/usr/', '/opt/')):
             stale = True
         if not stale:
@@ -347,6 +354,10 @@ def classify_asset(name: str) -> Optional[tuple]:
         return ('rpm', m.group(1) if m else 'noarch')
     if name.endswith('.apk'):
         return ('apk', 'noarch')
+    if '.pkg.tar' in name:
+        # voidpulse-2.0.0-1-x86_64.pkg.tar.zst
+        m = re.search(r'-([A-Za-z0-9_]+)\.pkg\.tar', name)
+        return ('pacman', m.group(1) if m else 'any')
     return None
 
 
@@ -370,7 +381,7 @@ def matching_asset(release: dict, pkg: dict) -> Optional[dict]:
 def available_choices(release: dict) -> list:
     """[(label, asset)] for every package asset in the release, grouped by
     format in a stable order so the no-match list does not shuffle."""
-    order = ['flatpak', 'appimage', 'deb', 'rpm', 'apk']
+    order = ['flatpak', 'appimage', 'deb', 'rpm', 'pacman', 'apk']
     found = []
     for a in release.get('assets', []):
         c = classify_asset(a.get('name', ''))
@@ -560,99 +571,228 @@ def update_desktop_entry(pkg: dict, old_path: str, new_path: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Install
 # ══════════════════════════════════════════════════════════════════════════════
-def _privileged(cmd: list) -> list:
-    """Wrap a system-wide package command in pkexec when not already root."""
-    if os.geteuid() == 0:
-        return cmd
-    if shutil.which('pkexec'):
-        return ['pkexec'] + cmd
-    return cmd   # will fail with a permission error the caller reports
+def distro_ids() -> set:
+    """Everything /etc/os-release calls this system: ID plus ID_LIKE.
+
+    ID_LIKE is what makes derivatives work without a table of every distro —
+    Linux Mint says `ubuntu debian`, Manjaro says `arch`, Nobara says `fedora`.
+    """
+    ids = set()
+    try:
+        for line in Path('/etc/os-release').read_text(errors='ignore').splitlines():
+            k, _, v = line.partition('=')
+            if k in ('ID', 'ID_LIKE'):
+                ids.update(v.strip().strip('"\'').lower().split())
+    except Exception:
+        pass
+    return ids
 
 
-def install_asset(pkg: dict, file_path: str) -> tuple:
-    """Put the downloaded file in place. Returns (ok, message).
+def native_tool(pkg_type: str) -> tuple:
+    """(argv-prefix, tool name) for installing a `pkg_type` file on this system.
 
-    Runs on a worker thread — every branch is a blocking subprocess call, and
-    dpkg/rpm on a slow disk takes tens of seconds.
+    Picked from the distro rather than from the file extension alone: an .rpm
+    goes through dnf on Fedora and zypper on openSUSE, and those take different
+    flags for the same thing. Every command is non-interactive and accepts an
+    unsigned package, because the file was just downloaded from the project's
+    own release page and no repository signed it.
+    """
+    ids = distro_ids()
+    have = shutil.which
+
+    if pkg_type == 'rpm':
+        if have('dnf') and ('fedora' in ids or 'rhel' in ids or not have('zypper')):
+            return (['dnf', 'install', '-y', '--nogpgcheck'], 'dnf')
+        if have('zypper'):
+            return (['zypper', '--non-interactive', 'install',
+                     '--allow-unsigned-rpm'], 'zypper')
+        if have('dnf'):
+            return (['dnf', 'install', '-y', '--nogpgcheck'], 'dnf')
+        return (['rpm', '-Uvh', '--force', '--nosignature'], 'rpm')
+
+    if pkg_type == 'deb':
+        if have('apt-get'):
+            # A path argument is what tells apt-get to install a local file
+            # rather than look the name up in the repositories.
+            return (['apt-get', 'install', '-y', '--allow-downgrades',
+                     '--allow-unauthenticated'], 'apt-get')
+        return (['dpkg', '-i', '--force-confnew'], 'dpkg')
+
+    if pkg_type == 'pacman':
+        return (['pacman', '-U', '--noconfirm'], 'pacman')
+
+    if pkg_type == 'apk':
+        return (['apk', 'add', '--allow-untrusted'], 'apk')
+
+    return ([], '')
+
+
+def install_plan(pkg: dict, file_path: str) -> dict:
+    """How this file gets installed, resolved before anything is run.
+
+    Returned up front so the popup can tell the user which tool is about to run
+    and whether it will need a password, instead of surprising them with an
+    authentication prompt halfway through.
     """
     fp = str(file_path)
+    t = pkg['type']
 
-    if pkg['type'] == 'appimage':
-        old = pkg.get('path', '')
+    if t == 'appimage':
+        return {'kind': 'appimage', 'cmd': [], 'sudo': False, 'tool': 'file swap',
+                'why': 'Replacing the AppImage in place'}
+
+    if t == 'flatpak':
+        # A --user install needs no privileges at all, and --reinstall is what
+        # upgrades an already-installed ref from a bundle; a plain install
+        # would abort with "already installed".
+        return {'kind': 'cmd',
+                'cmd': list(host_cmd('flatpak', 'install', '--user', '-y',
+                                     '--reinstall', fp)),
+                'sudo': False, 'tool': 'flatpak',
+                'why': 'Installing the bundle into your user flatpak install'}
+
+    prefix, tool = native_tool(t)
+    if not prefix:
+        return {'kind': 'unsupported', 'cmd': [], 'sudo': False, 'tool': '',
+                'why': f'{PKG_LABELS.get(t, t)} installs cannot be updated automatically.'}
+    if not shutil.which(prefix[0]):
+        return {'kind': 'unsupported', 'cmd': [], 'sudo': False, 'tool': tool,
+                'why': f'{tool} is not installed on this system.'}
+
+    return {'kind': 'cmd', 'cmd': prefix + [fp], 'sudo': os.geteuid() != 0,
+            'tool': tool, 'why': f'Installing with {tool}'}
+
+
+# Marker the popup matches on to decide whether the password field is worth
+# reopening; kept in one place so the two ends cannot drift apart.
+_PW_REJECTED = 'The password was not accepted'
+
+
+def _sudo_wrap(cmd: list) -> list:
+    """sudo reading the password from stdin, with its own prompt suppressed.
+
+    -S sends the prompt to stderr and reads the password from stdin; -p ''
+    silences it, because the popup already asked. Without -S sudo would try to
+    open the terminal it does not have and fail outright.
+    """
+    return ['sudo', '-S', '-p', ''] + cmd
+
+
+def swap_appimage(pkg: dict, fp: str, log) -> tuple:
+    """Replace the running AppImage with the downloaded one."""
+    old = pkg.get('path', '')
+    try:
+        os.chmod(fp, 0o755)
+        log(f'Marked executable: {Path(fp).name}')
+    except Exception as exc:
+        return False, f'Could not make the AppImage executable: {exc}'
+    # The old file is still mounted by the running process; unlinking it is
+    # safe on Linux because the FUSE mount holds the inode open.
+    if old and os.path.realpath(old) != os.path.realpath(fp):
         try:
-            os.chmod(fp, 0o755)
+            Path(old).unlink(missing_ok=True)
+            log(f'Removed the old AppImage: {Path(old).name}')
         except Exception as exc:
-            return False, f'Could not make the AppImage executable: {exc}'
-        # The old file is still mounted by the running process; unlinking it is
-        # safe on Linux because the FUSE mount holds the inode open.
-        if old and os.path.realpath(old) != os.path.realpath(fp):
-            try:
-                Path(old).unlink(missing_ok=True)
-            except Exception as exc:
-                _log('old AppImage not removed:', exc)
-        msg = update_desktop_entry(pkg, old, fp)
-        pkg['path'] = fp
-        st = _load_state()
-        st['package'] = pkg
-        _save_state(st)
-        return True, msg
-
-    if pkg['type'] == 'flatpak':
-        # --reinstall is what upgrades an already-installed ref from a bundle;
-        # a plain install would abort with "already installed".
-        rc, out = _run(host_cmd('flatpak', 'install', '--user', '-y',
-                                '--reinstall', fp), timeout=1800)
-        if rc != 0:
-            return False, f'flatpak install failed:\n{out.strip()[-400:]}'
-        return True, update_desktop_entry(pkg, '', fp)
-
-    if pkg['type'] == 'deb':
-        if shutil.which('apt'):
-            cmd = _privileged(['apt', 'install', '-y', '--allow-downgrades', fp])
-        else:
-            cmd = _privileged(['dpkg', '-i', fp])
-        rc, out = _run(cmd, timeout=1800)
-        if rc != 0:
-            return False, f'Package install failed:\n{out.strip()[-400:]}'
-        return True, update_desktop_entry(pkg, '', fp)
-
-    if pkg['type'] == 'rpm':
-        if shutil.which('dnf'):
-            cmd = _privileged(['dnf', 'install', '-y', '--allowerasing', fp])
-        elif shutil.which('zypper'):
-            cmd = _privileged(['zypper', '--non-interactive', 'install', '--allow-unsigned-rpm', fp])
-        else:
-            cmd = _privileged(['rpm', '-Uvh', '--force', fp])
-        rc, out = _run(cmd, timeout=1800)
-        if rc != 0:
-            return False, f'Package install failed:\n{out.strip()[-400:]}'
-        return True, update_desktop_entry(pkg, '', fp)
-
-    if pkg['type'] == 'apk':
-        rc, out = _run(_privileged(['apk', 'add', '--allow-untrusted', fp]), timeout=1800)
-        if rc != 0:
-            return False, f'Package install failed:\n{out.strip()[-400:]}'
-        return True, update_desktop_entry(pkg, '', fp)
-
-    return False, f'{PKG_LABELS.get(pkg["type"], pkg["type"])} installs cannot be updated automatically.'
+            log(f'Could not remove the old AppImage: {exc}')
+    pkg['path'] = fp
+    st = _load_state()
+    st['package'] = pkg
+    _save_state(st)
+    return True, 'AppImage replaced.'
 
 
 class _Installer(QThread):
-    """install_asset on a worker thread so pkexec/dpkg never freeze the UI."""
+    """Runs the install plan, streaming every line it produces to the popup.
 
+    The command is not captured and reported at the end: dnf/zypper/apt take
+    tens of seconds and a frozen dialog with no output looks like a hang, so
+    stdout and stderr are merged and emitted line by line as they arrive.
+    """
+
+    log  = pyqtSignal(str)
     done = pyqtSignal(bool, str)
 
-    def __init__(self, pkg: dict, path: str, parent=None):
+    def __init__(self, pkg: dict, path: str, plan: dict,
+                 password: str = '', parent=None):
         super().__init__(parent)
         self._pkg  = pkg
-        self._path = path
+        self._path = str(path)
+        self._plan = plan
+        self._pw   = password
 
     def run(self):
         try:
-            ok, msg = install_asset(self._pkg, self._path)
+            ok, msg = self._work()
         except Exception as exc:
             ok, msg = False, f'Install failed: {exc}'
         self.done.emit(ok, msg)
+
+    def _work(self) -> tuple:
+        plan = self._plan
+        if plan['kind'] == 'unsupported':
+            return False, plan['why']
+
+        if plan['kind'] == 'appimage':
+            self.log.emit(plan['why'] + '…')
+            # Captured before the swap: rewriting the desktop entry needs the
+            # path that is about to stop existing.
+            old = self._pkg.get('path', '')
+            ok, msg = swap_appimage(self._pkg, self._path, self.log.emit)
+            if not ok:
+                return False, msg
+            self.log.emit(msg)
+            return self._finish_desktop(old)
+
+        cmd = _sudo_wrap(plan['cmd']) if plan['sudo'] else list(plan['cmd'])
+        self.log.emit(plan['why'] + '…')
+        self.log.emit('$ ' + ' '.join(
+            ('sudo' if c == 'sudo' else c) for c in cmd if c not in ('-S', '-p', '')))
+
+        rc, tail = self._stream(cmd)
+        if rc != 0:
+            # The password case leads, because it is the one failure the user
+            # can fix from this dialog — _on_installed reopens the field for it.
+            if plan['sudo'] and any(
+                    k in tail.lower() for k in ('incorrect password', 'sorry, try again',
+                                                'authentication failure',
+                                                'no password was provided')):
+                return False, (f'{_PW_REJECTED} — {plan["tool"]} did not run.'
+                               f'\n\n{tail}')
+            return False, f'{plan["tool"]} exited with code {rc}.\n\n{tail}'
+        return self._finish_desktop()
+
+    def _stream(self, cmd: list) -> tuple:
+        """Run `cmd`, emitting each output line. Returns (rc, last lines)."""
+        env = dict(os.environ, DEBIAN_FRONTEND='noninteractive', LC_ALL='C')
+        p = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+        try:
+            if self._pw:
+                p.stdin.write(self._pw + '\n')
+                p.stdin.flush()
+        except Exception:
+            pass                      # command may not read stdin at all
+        try:
+            p.stdin.close()
+        except Exception:
+            pass
+
+        tail = []
+        for line in p.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            tail.append(line)
+            del tail[:-14]            # only the end is worth reporting on failure
+            self.log.emit(line)
+        return p.wait(), '\n'.join(tail)
+
+    def _finish_desktop(self, old_path: str = '') -> tuple:
+        self.log.emit('Updating the desktop entry…')
+        msg = update_desktop_entry(self._pkg, old_path, self._path)
+        self.log.emit(msg)
+        return True, msg
 
 
 def relaunch(pkg: dict) -> None:
@@ -705,6 +845,8 @@ class UpdatePopup(QFrame):
         self._worker  = None
         self._overlay = None
         self._save_to = None     # set when downloading a non-matching format
+        self._plan    = None     # resolved install plan, once the file is down
+        self._dl_path = ''
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 18)
@@ -775,6 +917,45 @@ class UpdatePopup(QFrame):
             self._body.setWidget(inner)
             root.addWidget(self._body)
 
+        # ── Live log, shown in place of the body once work starts ─────────────
+        # Every step the updater takes is written here, including the exact
+        # command and the package manager's own output, so a failure is visible
+        # rather than collapsed into "install failed".
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setFrameShape(QFrame.Shape.NoFrame)
+        self._log_view.setFixedHeight(190)
+        self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._log_view.hide()
+        root.addWidget(self._log_view)
+
+        # ── Password row, shown only when the plan needs sudo ─────────────────
+        self._pw_row = QWidget()
+        pwl = QVBoxLayout(self._pw_row)
+        pwl.setContentsMargins(0, 0, 0, 0)
+        pwl.setSpacing(6)
+        self._pw_lbl = QLabel()
+        self._pw_lbl.setWordWrap(True)
+        pwl.addWidget(self._pw_lbl)
+        pw_in = QHBoxLayout()
+        pw_in.setSpacing(8)
+        self._pw_edit = QLineEdit()
+        self._pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw_edit.setPlaceholderText('Password')
+        self._pw_edit.returnPressed.connect(self._submit_password)
+        self._btn_pw_ok = QPushButton('Install')
+        self._btn_pw_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_pw_ok.clicked.connect(self._submit_password)
+        self._btn_pw_cancel = QPushButton('Cancel')
+        self._btn_pw_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_pw_cancel.clicked.connect(self._dismiss)
+        pw_in.addWidget(self._pw_edit, 1)
+        pw_in.addWidget(self._btn_pw_ok, 0)
+        pw_in.addWidget(self._btn_pw_cancel, 0)
+        pwl.addLayout(pw_in)
+        self._pw_row.hide()
+        root.addWidget(self._pw_row)
+
         # ── Progress row, hidden until something is running ───────────────────
         self._prog_row = QWidget()
         pr = QHBoxLayout(self._prog_row)
@@ -844,6 +1025,17 @@ class UpdatePopup(QFrame):
             f'  border:1px solid {_c.BORD}; border-radius:{_r(8)}px;'
             f'  font-size:11px; padding:8px; }}'
             f'QWidget {{ background:transparent; }}')
+        self._log_view.setStyleSheet(
+            f'QPlainTextEdit {{ background:{_c.BG2}; color:{_c.FG2};'
+            f'  border:1px solid {_c.BORD}; border-radius:{_r(8)}px;'
+            f'  font-family:monospace; font-size:10px; padding:8px; }}')
+        self._pw_lbl.setStyleSheet(
+            f'color:{_c.FG2}; font-size:11px; background:transparent;')
+        self._pw_edit.setStyleSheet(
+            f'QLineEdit {{ background:{_c.BG3}; color:{_c.FG};'
+            f'  border:1px solid {_c.B2}; border-radius:{_r(6)}px;'
+            f'  padding:5px 10px; font-size:11px; }}'
+            f'QLineEdit:focus {{ border-color:{_c.ACC}; }}')
         self._bar.setStyleSheet(
             f'QProgressBar {{ background:{_c.BG2}; color:{_c.FG};'
             f'  border:1px solid {_c.BORD}; border-radius:{_r(6)}px;'
@@ -862,7 +1054,9 @@ class UpdatePopup(QFrame):
                      f'QPushButton:hover {{ color:{_c.FG}; border-color:{_c.FG2}; }}')
         if self._btn_primary is not None:
             self._btn_primary.setStyleSheet(primary)
-        for b in (self._btn_skip, self._btn_skip_ver, self._btn_cancel):
+        self._btn_pw_ok.setStyleSheet(primary)
+        for b in (self._btn_skip, self._btn_skip_ver, self._btn_cancel,
+                  self._btn_pw_cancel):
             b.setStyleSheet(secondary)
         for b in getattr(self, '_choice_btns', []):
             b.setStyleSheet(secondary)
@@ -878,12 +1072,20 @@ class UpdatePopup(QFrame):
                   max(4, (p.height() - self.height()) // 2))
 
     def show_centered(self) -> None:
+        """Show above the scrim.
+
+        The scrim is a child of the main window, so the popup has to be one too:
+        parented any deeper — to the central widget, say — it sits *inside* a
+        sibling the scrim paints over, which both dims it and hands every click
+        to the scrim, whose job is to dismiss on an outside press. Same parent
+        plus raise_() puts it on top, where its buttons are reachable.
+        """
+        win = self.parent()
+        while win is not None and not isinstance(win, QMainWindow):
+            win = win.parent()
         try:
             from widgets_base import _ModalOverlay
-            win = self.parent()
-            while win is not None and not isinstance(win, QMainWindow):
-                win = win.parent()
-            if win is not None:
+            if win is not None and self.parent() is win:
                 self._overlay = _ModalOverlay(win, self, watch_hide=True)
                 self._overlay.show()
         except Exception as exc:
@@ -891,6 +1093,9 @@ class UpdatePopup(QFrame):
         self._reposition()
         self.show()
         self.raise_()
+        self.activateWindow()
+        if self._btn_primary is not None:
+            self._btn_primary.setFocus()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -908,9 +1113,23 @@ class UpdatePopup(QFrame):
             b.setEnabled(not on)
         self._reposition()
 
+    def _say(self, line: str) -> None:
+        """Append a line to the visible log, revealing it on the first call."""
+        if not self._log_view.isVisible():
+            self._body.hide()
+            self._log_view.show()
+        for part in str(line).splitlines() or ['']:
+            self._log_view.appendPlainText(part)
+        sb = self._log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def _start_update(self) -> None:
         """[Update] — fetch the matching asset, then hand it to the installer."""
         self._save_to = None
+        self._say(f'Package type: {PKG_LABELS.get(self._pkg["type"], self._pkg["type"])}'
+                  f' ({self._pkg["arch"]})')
+        self._say(f'Downloading {self._asset["name"]} '
+                  f'({_fmt_size(self._asset.get("size", 0))})…')
         self._begin_download(self._asset)
 
     def _download_only(self, asset: dict) -> None:
@@ -952,22 +1171,81 @@ class UpdatePopup(QFrame):
             self._finish(f'Saved to:\n{path}\n\nInstall it with your package '
                          f'manager to switch package type.')
             return
-        self._busy(True, 'Installing… (a password prompt may appear)')
-        self._worker = _Installer(self._pkg, path, self)
+
+        self._dl_path = path
+        self._say(f'Downloaded to {path}')
+
+        plan = install_plan(self._pkg, path)
+        self._plan = plan
+        if plan['kind'] == 'unsupported':
+            self._fail(plan['why'])
+            return
+
+        distro = ', '.join(sorted(distro_ids())) or 'unknown'
+        self._say(f'System: {distro}')
+        self._say(f'Installer: {plan["tool"]}')
+
+        if not plan['sudo']:
+            # flatpak --user and the AppImage swap both run as the user.
+            self._run_install('')
+            return
+
+        # Everything system-wide goes through sudo, and sudo needs the password
+        # on stdin because there is no terminal to prompt on. The offer buttons
+        # go away while it is up: pressing Update again here would start a
+        # second download on top of the one already waiting to install.
+        self._busy(False)
+        self._btn_row.hide()
+        self._pw_lbl.setText(
+            f'Installing with {plan["tool"]} needs administrator rights.\n'
+            f'Enter your password to continue.')
+        self._pw_row.show()
+        self._pw_edit.setFocus()
+        self._reposition()
+
+    def _submit_password(self) -> None:
+        pw = self._pw_edit.text()
+        if not pw:
+            self._pw_lbl.setText('Enter your password to continue.')
+            return
+        self._pw_edit.clear()
+        self._pw_row.hide()
+        self._run_install(pw)
+
+    def _run_install(self, password: str) -> None:
+        self._busy(True, f'Installing with {self._plan["tool"]}…')
+        self._btn_cancel.setEnabled(False)   # nothing safe to cancel mid-install
+        self._worker = _Installer(self._pkg, self._dl_path, self._plan,
+                                  password, self)
+        self._worker.log.connect(self._say)
         self._worker.done.connect(self._on_installed)
         self._worker.start()
 
     def _on_installed(self, ok: bool, msg: str) -> None:
         self._worker = None
+        self._btn_cancel.setEnabled(True)
         if not ok:
+            self._say('')
+            self._say('FAILED — ' + msg.splitlines()[0])
             self._fail(msg)
+            if msg.startswith(_PW_REJECTED):
+                # Recoverable in place: put the field back rather than making
+                # the user run the whole download again over a typo.
+                self._busy(False)
+                self._btn_row.hide()
+                self._pw_lbl.setText(f'{_PW_REJECTED}. Try again.')
+                self._pw_row.show()
+                self._pw_edit.setFocus()
+                self._reposition()
             return
+        self._say('')
+        self._say(f'VoidPulse v{self._new_ver} installed.')
         # The new version is live on disk; forget any skip for it.
         st = _load_state()
         st['skipped'] = [v for v in st.get('skipped', []) if v != self._new_ver]
         st['last_installed'] = self._new_ver
         _save_state(st)
-        self._finish(f'VoidPulse v{self._new_ver} installed.\n{msg}\n\n'
+        self._finish(f'VoidPulse v{self._new_ver} installed. '
                      f'Restart to run the new version.', restart=True)
 
     def _cancel(self) -> None:
@@ -980,16 +1258,22 @@ class UpdatePopup(QFrame):
             self._dismiss()
 
     def _fail(self, msg: str) -> None:
+        """Report a failure but keep the log on screen — it holds the cause."""
         self._worker = None
+        self._pw_row.hide()
         self._busy(False)
-        self._sub.setText(msg)
+        self._sub.setText(msg.splitlines()[0] if msg else 'Failed.')
         self._reposition()
 
     def _finish(self, msg: str, restart: bool = False) -> None:
         """Collapse to a result message with a Close (and maybe Restart) button."""
         self._busy(False)
+        self._pw_row.hide()
         self._sub.setText(msg)
-        self._body.hide()
+        # The log outlives the run when there is one; only the changelog and the
+        # download list are done with.
+        if not self._log_view.isVisible():
+            self._body.hide()
         if self._btn_primary is not None:
             self._btn_primary.setVisible(restart)
             if restart:
@@ -1070,8 +1354,10 @@ _active_popup   = None
 def _show(main_window, release, asset, cur_ver) -> None:
     global _active_popup
     try:
-        parent = main_window.centralWidget() or main_window
-        _active_popup = UpdatePopup(parent, resolve_package(), release, asset, cur_ver)
+        # Parented to the window itself, not the central widget: see
+        # UpdatePopup.show_centered for why the scrim demands it.
+        _active_popup = UpdatePopup(main_window, resolve_package(),
+                                    release, asset, cur_ver)
         _active_popup.show_centered()
     except Exception as exc:
         _log('popup failed:', exc)

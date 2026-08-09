@@ -28,7 +28,7 @@ jobs:
           manifest-path: "org.voidpulse.VoidPulse.yml"
           cache-key: "flatpak-builder-${{ github.sha }}"
           run-tests: false
-          # Bu action otomatik olarak artifact oluşturur (upload-artifact true varsayılan)
+          # This action uploads an artifact automatically (upload-artifact defaults to true)
 
       - name: Create GitHub Release and Upload Flatpak
         uses: softprops/action-gh-release@v2
