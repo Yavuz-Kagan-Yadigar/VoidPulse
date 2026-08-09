@@ -26,6 +26,8 @@
 #    RPM_TARGET_ARCH=aarch64                  → rpm target architecture
 #    APPIMAGE_TARGET_ARCH=aarch64             → appimage single target architecture
 #    APPIMAGE_ARCH_TARGETS="aarch64,armhf"   → appimage-multiarch targets
+#    GPG_KEY_ID=<key-id>                      → sign with this key instead of
+#                                               the first secret key found
 #
 #  openSUSE: the rpm target uses openSUSE package names automatically.
 #  Alpine  : the apk target is skipped automatically on non-Alpine systems.
@@ -117,8 +119,11 @@ fix_ownership() {
 
 
 # ── Helper: GPG key check and signing ────────────────────────────────────────
-# GPG_KEY_ID: if empty, signing is skipped (a warning is printed).
-GPG_KEY_ID=""
+# GPG_KEY_ID: if empty, setup_gpg falls back to the first secret key on the
+# system; if there is none either, signing is skipped with a warning.
+# The :- default is what lets the environment win — a bare GPG_KEY_ID=""
+# here would wipe the value the caller passed in before setup_gpg ever ran.
+GPG_KEY_ID="${GPG_KEY_ID:-}"
 
 setup_gpg() {
     # Take the key ID from the environment variable or ~/.rpmmacros
