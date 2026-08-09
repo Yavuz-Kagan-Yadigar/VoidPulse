@@ -9,8 +9,14 @@ Advanced Music Player for OLED and Touchscreens on Linux
 If it does support same sample rate as file sets it and pipewire to it: File (44.1khz) -> Pipewire (44.1khz) -> Output Device (44.1khz). No resampling.
 If it doesn't support same sampel rate as file, it sets device to its max sample rate, then upsamples to it with builtin Soxr resampler (since upsampling results better than downsample) while settigns Pipewire to same sample rate as output device: File (44.1khz) --(Voidpulse Soxr resample)-> Pipewire (96khz) -> Output Device (96khz).
 - Limitter and Stereo Expander
+- Crossfade between tracks, disabled on exclusive ALSA devices, where only one stream can hold the card.
+- Fade in / out , with viz animation
+- Sleep timer
+- Batch cover, lyrics and tag fetching from internet and embedding to music files
+- Network streaming (experimental): Samba/SMB, FTP, FTPS and SFTP, mounted and reconnected on startup. Passwords go to the system keyring for security.
+- Auto-update from Github, matching current package and arch.
 - OLED burn-in protection overlay with optional auto timer
-- Cover, lyrics and tag fetching and embedding to music files
+- Ability to use system window decorations or custom OLED friendly one with config
 - Batch file rename 
 - Local and fetched synced and plain lyrics support
 - Universal accent color and corner radius
@@ -23,14 +29,8 @@ If it doesn't support same sampel rate as file, it sets device to its max sample
 - MPRIS2 desktop environment integration
 - Basic tag and lyrics editing
 - M3u8 and folder playlist support
-- Network shares: Samba/SMB, FTP, FTPS and SFTP, mounted through GVfs and reconnected on startup. Passwords go to the system keyring, never to VoidPulse's config. Shares appear as ordinary folders, so scanning, tag reading and playback work unchanged.
-  Seeking works on all four, but not the same way. `smb://` and `sftp://` seek directly. `ftp://` and `ftps://` **cannot seek at all** — GVfs exposes them as sequential streams, at the FUSE layer and the GIO layer alike — so VoidPulse reads their tags through a seekable proxy (durations and the seek bar work), and the first time you seek within a track it fetches that track to disk, pauses for the transfer with progress in the status bar, and resumes at the point you asked for. Seeking is instant for the rest of that track, and nothing is fetched for a track you only listen to. VoidPulse probes each share on connect and picks the right path automatically.
-- Crossfade between tracks (0–12 s, 0 = off, equal-power). The outgoing track keeps playing while the next fades in, so it needs a mixing sink — it is skipped on exclusive ALSA hw devices, where only one stream can hold the card
-- Fade in / out (0–5 s, 0 = off) applied to every play and pause, including media keys, MPRIS and the sleep timer
-- Play queue panel next to the lyrics panel: drag tracks in from either the list or the gallery (or drop files from a file manager), or use "Add to Queue"; reorder by dragging or with the per-item ▲/▼ actions, remove with ✕. A non-empty queue takes over playback at the next track change, and the first play after launch starts from it
-- Sleep timer, 0 (off) to 6 hours in 5-minute steps, with a live countdown; fades out when it elapses
-- Visualization stops when overlay is active or focus lost to reduce CPU usage
-- Ability to use system window decorations or custom OLED friendly one with config
+- Toggleable playlist queue, with drag & drop.
+- Visualization stops on focus lost to reduce CPU usage, toggleable
   
 Dependencies (You can use packages from releases for ease of installation->):
 
