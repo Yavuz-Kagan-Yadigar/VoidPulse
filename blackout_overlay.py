@@ -2,7 +2,7 @@
 VoidPulse — BlackoutOverlay: full-screen OLED burn-in protection overlay.
 """
 from constants import *
-from eq import _fmt_ms, _np_to_qpolygonf
+from eq import _fmt_ms, _np_to_qpolygonf, _smooth_viz_corners
 from constants import ACC, BG3, OV_VIZ_H, RAD_PCT
 import numpy as _np
 
@@ -32,6 +32,10 @@ class BlackoutOverlay(QWidget):
         self._ov_lyrics = False
         self._ov_clock  = True   # show clock by default
         self._viz_data = None   # (VIZ_BANDS,) ndarray, None until the first frame
+        # Scratch for _smooth_viz_corners, sized on first use (matches the
+        # docked bar's smoothing so both viz surfaces round corners the same way)
+        self._ov_smooth_buf: object = None
+        self._ov_smooth_tmp: object = None
         self._lyr_prev = ''; self._lyr_cur = ''; self._lyr_next = ''
 
         # Container position in pixels, randomised on each fade cycle
@@ -326,6 +330,13 @@ class BlackoutOverlay(QWidget):
             _vtype = 'bars'
             if self._ctrlbar_ref is not None:
                 _vtype = getattr(self._ctrlbar_ref, '_viz_type', 'bars')
+
+            if _vtype != 'bars':
+                # Corner-only smoothing for the curve styles -- bars keeps vd raw.
+                if self._ov_smooth_buf is None or len(self._ov_smooth_buf) != n_v:
+                    self._ov_smooth_buf = _np.empty(n_v, dtype=vd.dtype)
+                    self._ov_smooth_tmp = _np.empty(n_v, dtype=vd.dtype)
+                vd = _smooth_viz_corners(vd, self._ov_smooth_buf, self._ov_smooth_tmp)
 
             if _vtype == 'fill':
                 fill_col = _acc_a90
