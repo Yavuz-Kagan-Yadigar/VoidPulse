@@ -40,6 +40,9 @@ class SettingsPopup(QFrame):
     output_device_changed = pyqtSignal(str)  # 'pipewire' | 'plughw:X,Y'
     adaptive_rate_toggled = pyqtSignal(bool)  # PipeWire adaptive sample-rate opt-in
     bg_opt_toggled        = pyqtSignal(bool)  # True = throttle viz/polling while unfocused
+    crossfade_changed     = pyqtSignal(int)   # track-change overlap, ms (0 = off)
+    fade_changed          = pyqtSignal(int)   # play/pause fade, ms (0 = off)
+    sleep_timer_changed   = pyqtSignal(int)   # minutes until playback stops (0 = off)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -245,6 +248,26 @@ class SettingsPopup(QFrame):
 
         self._info_dev, _ = _info_row('Device')
 
+        # Adaptive sample rate sits under AUDIO INFO rather than beside the
+        # output-device combo: it belongs to the same subject, and the left
+        # column has the spare height, so the popup stays shorter overall.
+        left.addSpacing(6)
+        adaptive_row = QHBoxLayout(); adaptive_row.setSpacing(8)
+        adaptive_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._adaptive_sw = ToggleSwitch('Adaptive Sample Rate', self)
+        self._adaptive_sw.setChecked(False)   # off by default — explicit opt-in
+        self._adaptive_sw.setToolTip(
+            "Lets PipeWire switch its whole audio graph to match a device's "
+            "native sample rate (e.g. 44.1 kHz) instead of always running at "
+            "48 kHz, so VoidPulse's resampler can do the full conversion in "
+            "one pass. Affects ALL apps sharing PipeWire, not just VoidPulse. "
+            "Writes ~/.config/pipewire/pipewire.conf.d/99-voidpulse-adaptive-rate.conf "
+            "— requires restarting PipeWire/WirePlumber (or logging out and "
+            "back in) to take effect.")
+        self._adaptive_sw.toggled.connect(self.adaptive_rate_toggled)
+        adaptive_row.addWidget(self._adaptive_sw)
+        left.addLayout(adaptive_row)
+
         columns.addWidget(_vdivider())
 
         # ── RIGHT COLUMN: VISUALIZATION + FETCH + VOLUME ─────────────────────
@@ -358,6 +381,46 @@ class SettingsPopup(QFrame):
         action_row.addWidget(self._btn_rename)
         right.addLayout(action_row)
 
+        # ── PLAYBACK section ─────────────────────────────────────────────────
+        right.addWidget(_hdivider())
+        right.addWidget(_section('PLAYBACK'))
+
+        self._crossfade_row = SliderRow('Crossfade', 0, 12000, 0, self._fmt_secs,
+                                        step=250, snap=True)
+        self._crossfade_row.setToolTip(
+            'Overlap between tracks. 0 disables it.\n\n'
+            'The outgoing track keeps playing while the next one fades in, so\n'
+            'both streams are open at once — which the audio server has to mix.\n'
+            'On an exclusive ALSA device (hw:/plughw:) only one stream can hold\n'
+            'the card, so crossfading is skipped there and tracks change cleanly.')
+        self._crossfade_row.valueChanged.connect(self.crossfade_changed)
+        right.addWidget(self._crossfade_row)
+
+        self._fade_row = SliderRow('Fade', 0, 5000, 0, self._fmt_ms_off,
+                                   step=100, snap=True)
+        self._fade_row.setToolTip(
+            'Fade-in and fade-out length applied to every play and pause,\n'
+            'including the sleep timer and media-key presses. 0 disables it.')
+        self._fade_row.valueChanged.connect(self.fade_changed)
+        right.addWidget(self._fade_row)
+
+        self._sleep_row = SliderRow('Sleep Timer', 0, 360, 0, self._fmt_sleep,
+                                    step=5, snap=True)
+        self._sleep_row.setToolTip(
+            'Stop playback after this long, in 5-minute steps up to 6 hours.\n'
+            '0 disables the timer. Moving the slider restarts the countdown.')
+        self._sleep_row.valueChanged.connect(self.sleep_timer_changed)
+        right.addWidget(self._sleep_row)
+
+        self._sleep_status = QLabel('')
+        self._sleep_status.setObjectName('setting_lbl')
+        self._sleep_status.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._sleep_status.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Hidden while the timer is off so it costs no height in the common case
+        self._sleep_status.setVisible(False)
+        right.addWidget(self._sleep_status)
+
         # VOLUME (bottom of right column)
         vol_row = QHBoxLayout(); vol_row.setSpacing(6)
         vol_lbl = QLabel('Volume'); vol_lbl.setObjectName('setting_lbl')
@@ -402,28 +465,66 @@ class SettingsPopup(QFrame):
         out_row.addWidget(out_lbl)
         out_row.addWidget(self._out_dev_combo, 1)
         right.addLayout(out_row)
-        right.addSpacing(10)
-
-        adaptive_row = QHBoxLayout(); adaptive_row.setSpacing(8)
-        adaptive_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self._adaptive_sw = ToggleSwitch('Adaptive Sample Rate', self)
-        self._adaptive_sw.setChecked(False)   # off by default — explicit opt-in
-        self._adaptive_sw.setToolTip(
-            "Lets PipeWire switch its whole audio graph to match a device's "
-            "native sample rate (e.g. 44.1 kHz) instead of always running at "
-            "48 kHz, so VoidPulse's resampler can do the full conversion in "
-            "one pass. Affects ALL apps sharing PipeWire, not just VoidPulse. "
-            "Writes ~/.config/pipewire/pipewire.conf.d/99-voidpulse-adaptive-rate.conf "
-            "— requires restarting PipeWire/WirePlumber (or logging out and "
-            "back in) to take effect.")
-        self._adaptive_sw.toggled.connect(self.adaptive_rate_toggled)
-        adaptive_row.addWidget(self._adaptive_sw)
-        right.addLayout(adaptive_row)
 
         # Narrower than this clips the accent row's TriSwitch and the Type combo
         self.setFixedWidth(640)
         self.adjustSize()
 
+
+    # ── PLAYBACK value formatting / accessors ───────────────────────────────
+
+    @staticmethod
+    def _fmt_secs(v: int) -> str:
+        # %g drops the trailing zeros, so 250 ms reads "0.25s" and 6000 "6s"
+        return 'Off' if v <= 0 else f'{v / 1000:g}s'
+
+    @staticmethod
+    def _fmt_ms_off(v: int) -> str:
+        return 'Off' if v <= 0 else f'{v}ms'
+
+    @staticmethod
+    def _fmt_sleep(v: int) -> str:
+        if v <= 0:
+            return 'Off'
+        h, m = divmod(v, 60)
+        return f'{h}h{m:02d}' if h else f'{m}m'
+
+    def crossfade_ms(self) -> int: return self._crossfade_row.value()
+    def set_crossfade_ms(self, v: int): self._crossfade_row.setValue(max(0, min(12000, v)))
+    def fade_ms(self) -> int: return self._fade_row.value()
+    def set_fade_ms(self, v: int): self._fade_row.setValue(max(0, min(5000, v)))
+    def sleep_minutes(self) -> int: return self._sleep_row.value()
+    def set_sleep_minutes(self, v: int): self._sleep_row.setValue(max(0, min(360, v)))
+
+    def reset_sleep_minutes(self):
+        """Put the slider back to Off without re-arming the timer.
+
+        The signal is blocked because MainWindow calls this from inside the
+        timer's own expiry handler, where sleep_timer_changed(0) would only
+        cancel a timer that has already fired and overwrite its status message.
+        """
+        self._sleep_row.blockSignals(True)
+        self._sleep_row.setValue(0)
+        self._sleep_row.blockSignals(False)
+        self.set_sleep_status('')
+
+    def set_sleep_status(self, text: str):
+        """Show the live countdown (or '' when the timer is off)."""
+        was = self._sleep_status.isVisible()
+        self._sleep_status.setText(text)
+        self._sleep_status.setVisible(bool(text))
+        if bool(text) != was and self.isVisible():
+            # The row appears/disappears under an already-open popup, so take
+            # the height back rather than leaving a gap or a clipped bottom.
+            # invalidate() first: a hidden child does not shrink the cached
+            # layout hint on its own, so adjustSize() would keep the old height.
+            self.layout().invalidate()
+            self.layout().activate()
+            self.adjustSize()
+
+    def set_crossfade_available(self, ok: bool):
+        """Grey the crossfade slider out on outputs that cannot overlap streams."""
+        self._crossfade_row.setEnabled(ok)
 
     def output_device(self) -> str:
         """Return currently selected output device id: 'pipewire' or 'plughw:X,Y'."""

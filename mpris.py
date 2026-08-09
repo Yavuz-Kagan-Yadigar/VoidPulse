@@ -114,13 +114,16 @@ class MprisServer(QObject):
         # CanPause already report False to the client.
         if self._pipeline_busy and method in ('PlayPause', 'Play', 'Pause'):
             return
+        # ui_playing, not playing: mid-fade the pipeline still reads PLAYING, so
+        # Play during a pause ramp has to reverse it and Pause has to no-op.
         if   method == 'PlayPause': w._play_pause()
         elif method == 'Play':
-            if not p.playing: w._play_pause()
+            if not p.ui_playing: w._play_pause()
         elif method == 'Pause':
-            if p.playing: w._play_pause()
+            if p.ui_playing: w._play_pause()
         elif method == 'Stop':
-            p.stop(); w._ctrlbar.set_play_icon(False); self.notify_status()
+            # fade_stop() falls back to a plain stop when the Fade slider is 0
+            p.fade_stop(); w._ctrlbar.set_play_icon(False); self.notify_status()
             w._ctrlbar._reset_idle_timer()
         elif method == 'Next':   w._next_track(); w._ctrlbar._reset_idle_timer()
         elif method == 'Previous': w._prev_track(); w._ctrlbar._reset_idle_timer()
@@ -147,7 +150,7 @@ class MprisServer(QObject):
         p = self._player; w = self._win
         if prop == 'PlaybackStatus':
             return GLib.Variant('s',
-                'Playing' if p.playing else 'Paused' if p.has_pipe else 'Stopped')
+                'Playing' if p.ui_playing else 'Paused' if p.has_pipe else 'Stopped')
         if prop == 'LoopStatus':
             m = w._ctrlbar.btn_rep.current_mode()
             return GLib.Variant('s', 'Track' if m==RepeatMode.ONE

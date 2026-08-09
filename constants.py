@@ -2,7 +2,7 @@
 """
 VoidPulse — constants, palette, theme helpers, and global stylesheet.
 """
-import sys, os, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
+import sys, os, re, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
 from collections import OrderedDict
 import concurrent.futures as _cf
 import urllib.request as _urlreq
@@ -24,6 +24,9 @@ Gst.init(None)
 
 from mutagen import File as MutagenFile
 
+# Imports nothing from VoidPulse, so it is safe to pull into the base module
+import remote_io
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Flatpak sandbox detection
 # ══════════════════════════════════════════════════════════════════════════════
@@ -40,6 +43,48 @@ def host_cmd(*args) -> list:
     a no-op passthrough.
     """
     return (['flatpak-spawn', '--host'] if IN_FLATPAK else []) + list(args)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Application version
+# ══════════════════════════════════════════════════════════════════════════════
+APP_ID = 'org.voidpulse.VoidPulse'
+
+
+def _read_app_version() -> str:
+    """The running build's version, read from its AppStream metainfo.
+
+    voidpulse_build.sh stamps the version it was given into <release version="…"/>
+    for every package format it produces, so the metainfo file is the one place
+    that stays correct in a flatpak, an AppImage, a deb/rpm/apk and a source
+    checkout alike. A literal here would go stale the moment a package was built
+    from an unchanged tree — the build script never rewrites the .py files.
+
+    The paths are tried most-specific first: an AppImage exports APPDIR, a
+    flatpak mounts /app, system packages install under /usr, and the checkout
+    keeps its own appdata.xml next to this module.
+    """
+    cands = []
+    appdir = os.environ.get('APPDIR')
+    if appdir:
+        cands.append(Path(appdir) / 'usr/share/metainfo' / f'{APP_ID}.appdata.xml')
+    cands += [
+        Path('/app/share/metainfo') / f'{APP_ID}.appdata.xml',
+        Path('/usr/share/metainfo') / f'{APP_ID}.appdata.xml',
+        Path('/usr/local/share/metainfo') / f'{APP_ID}.appdata.xml',
+        Path(__file__).resolve().parent / 'appdata.xml',
+    ]
+    for c in cands:
+        try:
+            m = re.search(r'<release\s+version="([^"]+)"', c.read_text(errors='ignore'))
+        except Exception:
+            continue
+        if m:
+            return m.group(1).strip()
+    return '0.0.0'
+
+
+APP_VERSION = _read_app_version()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -610,6 +655,13 @@ VIZ_BANDS     = 256
 GST_BANDS     = 2048  # FFT bands, well above VIZ_BANDS for a cleaner mapping
 OV_VIZ_H      = 60    # overlay viz height, px
 MIN_DB        = -70.0
+# Default for config.json's "viz_gamma" — the power-law exponent applied to the
+# normalised [0,1] bar height. Below 1.0 lifts quiet bands, and the lower it goes
+# the more it lifts them, until a busy mix flattens into a solid block; 1.0 is a
+# straight dB scale. 0.38 was the original and left almost nothing at the floor.
+# There is no slider for it: config.json is where it gets changed, and this value
+# only applies to a config that has no key yet. See Player.set_viz_gamma.
+VIZ_GAMMA     = 0.7
 RAD_PCT       = 60   # corner radius: 0 is square, 100 a pill or circle
 
 def _r(full_px: int) -> int:
@@ -938,29 +990,55 @@ def _sanitize_filename_part(text: str) -> str:
     return text.strip('. ')
 
 def _open_audio(fp: str):
-    """Open an audio file with mutagen, falling back to per-format classes."""
-    af = MutagenFile(fp, easy=False)
-    if af is not None:
-        return af
-    ext = Path(fp).suffix.lower()
+    """Open an audio file with mutagen, falling back to per-format classes.
+
+    On a share that cannot seek (FTP/FTPS through GVfs) mutagen is handed a
+    SeekableProxy instead of the path — it needs random access, and the raw
+    FUSE file only reads forward. Every mutagen call in VoidPulse comes through
+    here, so this one substitution is what gives those shares tags, durations
+    and embedded covers.
+    """
+    src = fp
+    if remote_io.is_nonseekable(fp):
+        try:
+            src = remote_io.SeekableProxy(fp)
+        except OSError:
+            return None
     try:
-        if ext == '.opus':
-            from mutagen.oggopus import OggOpus;    return OggOpus(fp)
-        if ext == '.ogg':
-            from mutagen.oggvorbis import OggVorbis; return OggVorbis(fp)
-        if ext == '.flac':
-            from mutagen.flac import FLAC;           return FLAC(fp)
-        if ext == '.mp3':
-            from mutagen.mp3 import MP3;             return MP3(fp)
-        if ext in ('.m4a', '.aac'):
-            from mutagen.mp4 import MP4;             return MP4(fp)
-        if ext in ('.wav', '.wave'):
-            from mutagen.wave import WAVE;           return WAVE(fp)
-        if ext in ('.aiff', '.aif'):
-            from mutagen.aiff import AIFF;           return AIFF(fp)
-    except Exception:
-        pass
-    return None
+        af = MutagenFile(src, easy=False)
+        if af is not None:
+            return af
+        ext = Path(fp).suffix.lower()
+        # MutagenFile() sniffs content and consumes the stream doing it, so a
+        # per-format retry has to start from the beginning again.
+        if src is not fp:
+            src.seek(0)
+        try:
+            if ext == '.opus':
+                from mutagen.oggopus import OggOpus;    return OggOpus(src)
+            if ext == '.ogg':
+                from mutagen.oggvorbis import OggVorbis; return OggVorbis(src)
+            if ext == '.flac':
+                from mutagen.flac import FLAC;           return FLAC(src)
+            if ext == '.mp3':
+                from mutagen.mp3 import MP3;             return MP3(src)
+            if ext in ('.m4a', '.aac'):
+                from mutagen.mp4 import MP4;             return MP4(src)
+            if ext in ('.wav', '.wave'):
+                from mutagen.wave import WAVE;           return WAVE(src)
+            if ext in ('.aiff', '.aif'):
+                from mutagen.aiff import AIFF;           return AIFF(src)
+        except Exception:
+            pass
+        return None
+    finally:
+        # The proxy's spill buffer can hold megabytes; the tags mutagen parsed
+        # out of it are plain Python objects by now and do not need the stream.
+        if src is not fp:
+            try:
+                src.close()
+            except Exception:
+                pass
 
 def _apply_scroller_properties(widget, *, touch: bool = True):
     """Apply standard kinetic-scroll properties to a viewport widget."""

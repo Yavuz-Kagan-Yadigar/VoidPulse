@@ -5,6 +5,7 @@ cover/theme reload, tag editing orchestration, "Open With" support.
 """
 from constants import *
 
+from time import monotonic as _monotonic
 from constants import ACC, ACCH, BG3, BG4, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r
 import constants as _const_mod
 from constants import is_system_qt_theme_active, resync_system_qt_theme, is_applying_own_palette, start_qt6ct_live_reload
@@ -25,8 +26,12 @@ from sidebar import Sidebar
 from controlbar import ControlBar
 from titlebar import BlackTitleBar, _TB_H
 from lyrics import LyricsPanel
+from queue_panel import QueuePanel
 from dialogs_edit import TagEditDialog
 from library import ConfigPlaylistLoader, ScanThread, _recover_rename_temps
+from remote import (NetworkShareDialog, RemoteMounter, SeekProbe, default_label,
+                    share_local_path)
+import remote_io
 from blackout_overlay import BlackoutOverlay
 # SettingsPopup is instantiated lazily inside ControlBar._ensure_settings_popup
 from widgets_base import _ModalOverlay, DeviceBusyPopup, _SpinningOverlay
@@ -59,8 +64,27 @@ class MainWindow(QMainWindow):
         self._shuffle:      bool = False
         self._scan_threads: List[ScanThread] = []
         self._known_paths:  set  = set()
+        # Saved network shares: [{'uri','user','domain','anonymous','label'}].
+        # Passwords live in the desktop keyring, never in here — see remote.py.
+        self._network_shares: list = []
+        self._share_dialog: Optional[NetworkShareDialog] = None
+        # uri → share dict awaiting a successful mount, so the entry is only
+        # saved once the connection actually worked
+        self._pending_share_meta: dict = {}
         self._cover_locked_paths: set = set()
         self._cur_track_mw: Track = None
+        # Built in _build_ui; declared here because _advance() reads it and can
+        # in principle run before the panel exists.
+        self._queue:        Optional[QueuePanel] = None
+        # Share of the right dock's height the lyrics panel gets when both it
+        # and the queue are open. Halves until the user drags the divider.
+        self._dock_ratio    = 0.5
+        # The queue head this window inserted on the user's last "play from a
+        # page"; identity-compared, so a hand-queued row is never mistaken for it.
+        self._auto_queued:  Optional[Track] = None
+        # (page, track) playback came from before it entered the queue, so it can
+        # carry on down that page once the queue is played out.
+        self._queue_src = None
         self._blackout = BlackoutOverlay()
         self._config_loader = None   # ref to ConfigPlaylistLoader while running
         self._splash_ref = splash    # held so _close_splash can always reach it
@@ -84,6 +108,12 @@ class MainWindow(QMainWindow):
         self._titlebar = BlackTitleBar(self)
         root.addWidget(self._titlebar)
 
+        # Debounced so config is written after the drag, not during it
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.setInterval(400)
+        self._splitter_save_timer.timeout.connect(self._save_config)
+
         body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(16)
         body.setObjectName('body_splitter')
         self._sidebar = Sidebar(); body.addWidget(self._sidebar)
@@ -97,18 +127,36 @@ class MainWindow(QMainWindow):
         rl.addWidget(self._tabs, 1)
         body.addWidget(right)
 
+        # One right-hand dock holds both side panels, stacked. Two columns made
+        # the content area pay for the queue twice over and left it as a mostly
+        # empty strip; sharing a column keeps the window's single-rail-each-side
+        # shape whichever panel is open.
+        self._right_dock = QSplitter(Qt.Orientation.Vertical)
+        self._right_dock.setObjectName('right_dock')
+        self._right_dock.setHandleWidth(16)
+        self._right_dock.setChildrenCollapsible(False)
+        self._right_dock.setVisible(False)
+
         # ctrlbar does not exist yet; wired up below
         self._lyrics_panel = LyricsPanel(self._player, ctrlbar=None)
         self._lyrics_panel.setVisible(False)
-        body.addWidget(self._lyrics_panel)
+        self._right_dock.addWidget(self._lyrics_panel)
 
-        body.setStretchFactor(0, 0); body.setStretchFactor(1, 1); body.setStretchFactor(2, 0)
+        self._queue = QueuePanel()
+        self._queue.setVisible(False)
+        self._queue.set_track_resolver(self._resolve_track)
+        self._right_dock.addWidget(self._queue)
+
+        # Equal stretch: a window resize keeps the share the user dragged to
+        # rather than handing every new pixel to one of the two.
+        self._right_dock.setStretchFactor(0, 1)
+        self._right_dock.setStretchFactor(1, 1)
+        self._right_dock.splitterMoved.connect(self._on_dock_split_moved)
+        body.addWidget(self._right_dock)
+
+        for i in range(body.count()):
+            body.setStretchFactor(i, 1 if i == 1 else 0)
         body.setSizes([230, 1050, 0])
-        # Debounced so config is written after the drag, not during it
-        self._splitter_save_timer = QTimer(self)
-        self._splitter_save_timer.setSingleShot(True)
-        self._splitter_save_timer.setInterval(400)
-        self._splitter_save_timer.timeout.connect(self._save_config)
         body.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
 
         self._lib_page = PlaylistPage(label='Library')
@@ -267,10 +315,28 @@ class MainWindow(QMainWindow):
         self._sidebar.search_changed.connect(self._apply_search)
         self._sidebar.refresh_req.connect(self._refresh_library)
         self._sidebar.export_m3u_req.connect(self._export_m3u_dialog)
+        self._sidebar.network_share_req.connect(self._network_share_dialog)
+
+        self._mounter = RemoteMounter(self)
+        self._mounter.started.connect(self._on_share_mount_started)
+        self._mounter.mounted.connect(self._on_share_mounted)
+        self._mounter.failed.connect(self._on_share_failed)
+
+        # Sleep timer: one-shot stop, plus a 1 Hz tick that keeps the countdown
+        # shown in the settings popup honest.
+        self._sleep_deadline: float = 0.0
+        self._sleep_timer = QTimer(self)
+        self._sleep_timer.setSingleShot(True)
+        self._sleep_timer.timeout.connect(self._on_sleep_expired)
+        self._sleep_tick = QTimer(self)
+        self._sleep_tick.setInterval(1000)
+        self._sleep_tick.timeout.connect(self._update_sleep_status)
 
         self._player.sig_end.connect(self._on_track_end)
+        self._player.sig_xfade_due.connect(self._on_crossfade_due)
         self._player.sig_err.connect(self._on_player_error)
         self._player.sig_busy.connect(self._on_player_busy)
+        self._player.sig_buffering.connect(self._on_buffering)
         self._device_busy_popup.switch_to_pipewire.connect(self._on_switch_to_pipewire)
         self._device_busy_popup.retry.connect(self._on_alsa_retry)
 
@@ -298,6 +364,11 @@ class MainWindow(QMainWindow):
         # lyric-click seek.
         self._lyrics_panel.seek_requested.connect(self._ctrlbar._on_pos)
         self._lyrics_panel.lyrics_context.connect(self._blackout.set_lyrics_context)
+        self._ctrlbar.btn_queue.clicked.connect(self._toggle_queue)
+        # The queue is shaped like a PlaylistPage, so it feeds the same slot
+        self._queue.play_track.connect(self._play_from_page)
+        self._queue.queue_changed.connect(self._on_queue_changed)
+        self._queue.status_msg.connect(lambda m: self._status.showMessage(m, 3000))
         self._ctrlbar.set_blackout_ref(self._blackout)
 
         pop = self._ctrlbar._ensure_settings_popup()
@@ -443,6 +514,7 @@ class MainWindow(QMainWindow):
         def _step2():
             self._lyrics_panel.set_accent(ACC)
             self._lyrics_panel.refresh_theme()
+            self._queue.refresh_theme()
             pop = self._ctrlbar._settings_popup
             if pop is not None:
                 pop.refresh_theme()
@@ -496,32 +568,143 @@ class MainWindow(QMainWindow):
         delay_ms = getattr(self._ctrlbar, '_delay_ms', 0)
         self._lyrics_panel.on_position(max(0, ms - delay_ms))
 
+    # Body splitter layout: sidebar | content | right dock (lyrics over queue)
+    _PANEL_DOCK   = 2
+    _PANEL_W      = 290   # width the dock opens at, in px
+
     def _open_lyrics_panel_from_config(self):
         """Restore lyrics panel open state from config."""
-        if not self._lyrics_panel.isVisible():
+        if not self._panel_open(self._lyrics_panel):
             self._toggle_lyrics()
 
+    def _open_queue_panel_from_config(self):
+        if not self._panel_open(self._queue):
+            self._toggle_queue()
+
+    @staticmethod
+    def _panel_open(panel: QWidget) -> bool:
+        """Is this panel switched on, whatever its ancestors are doing?
+
+        isHidden(), not isVisible() or isVisibleTo(): both of those answer False
+        while the dock around the panel is collapsed or the window is minimised,
+        which reads as "closed" and flips the panel the wrong way on the next
+        toggle — and, since the dock is only shown once a panel asks for it,
+        would leave it collapsed forever.
+        """
+        return not panel.isHidden()
+
+    def _toggle_side_panel(self, panel: QWidget, btn) -> bool:
+        """Show/hide one of the two panels stacked in the right-hand dock.
+
+        The dock itself only exists while at least one of them is up; its width
+        comes out of (or goes back to) the content column, so the sidebar keeps
+        whatever the user dragged it to. Returns True when the panel ended up
+        open.
+        """
+        opening = not self._panel_open(panel)
+        panel.setVisible(opening)
+        if btn is not None:
+            btn.setChecked(opening)
+        self._sync_right_dock(grew=opening)
+        return opening
+
+    def _sync_right_dock(self, grew: bool = False):
+        """Match the dock's presence and split to which panels are open."""
+        dock = self._right_dock
+        want = self._panel_open(self._lyrics_panel) or self._panel_open(self._queue)
+        body = self.findChild(QSplitter, 'body_splitter')
+        if body and want != self._panel_open(dock):
+            dock.setVisible(want)
+            sizes = body.sizes()
+            if len(sizes) > self._PANEL_DOCK:
+                if want:
+                    # Never shrink the track list below a usable width for a panel
+                    sizes[1] = max(100, sizes[1] - self._PANEL_W)
+                    sizes[self._PANEL_DOCK] = self._PANEL_W
+                else:
+                    sizes[1] += sizes[self._PANEL_DOCK]
+                    sizes[self._PANEL_DOCK] = 0
+                body.setSizes(sizes)
+        elif not want:
+            dock.setVisible(False)
+        if grew:
+            # Deferred: the dock has just been shown and has no height yet.
+            QTimer.singleShot(0, self._size_right_dock)
+
+    def _size_right_dock(self):
+        """Split the dock at _dock_ratio — half and half until it is dragged.
+
+        Only run when a panel has just been opened; while both are up the
+        divider is the user's, and _on_dock_split_moved records where they left
+        it so reopening lands there again.
+        """
+        if not (self._panel_open(self._lyrics_panel) and self._panel_open(self._queue)):
+            return   # a lone panel gets the whole dock from Qt
+        h = self._right_dock.height() or sum(self._right_dock.sizes()) or 720
+        top = int(h * self._dock_ratio)
+        self._right_dock.setSizes([top, h - top])
+
+    def _on_dock_split_moved(self, *_):
+        """Remember the dragged divider as a share of the dock, not as pixels —
+        the window it has to survive is rarely the height it was dragged at.
+
+        Qt emits this for its own relayouts too, and one of those runs while a
+        panel is still coming up, with sizes that mean nothing. A held mouse
+        button is what separates a drag from that: nobody is dragging a handle
+        without one down.
+        """
+        if QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+            return
+        sizes = self._right_dock.sizes()
+        total = sum(sizes)
+        if len(sizes) == 2 and total > 0 \
+                and self._panel_open(self._lyrics_panel) and self._panel_open(self._queue):
+            self._dock_ratio = min(0.9, max(0.1, sizes[0] / total))
+        self._splitter_save_timer.start()
+
     def _toggle_lyrics(self, _checked=False):
-        panel = self._lyrics_panel
-        body  = self.findChild(QSplitter, 'body_splitter')
-        if not body: return
-        vis = panel.isVisible()
-        panel.setVisible(not vis)
-        self._ctrlbar.btn_lyrics.setChecked(not vis)
-        sizes = body.sizes()
-        if not vis:   # opening
-            total = sum(sizes)
-            body.setSizes([sizes[0], max(100, total - sizes[0] - 290), 290])
-            if self._cur_track_mw:
-                deferred = not self.isActiveWindow() or self._blackout.isVisible()
-                panel.set_track(self._cur_track_mw, deferred=deferred)
-        else:         # closing
-            body.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+        opened = self._toggle_side_panel(self._lyrics_panel, self._ctrlbar.btn_lyrics)
+        if opened and self._cur_track_mw:
+            deferred = not self.isActiveWindow() or self._blackout.isVisible()
+            self._lyrics_panel.set_track(self._cur_track_mw, deferred=deferred)
+
+    def _toggle_queue(self, _checked=False):
+        self._toggle_side_panel(self._queue, self._ctrlbar.btn_queue)
+
+    def _resolve_track(self, filepath: str):
+        """filepath → an already-scanned Track, or None if it is not in view.
+
+        Used by the queue panel so a drop reuses metadata the library scan
+        already paid for instead of re-reading tags off disk (which matters on a
+        network share).
+        """
+        for page in (self._lib_page, *self._playlists):
+            if page is None:
+                continue
+            for t in page.tracks:
+                if t.filepath == filepath:
+                    return t
+        return None
+
+    def _on_queue_changed(self):
+        """Queue edited — keep the play/queue indices consistent and persist."""
+        if self._cur_page is self._queue:
+            pi = self._queue.playing_idx
+            self._cur_idx = pi
+        self._save_config()
+
+    def _add_to_queue(self, tracks: list):
+        """Append to the queue, opening the panel so the result is visible."""
+        self._queue.add_tracks(tracks)
+        if not self._panel_open(self._queue):
+            self._toggle_queue()
 
     def _show_ctx_menu(self, src_page, row, pos):
         if not (0 <= row < len(src_page.tracks)): return
         track = src_page.tracks[row]; m = QMenu(self)
         m.addAction('▶  Play').triggered.connect(lambda: self._play_from_page(src_page, row))
+        m.addAction('＋  Add to Queue').triggered.connect(
+            lambda _=False, _t=track: self._add_to_queue([_t]))
         m.addSeparator()
         add_sub = m.addMenu("Add to Playlist")
         for pl in self._playlists:
@@ -783,6 +966,177 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f'"{name}" playlist created — {m3u_path}', 5000)
         self._save_config()
 
+    # ── Sleep timer ─────────────────────────────────────────────────────────
+
+    def _on_sleep_timer_changed(self, minutes: int):
+        """Slider moved: 0 cancels, anything else (re)starts the countdown."""
+        self._sleep_timer.stop()
+        self._sleep_tick.stop()
+        if minutes <= 0:
+            self._sleep_deadline = 0.0
+            self._update_sleep_status()
+            self._status.showMessage('Sleep timer off', 2500)
+            return
+        ms = minutes * 60_000
+        self._sleep_deadline = _monotonic() + ms / 1000.0
+        self._sleep_timer.start(ms)
+        self._sleep_tick.start()
+        self._update_sleep_status()
+        h, m = divmod(minutes, 60)
+        pretty = f'{h}h {m:02d}m' if h else f'{m}m'
+        self._status.showMessage(f'Sleep timer set — playback stops in {pretty}', 4000)
+
+    def _update_sleep_status(self):
+        pop = self._ctrlbar._settings_popup
+        if self._sleep_deadline <= 0.0:
+            if pop is not None:
+                pop.set_sleep_status('')
+            return
+        left = max(0, int(self._sleep_deadline - _monotonic()))
+        h, r = divmod(left, 3600); m, s = divmod(r, 60)
+        text = f'stops in {h}:{m:02d}:{s:02d}' if h else f'stops in {m}:{s:02d}'
+        if pop is not None:
+            pop.set_sleep_status(text)
+
+    def _on_sleep_expired(self):
+        """Countdown finished — fade out and stop, then reset the slider."""
+        self._sleep_tick.stop()
+        self._sleep_deadline = 0.0
+        self._player.fade_stop()
+        self._ctrlbar.set_play_icon(False)
+        self._mpris.notify_status()
+        pop = self._ctrlbar._settings_popup
+        if pop is not None:
+            pop.reset_sleep_minutes()
+        self._status.showMessage('Sleep timer elapsed — playback stopped', 6000)
+
+    # ── Network shares ──────────────────────────────────────────────────────
+
+    def _network_share_dialog(self):
+        dlg = NetworkShareDialog(self._network_shares, self)
+        self._share_dialog = dlg
+        dlg.connect_requested.connect(self._connect_share)
+        dlg.forget_requested.connect(self._forget_share)
+        dlg.exec()
+        self._share_dialog = None
+
+    def _connect_share(self, share: dict):
+        uri = share.get('uri', '')
+        if not uri:
+            return
+        share.setdefault('label', default_label(uri))
+        self._pending_share_meta[uri] = dict(share)
+        if self._share_dialog is not None:
+            self._share_dialog.set_busy(True)
+            self._share_dialog.set_status(f'Connecting to {uri} …')
+        self._mounter.mount(share)
+
+    def _forget_share(self, uri: str):
+        self._network_shares = [s for s in self._network_shares if s.get('uri') != uri]
+        remote_io.forget_share(uri)
+        RemoteMounter.unmount(uri)
+        if self._share_dialog is not None:
+            self._share_dialog.set_saved(self._network_shares)
+            self._share_dialog.set_status(f'Forgot {uri}.')
+        self._status.showMessage(f'Network share removed — {uri}', 4000)
+        self._save_config()
+
+    def _on_share_mount_started(self, uri: str):
+        self._status.showMessage(f'Connecting to {uri} …')
+
+    def _on_share_mounted(self, uri: str, local_path: str):
+        """Share is reachable at local_path — remember it and scan it as a folder.
+
+        The password is dropped here rather than saved: the backend has already
+        handed it to the keyring if it could, and keeping a copy in the config
+        would put a plaintext credential in a world-readable JSON file.
+        """
+        pending = self._pending_share_meta.pop(uri, None)
+        existing = next((s for s in self._network_shares if s.get('uri') == uri), None)
+        if pending is not None:
+            pending.pop('password', None)
+            if existing is not None:
+                existing.update(pending)
+            else:
+                self._network_shares.append(pending)
+        if self._share_dialog is not None:
+            self._share_dialog.set_busy(False)
+            self._share_dialog.set_saved(self._network_shares)
+            self._share_dialog.set_status(f'Connected — mounted at {local_path}')
+        self._status.showMessage(f'Connected to {uri} — checking the connection…', 4000)
+        # Probe first, scan second. Whether the mount can seek decides how every
+        # tag on it is read (remote_io.SeekableProxy), so scanning before the
+        # answer is in would read the whole share with the wrong strategy and
+        # produce a library full of untagged, zero-length tracks.
+        self._start_seek_probe(uri, local_path)
+        self._save_config()
+
+    def _start_seek_probe(self, uri: str, local_path: str):
+        """Find out in the background whether this mount supports seeking."""
+        probe = SeekProbe(uri, local_path, self)
+        probe.done.connect(lambda u, s, lp=local_path: self._on_seek_probe_done(u, s, lp))
+        probe.finished.connect(probe.deleteLater)
+        self._seek_probes = [p for p in getattr(self, '_seek_probes', [])
+                             if not p.isFinished()]
+        self._seek_probes.append(probe)   # held so the thread is not collected
+        probe.start()
+
+    def _on_seek_probe_done(self, uri: str, seekable, local_path: str = ''):
+        # Registering the share is what switches tag reads and playback onto the
+        # non-seekable path, so it has to happen before the scan starts.
+        if local_path:
+            remote_io.register_share(uri, local_path, seekable)
+        if local_path:
+            self._status.showMessage(f'Connected to {uri} — scanning…', 4000)
+            if local_path not in self._known_paths:
+                self._known_paths.add(local_path)
+                self._scan_path(local_path, False)
+            else:
+                self._scan_path(local_path, False, refresh=True)
+        if seekable is not False:
+            return   # True, or nothing to test — either way, nothing to explain
+        msg = (f'{uri} is connected, but the protocol itself cannot seek.\n\n'
+               'Tags and durations work anyway, and tracks play normally. The '
+               'first time you drag the seek bar on a track, VoidPulse fetches '
+               'it to disk — playback pauses for that, with progress in the '
+               'status bar — and resumes at the point you asked for; seeking is '
+               'then instant for the rest of the track. Nothing is downloaded '
+               'for a track you only listen to. SMB or SFTP to the same server '
+               'seeks directly, with no fetch at all.')
+        print(f'[Remote] non-seekable mount, seeking will fetch on demand: {uri}')
+        self._status.showMessage(
+            f'{uri}: no native seek — the first seek on a track fetches it first',
+            12000)
+        if self._share_dialog is not None:
+            self._share_dialog.set_status(msg)
+
+    def _on_share_failed(self, uri: str, reason: str):
+        self._pending_share_meta.pop(uri, None)
+        msg = f'Could not connect to {uri}: {reason}' if uri else reason
+        print(f'[Remote] {msg}')
+        if self._share_dialog is not None:
+            self._share_dialog.set_busy(False)
+            self._share_dialog.set_status(reason)
+        self._status.showMessage(msg, 8000)
+
+    def _remount_saved_shares(self):
+        """Reconnect saved shares at startup, before their folders are scanned."""
+        for share in self._network_shares:
+            uri = share.get('uri', '')
+            if not uri:
+                continue
+            local = share_local_path(uri)
+            if local:
+                # gvfs kept the mount from a previous session. Go through the
+                # same probe-then-scan path a fresh mount takes rather than
+                # scanning straight away: until the probe answers, remote_io does
+                # not know whether the share can seek, and reading its tags the
+                # wrong way yields a library of untagged, zero-length tracks.
+                self._start_seek_probe(uri, local)
+                continue
+            self._pending_share_meta.setdefault(uri, dict(share))
+            self._mounter.mount(share)
+
     def _add_folder_dialog(self):
         f = QFileDialog.getExistingDirectory(self, 'Select Music Folder', str(Path.home()))
         if f:
@@ -961,7 +1315,98 @@ class MainWindow(QMainWindow):
 
     # --- Playback ---
     def _play_from_page(self, page, row):
-        self._cur_page = page; self._cur_idx = row; self._alsa_play()
+        """Start `row` of `page`.
+
+        Playing anything out of a browser page routes it through the queue: the
+        track is inserted at the top and playback runs from there, so the queue
+        always describes what is on now and what follows it. Rows activated in
+        the queue itself are played where they sit.
+        """
+        if page is self._queue or self._queue is None:
+            self._cur_page = page; self._cur_idx = row; self._alsa_play()
+            return
+        if not (0 <= row < len(page.tracks)):
+            return
+        self._remember_queue_source(page, row)
+        self._queue_on_top(page.tracks[row])
+        self._cur_page = self._queue
+        self._cur_idx  = 0
+        self._alsa_play()
+
+    def _queue_on_top(self, track):
+        """Put `track` at the head of the queue, ready to be played from row 0.
+
+        The previous head is dropped when it is one of ours and still the row
+        the queue is parked on: a double-click means "instead of this", and an
+        injected track that has already had its turn is spent either way, so
+        leaving it there would only make it play again later. A head the user
+        queued by hand is never touched.
+        """
+        prev = self._auto_queued
+        self._auto_queued = None
+        if (prev is not None and self._queue.tracks
+                and self._queue.tracks[0] is prev and self._queue.playing_idx == 0):
+            self._queue.remove_row(0)
+        self._queue.add_tracks([track], 0, quiet=True)
+        self._auto_queued = self._queue.tracks[0] if self._queue.tracks else None
+
+    def _queue_pending(self) -> bool:
+        """Is there a queue row playback has not reached yet?
+
+        The index to look past is where playback stands in the queue: _cur_idx
+        while playing out of it, the last row it played otherwise. A queue whose
+        rows have all been played is done, not "non-empty" — it keeps its
+        history on screen, and must not pull playback back in.
+        """
+        q = self._queue
+        if q is None or not q.tracks:
+            return False
+        at = self._cur_idx if self._cur_page is q else q.playing_idx
+        return at < len(q.tracks) - 1
+
+    def _remember_queue_source(self, page, row: int):
+        """Note the page row playback is leaving, to return to it later."""
+        if (page is None or page is self._queue
+                or not (0 <= row < len(getattr(page, 'tracks', ())))):
+            return
+        self._queue_src = (page, page.tracks[row])
+
+    def _resume_from_source(self, offset: int = 0) -> bool:
+        """Point playback back at the page the queue's tracks came from.
+
+        Lands on the source row + `offset`; _advance then takes its own step
+        forward from there, while _prev_track passes -1 and plays what it lands
+        on. Falls back to the library only when the queue is empty, which is the
+        one case where staying put would dead-end on nothing at all.
+        """
+        page, track = self._queue_src or (None, None)
+        if page is not None and track is not None and getattr(page, 'tracks', None):
+            # Located by filepath: the page may have been re-sorted since.
+            idx = next((i for i, t in enumerate(page.tracks)
+                        if t.filepath == track.filepath), -1)
+            if idx >= 0 and 0 <= idx + offset < len(page.tracks):
+                self._cur_page = page
+                self._cur_idx  = idx + offset
+                return True
+        if self._queue is not None and not self._queue.tracks and self._lib_page:
+            self._cur_page = self._lib_page
+            self._cur_idx  = self._lib_page.playing_idx
+            return True
+        return False
+
+    def _highlight_playing_pages(self, track):
+        """Mark `track` as the playing row on the browser pages that hold it.
+
+        Playback runs out of the queue, so without this the library or playlist
+        the user is looking at would lose its highlight the moment a
+        double-click handed the track over.
+        """
+        fp = track.filepath if track is not None else None
+        for page in (self._lib_page, *self._playlists):
+            if page is None or page is self._cur_page:
+                continue
+            idx = next((i for i, t in enumerate(page.tracks) if t.filepath == fp), -1)
+            page.set_playing(idx)
 
     def _alsa_play(self) -> None:
         """High-level play entry point for normal play/pause/track-change.
@@ -992,7 +1437,14 @@ class MainWindow(QMainWindow):
         tracks = self._cur_page.tracks
         if not tracks or not (0 <= self._cur_idx < len(tracks)): return
         t = tracks[self._cur_idx]
-        self._player.load(t.filepath)
+        # No-op unless a crossfade is configured, possible and something is
+        # already playing — in which case load() keeps the outgoing pipeline
+        # alive as a fading ghost instead of cutting it off.
+        self._player.arm_crossfade()
+        # Hand over the Track the scan already produced: without it the player
+        # re-reads the tags, which on a share that cannot seek means pulling the
+        # whole file before playback starts.
+        self._player.load(t.filepath, track=t)
         self._ctrlbar.set_track(t); self._ctrlbar.set_play_icon(True)
         self._cur_track_mw = t
         self._blackout.set_lyrics_context('', '', '')
@@ -1000,6 +1452,7 @@ class MainWindow(QMainWindow):
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
             self._lyrics_panel.set_track(t, deferred=deferred)
         self._cur_page.set_playing(self._cur_idx)
+        self._highlight_playing_pages(t)
         self.setWindowTitle(f'{t.title}  —  VoidPulse')
         self._status.showMessage(f'▶  {t.artist}  —  {t.title}', 0)
         self._mpris.notify_track(t); self._mpris.notify_status()
@@ -1016,9 +1469,13 @@ class MainWindow(QMainWindow):
         tracks = self._cur_page.tracks
         if not tracks or not (0 <= self._cur_idx < len(tracks)): return
         t = tracks[self._cur_idx]
-        self._player.load(t.filepath)
+        if play:
+            self._player.arm_crossfade()
+        self._player.load(t.filepath, track=t)
         if not play:
-            self._player.play_pause()   # load() always starts; pause immediately
+            # load() always starts, so pause immediately — and never through the
+            # Fade slider, which would ramp down audio the user never asked to hear.
+            self._player.play_pause(fade=False)
         self._ctrlbar.set_track(t); self._ctrlbar.set_play_icon(play)
         self._cur_track_mw = t
         self._blackout.set_lyrics_context('', '', '')
@@ -1026,6 +1483,7 @@ class MainWindow(QMainWindow):
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
             self._lyrics_panel.set_track(t, deferred=deferred)
         self._cur_page.set_playing(self._cur_idx)
+        self._highlight_playing_pages(t)
         self.setWindowTitle(f'{t.title}  —  VoidPulse')
         self._status.showMessage(f'▶  {t.artist}  —  {t.title}', 0)
         self._mpris.notify_track(t); self._mpris.notify_status()
@@ -1260,20 +1718,23 @@ class MainWindow(QMainWindow):
             # The pipeline is playing from 0. Mute, seek, unmute: an ALSA hw device
             # needs audio flowing to stay open, but none of it should be heard.
             if _probe_pos_ms > 200 and self._player.has_pipe:
-                self._player._pipe.set_property('volume', 0.0)
+                # Through the player's mute gate, not a raw volume write: a fade
+                # ramp in flight would otherwise overwrite the 0.0 on its very
+                # next tick and let the seek be heard.
+                _tok = self._player._gate_mute()
                 self._player.seek(_probe_pos_ms)
-                def _after_seek():
+                def _after_seek(_tok=_tok):
                     if not self._player.has_pipe:
                         return
-                    self._player._pipe.set_property('volume', self._player._effective_volume())
+                    self._player._gate_release(_tok)
                     if not _probe_was_playing and self._player.playing:
                         self._player.play_pause()
-                    self._ctrlbar.set_play_icon(self._player.playing)
+                    self._ctrlbar.set_play_icon(self._player.ui_playing)
                 QTimer.singleShot(450, _after_seek)
                 return   # set_play_icon called inside _after_seek
             if not _probe_was_playing and self._player.playing:
                 self._player.play_pause()
-            self._ctrlbar.set_play_icon(self._player.playing)
+            self._ctrlbar.set_play_icon(self._player.ui_playing)
 
         def _give_up():
             if self._alsa_probe_gen != gen:
@@ -1317,7 +1778,8 @@ class MainWindow(QMainWindow):
                     # the dead-pipe path. The anchor keeps the seekbar in place.
                     if _probe_pos_ms > 0:
                         self._player._anchor_now(float(_probe_pos_ms))
-                    self._player.load(self._cur_track_mw.filepath)
+                    self._player.load(self._cur_track_mw.filepath,
+                                      track=self._cur_track_mw)
                     self._ctrlbar.set_track(self._cur_track_mw)
                 QTimer.singleShot(800, lambda: _check(idx, device))
 
@@ -1362,12 +1824,24 @@ class MainWindow(QMainWindow):
         else:
             self._status.showMessage(f'Error: {err}', 5000)
 
+    def _on_buffering(self, pct: int):
+        """Fetch progress while a seek on a non-seekable share is being served.
+
+        This is the one moment the copy is user-visible: playback has stopped
+        and will resume at the requested position once the track is on disk, so
+        the percentage is the only thing explaining the wait.
+        """
+        if self._player._seek_fetch is None:
+            return
+        self._status.showMessage(
+            f'Seeking on a share that cannot seek — fetching the track ({pct}%)', 3000)
+
     def _on_player_busy(self, busy: bool):
         """Pipeline is reloading — show spinner on play button, disable MPRIS play/pause."""
         self._ctrlbar.set_play_busy(busy)
         self._mpris.set_pipeline_busy(busy)
         if not busy:
-            self._ctrlbar.set_play_icon(self._player.playing)
+            self._ctrlbar.set_play_icon(self._player.ui_playing)
             self._mpris.notify_status()
 
     def _on_shuffle_toggled(self, v: bool):
@@ -1379,23 +1853,55 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_mpris'):
             GLib.idle_add(self._mpris._emit, ['LoopStatus'])
 
+    def _pick_initial_source(self):
+        """Choose what the play button starts when nothing has played yet.
+
+        _cur_page is seeded with the library at construction, so a fresh launch
+        used to answer the first play press with the library's first track even
+        when a queue had just been restored or a playlist tab was open. Order of
+        preference: the queue (saying what plays next is its whole job), then
+        the tab being looked at, then the library it already points to.
+
+        _cur_idx >= 0 means a track was picked earlier this session — after a
+        stop, or an explicit double-click — so that choice is left alone.
+        """
+        if self._cur_idx >= 0:
+            return
+        if self._queue is not None and self._queue.tracks:
+            self._cur_page = self._queue
+            self._cur_idx  = max(0, self._queue.playing_idx)
+            return
+        page = self._tabs.currentWidget()
+        if isinstance(page, PlaylistPage) and page.tracks:
+            self._cur_page = page
+
     def _play_pause(self):
         if not self._player.has_pipe:
+            self._pick_initial_source()
             if self._cur_page and self._cur_page.tracks:
                 if self._cur_idx < 0: self._cur_idx = 0
                 self._alsa_play()
         else:
             self._player.play_pause()
-            self._ctrlbar.set_play_icon(self._player.playing)
+            # ui_playing, not playing: with a nonzero Fade the pipeline is still
+            # PLAYING on return from a pause press and only pauses when the ramp
+            # ends, so .playing here would leave the button showing ⏸.
+            self._ctrlbar.set_play_icon(self._player.ui_playing)
             self._mpris.notify_status()
         self._ctrlbar._reset_idle_timer()
 
     def _prev_track(self):
         self._sync_cur_idx()
-        if self._cur_page and self._cur_idx > 0:
-            was_playing = self._player.playing
+        if self._cur_page is self._queue and self._cur_idx <= 0:
+            # Row 0 is where a double-click lands, so "previous" there means the
+            # track before it on the page it came from, not a dead button.
+            if not self._resume_from_source(offset=-1):
+                return
+        elif self._cur_page and self._cur_idx > 0:
             self._cur_idx -= 1
-            self._navigate_track(was_playing)
+        else:
+            return
+        self._navigate_track(self._player.ui_playing)
 
     def _next_track(self): self._advance(forced=True)
 
@@ -1406,12 +1912,31 @@ class MainWindow(QMainWindow):
         if pi >= 0:
             self._cur_idx = pi
 
-    def _advance(self, forced=False):
+    def _advance(self, forced=False, from_xfade=False):
+        repeat  = self._ctrlbar.btn_rep.current_mode()
+        resumed = False
+        # A queue with a row still ahead of playback takes over at the next
+        # transition, wherever playback started — that is what makes it a queue
+        # rather than another playlist. The track already playing is left alone;
+        # only what comes after changes. Once the queue is played out, playback
+        # goes back to the page it was pulled off, so a double-click (which now
+        # drops its track on the queue) still carries on down that page.
+        if self._queue is not None:
+            if self._queue_pending() and self._cur_page is not self._queue:
+                self._remember_queue_source(self._cur_page, self._cur_idx)
+                self._cur_page = self._queue
+                self._cur_idx  = self._queue.playing_idx  # -1 → the step below lands on 0
+            elif self._cur_page is self._queue and repeat == RepeatMode.NONE \
+                    and not self._queue_pending():
+                resumed = self._resume_from_source()
         if not self._cur_page: return
-        self._sync_cur_idx()          # always use the post-sort index
+        if not resumed:
+            # Always use the post-sort index — except right after a resume, whose
+            # index is the source row, while the page highlights the queue track
+            # that was playing a moment ago.
+            self._sync_cur_idx()
         n = len(self._cur_page.tracks)
         if n == 0: return
-        repeat = self._ctrlbar.btn_rep.current_mode()
         if not forced and repeat == RepeatMode.ONE: self._alsa_play(); return
         if self._shuffle:
             if n > 1:
@@ -1433,15 +1958,32 @@ class MainWindow(QMainWindow):
             if self._cur_idx >= n:
                 if repeat == RepeatMode.ALL: self._cur_idx = 0
                 else:
+                    if from_xfade:
+                        # Nothing to fade into: rewind the index and let the last
+                        # track play out to its real end, where EOS stops it.
+                        self._cur_idx = n - 1
+                        return
                     self._player.stop(); self._ctrlbar.set_play_icon(False)
                     self._mpris.notify_status(); return
         if forced:
-            # Manual skip keeps the current playing/paused state
-            self._navigate_track(self._player.playing)
+            # Manual skip keeps the current playing/paused state — the one the
+            # user asked for, so a skip during a pause fade stays paused.
+            self._navigate_track(self._player.ui_playing)
         else:
             self._alsa_play()
 
     def _on_track_end(self): self._advance()
+
+    def _on_crossfade_due(self):
+        """The playing track reached its crossfade point — start the next one now.
+
+        This is the same transition _on_track_end would make a few seconds later;
+        the only difference is that the outgoing pipeline is still running, so
+        load() overlaps them. When the transition would stop playback anyway
+        (end of a non-repeating playlist) _advance() stops as usual and the
+        current track simply plays out — there is nothing to fade into.
+        """
+        self._advance(from_xfade=True)
 
     # --- Focus handling ---
     def changeEvent(self, e):
@@ -1617,12 +2159,18 @@ class MainWindow(QMainWindow):
             return
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            # Build cfg with the four "quick-glance" keys at the top so they are
+            # Build cfg with the "quick-glance" keys at the top so they are
             # easy to find / hand-edit in the JSON file.  Python 3.7+ dicts preserve
             # insertion order; json.dumps() serialises in that order.
             # Backward compatibility is unaffected — keys are still read by name.
             cfg = {
-                'lyrics_panel_open':             self._lyrics_panel.isVisible(),
+                # First: it has no slider anywhere in the UI, so the file is the
+                # only place it can be changed. Written back on every save so it
+                # is always present to edit, even on a config that predates it.
+                'viz_gamma':                     self._player._viz_gamma,
+                'lyrics_panel_open':             self._panel_open(self._lyrics_panel),
+                'queue_panel_open':              self._panel_open(self._queue),
+                'queue':                         [t.filepath for t in self._queue.tracks],
                 'cover_locked_paths':            list(self._cover_locked_paths),
                 'lastfm_api_key':                _const_mod._lastfm_api_key,
                 'use_system_window_decorations': getattr(self, '_use_system_decorations', False),
@@ -1634,6 +2182,10 @@ class MainWindow(QMainWindow):
                                  for pl in self._playlists
                                  if pl.label != '__open_with__']
             cfg['known_paths'] = list(self._known_paths)
+            # Never includes a password — see remote.py / _on_share_mounted
+            cfg['network_shares'] = [
+                {k: v for k, v in s.items() if k != 'password'}
+                for s in self._network_shares]
             # Persist active tab so it can be restored on next launch
             cur = self._tabs.currentWidget()
             if cur is self._lib_page:
@@ -1646,7 +2198,9 @@ class MainWindow(QMainWindow):
             if total_w > 0:
                 cfg['table_col_widths'] = [self._lib_page.table.columnWidth(c) / total_w
                                            for c in range(len(COLS))]
-            # Persist splitter sizes (sidebar / content / lyrics)
+            # Persist the dock's own split (lyrics over queue) as a ratio
+            cfg['right_dock_ratio'] = round(self._dock_ratio, 4)
+            # Persist splitter sizes (sidebar / content / right dock)
             body = self.findChild(QSplitter, 'body_splitter')
             if body:
                 cfg['splitter_sizes'] = body.sizes()
@@ -1759,6 +2313,12 @@ class MainWindow(QMainWindow):
             data = json.loads(CONFIG_PATH.read_text())
             for kp in data.get('known_paths', []):
                 self._known_paths.add(kp)
+            self._network_shares = [dict(s) for s in data.get('network_shares', [])
+                                    if isinstance(s, dict) and s.get('uri')]
+            # Deferred so the window is up before any mount prompt or timeout:
+            # an unreachable server would otherwise stall behind the splash.
+            if self._network_shares:
+                QTimer.singleShot(600, self._remount_saved_shares)
 
             self._cover_locked_paths = set(data.get('cover_locked_paths', []))
             _cover_locked_set.update(self._cover_locked_paths)
@@ -1781,6 +2341,11 @@ class MainWindow(QMainWindow):
                 self._apply_decoration_mode(True)
             if data.get('lyrics_panel_open', False):
                 QTimer.singleShot(200, self._open_lyrics_panel_from_config)
+            # The tracks themselves are restored in _on_config_playlists_done,
+            # once the library is loaded and most of them resolve without I/O.
+            self._restore_queue_paths = list(data.get('queue', []))
+            if data.get('queue_panel_open', False):
+                QTimer.singleShot(200, self._open_queue_panel_from_config)
             # Restore table column ratios (deferred so viewport is fully sized)
             col_widths = data.get('table_col_widths', [])
             if col_widths:
@@ -1795,7 +2360,24 @@ class MainWindow(QMainWindow):
             if splitter_sizes and len(splitter_sizes) >= 2:
                 body = self.findChild(QSplitter, 'body_splitter')
                 if body:
-                    QTimer.singleShot(100, lambda s=splitter_sizes: body.setSizes(s))
+                    # Configs written while lyrics and the queue were separate
+                    # columns hold four sizes for three widgets (and older ones
+                    # three for four): trim or pad, then hand the dock whatever
+                    # width either panel had.
+                    sizes = list(splitter_sizes)
+                    if len(sizes) > body.count():
+                        dock = max(sizes[body.count() - 1:])
+                        sizes = sizes[:body.count() - 1] + [dock]
+                    sizes += [0] * (body.count() - len(sizes))
+                    # 300ms, after the panels themselves are restored at 200ms:
+                    # opening one re-splits the body, and the sizes the user
+                    # dragged are the ones that should survive that.
+                    QTimer.singleShot(300, lambda s=sizes: body.setSizes(s))
+            ratio = data.get('right_dock_ratio')
+            if ratio is not None:
+                # Applied by _size_right_dock when a panel opens (200ms), which
+                # is why nothing is scheduled here.
+                self._dock_ratio = min(0.9, max(0.1, float(ratio)))
             # Restore vertical splitter (content / control bar)
             vsplit_sizes = data.get('vsplit_sizes', [])
             if vsplit_sizes and len(vsplit_sizes) == 2 and hasattr(self, '_vsplit'):
@@ -1819,6 +2401,7 @@ class MainWindow(QMainWindow):
                 loader.start()
             else:
                 QTimer.singleShot(0, self._rebuild_library)
+                QTimer.singleShot(0, self._restore_queue)
                 self._close_splash()
         except Exception as e:
             print(f'Config load error: {e}')
@@ -1852,6 +2435,7 @@ class MainWindow(QMainWindow):
         """All playlists loaded — rebuild library index and finalize."""
         self._config_loader = None
         self._rebuild_library()
+        self._restore_queue()
         self._status.showMessage('Library ready', 3000)
         # Restore the previously active tab
         label = getattr(self, '_restore_tab_label', '__library__')
@@ -1871,6 +2455,29 @@ class MainWindow(QMainWindow):
             self._settings_save_timer.stop()
         QTimer.singleShot(0, self._save_config)
 
+    def _restore_queue(self):
+        """Rebuild the saved queue in its saved order.
+
+        Almost every entry resolves out of the just-loaded library for free;
+        only tracks that are no longer in any playlist need their tags read, and
+        paths that have disappeared are dropped. Order is the whole point of a
+        queue, so nothing here sorts.
+        """
+        paths = getattr(self, '_restore_queue_paths', None)
+        self._restore_queue_paths = None
+        if not paths:
+            return
+        tracks = []
+        for fp in paths:
+            t = self._resolve_track(fp)
+            if t is None:
+                if not os.path.isfile(fp):
+                    continue
+                t = read_metadata(fp)
+            tracks.append(t)
+        if tracks:
+            self._queue.set_tracks(tracks)
+
     # --- Keyboard ---
     def keyPressEvent(self, e):
         k, mod = e.key(), e.modifiers()
@@ -1881,7 +2488,8 @@ class MainWindow(QMainWindow):
         elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_MediaNext):       self._next_track()
         elif k == Qt.Key.Key_MediaPlay:                                   self._play_pause()
         elif k == Qt.Key.Key_MediaStop:
-            self._player.stop(); self._ctrlbar.set_play_icon(False); self._mpris.notify_status()
+            self._player.fade_stop(); self._ctrlbar.set_play_icon(False)
+            self._mpris.notify_status()
         elif k == Qt.Key.Key_F and mod == Qt.KeyboardModifier.ControlModifier:
             self._sidebar._search.setFocus(); self._sidebar._search.selectAll()
         else: super().keyPressEvent(e)

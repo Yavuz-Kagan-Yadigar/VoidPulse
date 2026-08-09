@@ -17,6 +17,233 @@ COLS  = ['Length', 'Title', 'Artist', 'Album', 'Sample Rate', 'Bit Depth', 'Type
 C_LEN=0; C_TIT=1; C_ART=2; C_ALB=3; C_SR=4; C_BD=5; C_TYP=6
 _HEADER_GRAB = 14   # px either side of a column boundary = 28px total touch target
 
+# Drag payload for tracks moved between views (table → queue panel): UTF-8,
+# one absolute filepath per line. It lives here rather than in queue_panel.py
+# because TrackTable produces it and queue_panel imports this module.
+QUEUE_MIME = 'application/x-voidpulse-tracks'
+
+
+def tracks_mime_data(filepaths: list) -> QMimeData:
+    """Build the drag payload for a set of tracks.
+
+    text/uri-list rides along so a drag that lands outside VoidPulse — a file
+    manager, another player — still carries something usable.
+    """
+    md = QMimeData()
+    md.setData(QUEUE_MIME, '\n'.join(filepaths).encode('utf-8'))
+    md.setUrls([QUrl.fromLocalFile(fp) for fp in filepaths])
+    return md
+
+
+def is_touch_pointer(e) -> bool:
+    """True when a mouse event was synthesized from a touchscreen contact.
+
+    Qt turns unconsumed touch events into mouse events, so every mouse handler
+    on a touch device sees a press/move/release stream that looks exactly like
+    a real one.  The pointing device behind it is still the touchscreen, which
+    is the only way to tell the two apart.
+    """
+    dev = getattr(e, 'pointingDevice', None)
+    if dev is None:
+        return False
+    d = dev()
+    return d is not None and d.type() == QInputDevice.DeviceType.TouchScreen
+
+
+class TouchDrag(QObject):
+    """Finger-driven drag and drop, standing in for QDrag on a touchscreen.
+
+    QDrag.exec() hands the gesture to the platform's drag manager, which follows
+    the *mouse* pointer.  A touch that Qt synthesized mouse events from never
+    moves that pointer, so the drag pixmap is painted wherever the cursor
+    happens to sit and stays there for the whole gesture — the finger drags
+    nothing.  This does the job by hand instead: a ghost that tracks the finger,
+    plus drag/drop events posted to whatever widget lies under it.
+
+    It reads the gesture from an **application-wide** event filter rather than
+    from the widget the drag started on.  Which object Qt delivers a finger's
+    events to changes halfway through one: QScroller claims the touch stream the
+    moment the contact travels, and Qt stops synthesizing mouse events for a
+    sequence it considers handled — so the starting widget can go completely
+    silent mid-drag, leaving the ghost frozen.  Application filters run before
+    every per-object filter, on events bound for widgets and windows alike, so
+    that is the one vantage point which sees the whole gesture.
+
+    The ghost is a child of the top-level window rather than a window of its
+    own, because Wayland does not let a client place its own windows; that also
+    confines drops to VoidPulse, which is where the only drop target — the queue
+    panel — lives anyway.
+    """
+
+    GHOST_ALPHA = 0.85
+    GHOST_MAX_W = 220
+    # Nothing at all for this long means the gesture was lost (the compositor
+    # took the contact, the window went away).  Rather than leave a ghost pinned
+    # to the window, give up.
+    WATCHDOG_MS = 6000
+
+    def __init__(self, source: QWidget, mime: QMimeData, pixmap: QPixmap,
+                 gpos: QPoint, on_finish=None):
+        super().__init__(source)
+        self._mime   = mime                 # kept alive for the whole gesture
+        self._win    = source.window()
+        self._target = None                 # widget currently under the finger
+        self._ok     = False                # …and whether it took the payload
+        self._start  = QPoint(gpos)
+        self._last   = QPoint(gpos)
+        self._moved  = False                # travelled past startDragDistance
+        self._done   = False
+        self._on_finish = on_finish         # (dropped, moved, gpos)
+        pm = self._ghost_pixmap(pixmap)
+        self._ghost = QLabel(self._win)
+        # childAt() skips transparent children, so the ghost never hides the
+        # drop target it is hovering over.
+        self._ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._ghost.setPixmap(pm)
+        dpr = pm.devicePixelRatio() or 1.0
+        self._ghost.resize(int(pm.width() / dpr), int(pm.height() / dpr))
+        self._hot = QPoint(self._ghost.width() // 2, self._ghost.height() // 2)
+        self._ghost.show()
+        self._ghost.raise_()
+        self._watchdog = QTimer(self)
+        self._watchdog.setSingleShot(True)
+        self._watchdog.setInterval(self.WATCHDOG_MS)
+        self._watchdog.timeout.connect(lambda: self.finish(None))
+        self.move(gpos)
+        QApplication.instance().installEventFilter(self)
+
+    # ── the gesture, read off the whole application ──────────────────────────
+
+    def eventFilter(self, obj, e):
+        if self._done:
+            return False
+        t = e.type()
+        if t == QEvent.Type.TouchUpdate:
+            pts = e.points()
+            if pts:
+                self.move(pts[0].globalPosition().toPoint())
+            # Consumed for widgets so QScroller cannot pan the view out from
+            # under the drag; left alone for the window, whose touch bookkeeping
+            # has to stay consistent for the release to arrive at all.
+            return isinstance(obj, QWidget)
+        if t == QEvent.Type.TouchEnd:
+            pts = e.points()
+            self.finish(pts[0].globalPosition().toPoint() if pts else self._last)
+            return isinstance(obj, QWidget)
+        if t == QEvent.Type.TouchCancel:
+            self.finish(None)
+            return False
+        if t == QEvent.Type.MouseMove:
+            self.move(e.globalPosition().toPoint())
+            return False
+        if t == QEvent.Type.MouseButtonRelease:
+            self.finish(e.globalPosition().toPoint())
+            return False
+        if t in (QEvent.Type.MouseButtonPress, QEvent.Type.TouchBegin):
+            self.finish(None)         # a new gesture always wins
+            return False
+        return False
+
+    @classmethod
+    def _ghost_pixmap(cls, pm: QPixmap) -> QPixmap:
+        """Scale the grabbed card/row down and make it semi-transparent."""
+        dpr = pm.devicePixelRatio() or 1.0
+        if pm.width() / dpr > cls.GHOST_MAX_W:
+            pm = pm.scaledToWidth(int(cls.GHOST_MAX_W * dpr),
+                                  Qt.TransformationMode.SmoothTransformation)
+            pm.setDevicePixelRatio(dpr)
+        out = QPixmap(pm.size())
+        out.setDevicePixelRatio(dpr)
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.setOpacity(cls.GHOST_ALPHA)
+        p.drawPixmap(0, 0, pm)
+        p.end()
+        return out
+
+    def move(self, gpos: QPoint):
+        """Follow the finger and keep the widget under it informed."""
+        if self._done:
+            return
+        self._watchdog.start()
+        self._last = QPoint(gpos)
+        if (gpos - self._start).manhattanLength() >= QApplication.startDragDistance():
+            self._moved = True
+        self._ghost.move(self._win.mapFromGlobal(gpos) - self._hot)
+        w = self._target_at(gpos)
+        if w is not self._target:
+            self._leave()
+            self._target = w
+            self._ok = self._send(w, QEvent.Type.DragEnter, gpos) if w is not None else False
+        elif w is not None and self._ok:
+            self._send(w, QEvent.Type.DragMove, gpos)
+
+    def finish(self, gpos):
+        """End the gesture: drop it if the finger travelled, else abandon it.
+
+        `gpos` None abandons it outright (cancel, watchdog, a fresh gesture).
+        """
+        if self._done:
+            return False
+        if gpos is not None:
+            self.move(gpos)            # bring the target under the release point
+        self._done = True
+        self._watchdog.stop()
+        QApplication.instance().removeEventFilter(self)
+        dropped = False
+        if gpos is not None and self._moved:
+            target, ok = self._target, self._ok
+            self._target = None        # no DragLeave: the drop ends the gesture
+            if target is not None and ok:
+                dropped = self._send(target, QEvent.Type.Drop, gpos)
+        else:
+            self._leave()
+        self._close()
+        cb, self._on_finish = self._on_finish, None
+        if cb is not None:
+            cb(dropped, self._moved, gpos if gpos is not None else self._last)
+        return dropped
+
+    def _close(self):
+        self._ghost.hide()
+        self._ghost.setParent(None)
+        self._ghost.deleteLater()
+        self.deleteLater()
+
+    def _leave(self):
+        if self._target is not None and self._ok:
+            QApplication.sendEvent(self._target, QDragLeaveEvent())
+        self._target = None
+        self._ok = False
+
+    # ── plumbing ─────────────────────────────────────────────────────────────
+
+    def _target_at(self, gpos: QPoint):
+        """Deepest widget under the finger that accepts drops, if any."""
+        pos = self._win.mapFromGlobal(gpos)
+        if not self._win.rect().contains(pos):
+            return None
+        w = self._win.childAt(pos) or self._win
+        while w is not None and not w.acceptDrops():
+            w = w.parentWidget()
+        return w
+
+    def _send(self, w: QWidget, etype, gpos: QPoint) -> bool:
+        """Post one hand-built drag event to `w`; True when it accepted it."""
+        pos  = w.mapFromGlobal(gpos)
+        act  = Qt.DropAction.CopyAction
+        btn  = Qt.MouseButton.LeftButton
+        mod  = Qt.KeyboardModifier.NoModifier
+        if etype == QEvent.Type.DragEnter:
+            ev = QDragEnterEvent(pos, act, self._mime, btn, mod)
+        elif etype == QEvent.Type.DragMove:
+            ev = QDragMoveEvent(pos, act, self._mime, btn, mod)
+        else:
+            ev = QDropEvent(QPointF(pos), act, self._mime, btn, mod)
+        QApplication.sendEvent(w, ev)
+        return ev.isAccepted()
+
+
 class SeekSlider(QSlider):
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -171,8 +398,28 @@ class DoubleTapTracker:
 
 
 class LongPressFilter(QObject):
+    """The whole pointer gesture set for a TrackTable viewport.
+
+    Mouse: Qt's own machinery starts drags and double-clicks; this adds the
+    long press.  Touch: everything is driven from the touch branches, because
+    the mouse events Qt synthesizes from a contact are a second, misleading
+    stream — a QDrag started from one follows the mouse cursor, which the finger
+    never moved, so the drag pixmap would sit still in the wrong place.
+
+      tap, tap            → play the row
+      flick               → scroll (QScroller, untouched)
+      hold                → the row lifts under the finger
+      hold, then move     → drag it to the queue panel
+      hold, then let go   → context menu
+
+    A lifted row belongs to TouchDrag from then on: it reads the rest of the
+    gesture off the application, which is the only place it stays visible.
+    """
     triggered = pyqtSignal(int, QPoint)
     DELAY_MS = 550; DRIFT_PX = 10
+
+    _MOUSE_TYPES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
+                    QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick)
 
     def __init__(self, table):
         super().__init__(table)
@@ -180,9 +427,36 @@ class LongPressFilter(QObject):
         self._timer = QTimer(self); self._timer.setSingleShot(True)
         self._timer.setInterval(self.DELAY_MS); self._timer.timeout.connect(self._fire)
         self._taps = DoubleTapTracker()
+        # Touch drag state
+        self._tdrag       = None      # TouchDrag in progress, if any
+        self._touch_mouse = False     # last mouse event came from a finger
+        self._t_start_g   = QPoint()  # global position the contact started at
+        self._t_row       = -1        # row under the finger
+        self._lift = QTimer(self); self._lift.setSingleShot(True)
+        self._lift.setInterval(self.DELAY_MS); self._lift.timeout.connect(self._on_lift)
+
+    @property
+    def touch_active(self) -> bool:
+        """True while the pointer stream in progress belongs to a finger."""
+        return self._touch_mouse or self._tdrag is not None
+
+    def _drag_done(self, dropped: bool, moved: bool, gpos: QPoint, row: int):
+        """A lifted row was let go: dropped, or put back and its menu shown.
+
+        The menu runs its own event loop, so it is posted rather than opened
+        here — this is called while the release is still being dispatched.
+        """
+        self._tdrag = None
+        if not moved:
+            QTimer.singleShot(0, lambda: self.triggered.emit(row, gpos))
 
     def eventFilter(self, obj, event):
         t = event.type()
+        if t in self._MOUSE_TYPES:
+            if is_touch_pointer(event):
+                self._touch_mouse = True
+                return False          # the touch branches already handled it
+            self._touch_mouse = False
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             item = self._table.itemAt(event.pos())
             self._row = item.row() if item else -1
@@ -206,13 +480,27 @@ class LongPressFilter(QObject):
         elif t == QEvent.Type.TouchBegin:
             pts = event.points()
             if pts:
-                self._taps.press(pts[0].position().toPoint())
-        elif t == QEvent.Type.TouchEnd:
+                vp_pos = pts[0].position().toPoint()
+                self._taps.press(vp_pos)
+                self._t_start_g = pts[0].globalPosition().toPoint()
+                item = self._table.itemAt(vp_pos)
+                self._t_row = item.row() if item else -1
+                if self._t_row >= 0:
+                    self._lift.start()
+        elif t == QEvent.Type.TouchUpdate:
             pts = event.points()
-            if pts:
+            if pts and self._lift.isActive() \
+                    and self._t_moved(pts[0].globalPosition().toPoint()):
+                # Travelled before the row was picked up → it's a scroll
+                self._lift.stop(); self._t_row = -1
+        elif t == QEvent.Type.TouchEnd:
+            self._lift.stop()
+            pts = event.points()
+            self._t_row = -1
+            if pts and self._tdrag is None:
                 self._on_tap_release(pts[0].position().toPoint())
         elif t == QEvent.Type.TouchCancel:
-            self._taps.cancel()
+            self._lift.stop(); self._taps.cancel(); self._t_row = -1
         return False
 
     def _on_tap_release(self, pos: QPoint):
@@ -225,6 +513,37 @@ class LongPressFilter(QObject):
         if self._row >= 0:
             self.triggered.emit(self._row, self._gpos); self._row = -1
             self._taps.cancel()   # a long press is not the first half of a tap pair
+
+    # ── touch drag ───────────────────────────────────────────────────────────
+
+    def _t_moved(self, gpos: QPoint) -> bool:
+        return (gpos - self._t_start_g).manhattanLength() >= QApplication.startDragDistance()
+
+    def _row_pixmap(self, row: int) -> QPixmap:
+        """Grab of the row, full viewport width, for the drag ghost."""
+        vp = self._table.viewport()
+        r  = self._table.visualRect(self._table.model().index(row, C_TIT))
+        if not r.isValid():
+            return QPixmap()
+        return vp.grab(QRect(0, r.y(), vp.width(), r.height()))
+
+    def _on_lift(self):
+        """Finger held still on a row — pick it up, ghost under the finger."""
+        row = self._t_row
+        if row < 0 or self._tdrag is not None:
+            return
+        item = self._table.item(row, C_TIT)
+        fp   = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not fp:
+            return
+        self._taps.cancel()          # a pick-up is not half of a tap pair
+        self._timer.stop()           # …nor a mouse long press
+        vp = self._table.viewport()
+        QScroller.scroller(vp).stop()
+        self._tdrag = TouchDrag(
+            vp, tracks_mime_data([fp]), self._row_pixmap(row), self._t_start_g,
+            on_finish=lambda dropped, moved, gpos, row=row:
+                self._drag_done(dropped, moved, gpos, row))
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -389,6 +708,15 @@ class TrackTable(QTableWidget):
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setShowGrid(False); self.setAlternatingRowColors(False); self.setWordWrap(False)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # Rows can be dragged into the queue panel. DragOnly: nothing is ever
+        # dropped back into a library or playlist view, whose order is the
+        # sort's to decide. A drag needs a press plus startDragDistance of
+        # movement, so it cannot be confused with the tap pairing that starts a
+        # track, and QScroller only claims touch events, not mouse ones.
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.setDragDropOverwriteMode(False)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda pos: self._emit_ctx(pos))
         hh = self.horizontalHeader()
@@ -465,6 +793,31 @@ class TrackTable(QTableWidget):
                 self.activate_row(item.row())
                 return True   # consumed — prevents duplicate from doubleClicked
         return super().eventFilter(obj, event)
+
+    def startDrag(self, actions):
+        """Mouse only.  Qt's drag pixmap is painted at the cursor, which a
+        finger never moves; touch gets LongPressFilter's hand-driven TouchDrag,
+        started by holding a row rather than by this.
+        """
+        if self._lp.touch_active:
+            return
+        super().startDrag(actions)
+
+    def mimeData(self, items):
+        """Payload for a drag out of the table: the filepaths of the picked rows.
+
+        Selection is per-row, so `items` holds every column of each row; the
+        filepath only lives on the Title cell (put there by _fill_row for the
+        cover delegate), and rows are de-duplicated in visual order.
+        """
+        seen, paths = set(), []
+        for it in sorted(items, key=lambda i: i.row()):
+            if it.column() != C_TIT or it.row() in seen:
+                continue
+            fp = it.data(Qt.ItemDataRole.UserRole)
+            if fp:
+                seen.add(it.row()); paths.append(fp)
+        return tracks_mime_data(paths)
 
     def _on_cover_loaded(self, fp: str, size: int):
         """Repaint the Title cell whose cover just arrived from the async loader."""
@@ -758,6 +1111,17 @@ class GalleryView(QWidget):
         self._taps = DoubleTapTracker()
         self._last_act_ti = -1; self._last_act_ms = 0
         self._scroll.viewport().installEventFilter(self)
+
+        # Touch drag: hold a card still to lift it, then drag it to the queue.
+        # Moving before the timer fires leaves the gesture to QScroller, so a
+        # flick still scrolls.
+        self._tdrag     = None       # TouchDrag in progress, if any
+        self._t_start_g = QPoint()   # global position of the touch that started it
+        self._t_vis_pos = -1         # visual position of the card under the finger
+        self._t_lift_timer = QTimer(self)
+        self._t_lift_timer.setSingleShot(True)
+        self._t_lift_timer.setInterval(LongPressFilter.DELAY_MS)
+        self._t_lift_timer.timeout.connect(self._on_touch_lift)
 
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
@@ -1086,7 +1450,7 @@ class GalleryView(QWidget):
 
         p.end()
 
-    # ── Mouse ─────────────────────────────────────────────────────────────────
+    # ── Input ─────────────────────────────────────────────────────────────────
 
     def activate_track(self, ti: int):
         """Sole entry point for 'start this track' — see TrackTable.activate_row."""
@@ -1099,29 +1463,90 @@ class GalleryView(QWidget):
         self.row_activated.emit(ti)
 
     def eventFilter(self, obj, event) -> bool:
-        """Pair up taps on the scroll viewport (touch), which never reach the
-        canvas' mouse handlers once QScroller owns the gesture."""
+        """Own the whole touch gesture on the scroll viewport.
+
+        Touch never reaches the canvas' mouse handlers once QScroller claims the
+        stream, so tap pairing, the long press and the pick-up all live here:
+
+          tap, tap            → play the track
+          flick               → scroll (QScroller, untouched)
+          hold                → the card lifts under the finger
+          hold, then move     → drag it to the queue panel
+          hold, then let go   → context menu
+
+        Once a card is lifted the gesture belongs to TouchDrag, which reads it
+        off the application rather than this viewport — see its docstring for
+        why the viewport cannot be trusted to keep receiving it.
+        """
         if obj is self._scroll.viewport():
             t = event.type()
             if t == QEvent.Type.TouchBegin:
                 pts = event.points()
                 if pts:
-                    self._taps.press(self._to_canvas(pts[0].position().toPoint()))
-            elif t == QEvent.Type.TouchEnd:
+                    cpos = self._to_canvas(pts[0].position().toPoint())
+                    self._taps.press(cpos)
+                    self._t_start_g = pts[0].globalPosition().toPoint()
+                    self._t_vis_pos = self._pos_at(cpos)
+                    if self._t_vis_pos >= 0:
+                        self._t_lift_timer.start()
+            elif t == QEvent.Type.TouchUpdate:
                 pts = event.points()
-                if pts:
+                if pts and self._t_lift_timer.isActive() \
+                        and self._t_moved(pts[0].globalPosition().toPoint()):
+                    # Travelled before the card was picked up → it's a scroll
+                    self._t_lift_timer.stop()
+                    self._t_vis_pos = -1
+            elif t == QEvent.Type.TouchEnd:
+                self._t_lift_timer.stop()
+                pts = event.points()
+                self._t_vis_pos = -1
+                if pts and self._tdrag is None:
                     pos = self._to_canvas(pts[0].position().toPoint())
                     if self._taps.release(pos, self._track_idx_at(pos)):
                         self.activate_track(self._track_idx_at(pos))
             elif t == QEvent.Type.TouchCancel:
+                self._t_lift_timer.stop()
                 self._taps.cancel()
+                self._t_vis_pos = -1
         return super().eventFilter(obj, event)
+
+    def _t_moved(self, gpos: QPoint) -> bool:
+        return (gpos - self._t_start_g).manhattanLength() >= QApplication.startDragDistance()
+
+    def _on_touch_lift(self):
+        """Finger held still on a card — pick it up, ghost under the finger."""
+        pos = self._t_vis_pos
+        if not (0 <= pos < len(self._vis_idx)) or self._tdrag is not None:
+            return
+        self._taps.cancel()          # a pick-up is not half of a tap pair
+        QScroller.scroller(self._scroll.viewport()).stop()
+        ti = self._vis_idx[pos]
+        self._tdrag = TouchDrag(
+            self._canvas, tracks_mime_data([self._tracks[ti].filepath]),
+            self._card_pixmap(pos), self._t_start_g,
+            on_finish=lambda dropped, moved, gpos, ti=ti:
+                self._touch_drag_done(dropped, moved, gpos, ti))
+
+    def _touch_drag_done(self, dropped: bool, moved: bool, gpos: QPoint, ti: int):
+        """A lifted card was let go: dropped, or put back and its menu shown.
+
+        The menu runs its own event loop, so it is posted rather than opened
+        here — this is called while the release is still being dispatched.
+        """
+        self._tdrag = None
+        if not moved:
+            QTimer.singleShot(0, lambda: self.ctx_requested.emit(ti, gpos))
 
     def _to_canvas(self, vp_pos: QPoint) -> QPoint:
         """Scroll-viewport point → canvas point (the canvas slides under it)."""
         return self._canvas.mapFrom(self._scroll.viewport(), vp_pos)
 
     def _canvas_mouse_press(self, e: QMouseEvent):
+        # Touch is driven entirely from eventFilter's touch branch; the mouse
+        # events Qt synthesizes from it are a duplicate stream and would start a
+        # second long press and a QDrag that cannot follow the finger.
+        if is_touch_pointer(e):
+            return
         self._long_press_timer.stop()
         if e.button() == Qt.MouseButton.LeftButton:
             self._press_pos      = e.pos()
@@ -1135,6 +1560,8 @@ class GalleryView(QWidget):
                 self.ctx_requested.emit(ti, e.globalPosition().toPoint())
 
     def _canvas_mouse_release(self, e: QMouseEvent):
+        if is_touch_pointer(e):
+            return
         self._long_press_timer.stop()
         self._press_vis_pos = -1
         if e.button() == Qt.MouseButton.LeftButton:
@@ -1143,13 +1570,22 @@ class GalleryView(QWidget):
                 self.activate_track(ti)
 
     def _canvas_dblclick(self, e: QMouseEvent):
+        if is_touch_pointer(e):
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             self._taps.cancel()   # this event already stands for the pair
             self.activate_track(self._track_idx_at(e.pos()))
 
     def _canvas_mouse_move(self, e: QMouseEvent):
+        if is_touch_pointer(e):
+            return
         if (e.pos() - self._press_pos).manhattanLength() > 8:
             self._long_press_timer.stop()
+        if (e.buttons() & Qt.MouseButton.LeftButton) and self._press_vis_pos >= 0 \
+                and (e.pos() - self._press_pos).manhattanLength() \
+                    >= QApplication.startDragDistance():
+            self._start_card_drag()
+            return
         pos = self._pos_at(e.pos())
         ti  = self._vis_idx[pos] if pos >= 0 else -1
         if ti != self._hovered_idx:
@@ -1161,6 +1597,44 @@ class GalleryView(QWidget):
     def _canvas_leave(self, e):
         old = self._hovered_idx
         self._hovered_idx = -1
+        self._invalidate_track(old)
+
+    def _card_pixmap(self, pos: int) -> QPixmap:
+        """Grab of the card at visual `pos`, scaled down for a drag ghost."""
+        rect = self._card_rect(pos)
+        if not rect.isValid():
+            return QPixmap()
+        pm = self._canvas.grab(rect)
+        if pm.width() > 200:
+            pm = pm.scaledToWidth(200, Qt.TransformationMode.SmoothTransformation)
+        return pm
+
+    def _start_card_drag(self):
+        """Drag the pressed card out of the gallery (→ the queue panel).
+
+        The canvas is a single painted widget, not an item view, so there is no
+        Qt drag machinery to enable — the drag is started by hand once the
+        pointer has moved past startDragDistance with a card under the press.
+        Touch takes _on_touch_lift instead: a QDrag pixmap is painted at the
+        cursor, which a finger never moves.
+        """
+        pos = self._press_vis_pos
+        self._long_press_timer.stop()
+        self._taps.cancel()          # a drag is not half of a tap pair
+        self._press_vis_pos = -1
+        if not (0 <= pos < len(self._vis_idx)):
+            return
+        fp = self._tracks[self._vis_idx[pos]].filepath
+        pm = self._card_pixmap(pos)
+        drag = QDrag(self._canvas)
+        drag.setMimeData(tracks_mime_data([fp]))
+        if not pm.isNull():
+            drag.setPixmap(pm)
+            drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
+        drag.exec(Qt.DropAction.CopyAction)
+        # No mouse-release reaches the canvas after a drag, so drop the hover
+        # highlight the pointer left behind.
+        old, self._hovered_idx = self._hovered_idx, -1
         self._invalidate_track(old)
 
     def _on_long_press(self):

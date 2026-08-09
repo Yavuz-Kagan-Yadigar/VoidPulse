@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.voidpulse.VoidPulse</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>VoidPulse</name>
+  <summary>Touch and OLED friendly advanced music player</summary>
+  <description>
+    <p>Touch and OLED friendly advanced music player</p>
+  </description>
+  <launchable type="desktop-id">org.voidpulse.VoidPulse.desktop</launchable>
+  <releases>
+    <release version="2.0.0" date="2026-08-09"/>
+  </releases>
+  <url type="homepage">https://github.com/Yavuz-Kagan-Yadigar/VoidPulse</url>
+  <developer_name>Yavuz</developer_name>
+  <content_rating type="oars-1.1"/>
+</component>

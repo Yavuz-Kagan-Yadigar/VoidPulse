@@ -12,6 +12,7 @@ from constants import *
 from cover_art import read_metadata
 from constants import EQ_TYPE_HIGHSHELF, EQ_TYPE_LOWSHELF, GST_BANDS, MAX_EQ_BANDS, MIN_DB, VIZ_BANDS
 import re as _re
+import remote_io
 import urllib.parse as _urlparse
 from time import monotonic as _monotonic
 import numpy as _np
@@ -31,6 +32,37 @@ class RepeatMode(enum.Enum):
     NONE = 0; ALL = 1; ONE = 2
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Fade curves
+# ══════════════════════════════════════════════════════════════════════════════
+# 60 Hz, matching the render timer, so a ramp never lands between two repaints
+# and leaves the bars a frame behind what is audible. playbin's volume element
+# interpolates nothing itself, so the tick rate is the ramp's resolution; a
+# 12 s crossfade still costs only ~720 property writes in total.
+_FADE_TICK_MS = 16
+
+# Shortest ramp worth running. Below this a reversal is a click either way, so
+# a nearly-finished fade that gets reversed snaps instead of crawling.
+_FADE_MIN_MS = 40
+
+
+def _fade_curve_cosine(x: float) -> float:
+    """Raised cosine 0→1. Used for play/pause fades, where only one stream is
+    audible: it starts and ends with zero slope, so neither end clicks."""
+    return 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, x)))
+
+
+def _fade_curve_equal_power_in(x: float) -> float:
+    """sin(x·π/2) — paired with _fade_curve_equal_power_out so the two streams'
+    powers sum to a constant through a crossfade instead of dipping in the
+    middle, which is what a plain linear pair does."""
+    return math.sin(max(0.0, min(1.0, x)) * math.pi * 0.5)
+
+
+def _fade_curve_equal_power_out(x: float) -> float:
+    return math.cos(max(0.0, min(1.0, x)) * math.pi * 0.5)
+
+
 class Player(QObject):
     sig_pos       = pyqtSignal(int)
     sig_dur       = pyqtSignal(int)
@@ -42,6 +74,10 @@ class Player(QObject):
     sig_busy      = pyqtSignal(bool)   # True = pipeline reloading; False = done
     sig_fs_changed = pyqtSignal(int)   # emitted when track sample rate changes (main thread)
     sig_volume_changed = pyqtSignal(int)  # emitted when volume changes programmatically (0–100)
+    sig_xfade_due = pyqtSignal()       # crossfade point reached — MainWindow starts the next track
+    sig_buffering = pyqtSignal(int)    # local-copy progress 0–100 (non-seekable shares)
+    _sig_copy_done     = pyqtSignal(str, str)   # copy thread → main: (share path, local path)
+    _sig_copy_progress = pyqtSignal(str, int)   # copy thread → main: (share path, percent)
     _sig_drift_gst_ms = pyqtSignal(float, float)  # GLib thread → main thread: (gst_pos_ms, query_wall_t)
     _sig_dur_gst_ms   = pyqtSignal(int)           # GLib thread → main thread: confirmed duration (ms)
     _sig_gain_analyzed = pyqtSignal(str, float)   # background thread → main thread: (filepath, gain_db)
@@ -85,6 +121,11 @@ class Player(QObject):
         # Viz state, all preallocated numpy arrays
         self._viz_spec = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # inertia state
         # Viz mapping tables — set by ControlBar.set_viz_tables()
+        # Power-law gamma on the normalised bar height, from config.json's
+        # viz_gamma. Held per-Player rather than read off the constant so a
+        # hand-edit of the file takes effect on the next launch without a
+        # rebuild — see _compute_viz_frame step 4 and set_viz_gamma().
+        self._viz_gamma: float = VIZ_GAMMA
         self._viz_ba: object = None          # int32 (VIZ_BANDS,)
         self._viz_bb: object = None
         self._viz_bt: object = None
@@ -141,6 +182,51 @@ class Player(QObject):
         self._balance           = 0
         self._balance_el        = None     # GStreamer volume element ref pair (updated per load)
 
+        # ── Fading / crossfading ─────────────────────────────────────────────
+        # _fade_gain multiplies into _effective_volume(), so every existing path
+        # that writes playbin's volume (set_volume, load, the ReplayGain unmute)
+        # keeps the fade level instead of stamping over it.
+        self._fade_gain:   float = 1.0
+        self._fade_ms:     int   = 0    # play/pause fade duration, 0 = instant
+        self._crossfade_ms: int  = 0    # 0 = crossfading disabled
+        # Preroll/seek muting is a *separate* multiplier from the fade, not a
+        # raw write to playbin's volume. Sharing one property made the two fight:
+        # the mute wrote 0.0, and the fade's next tick — at most one tick later —
+        # wrote the ramp level straight back over it, so the start of a track
+        # leaked through; in the other direction the mute's restore wrote full
+        # level over a ramp in progress. Nested holds (a seek inside a preroll)
+        # count, and _gate_gen invalidates holds belonging to a superseded load
+        # so a stale singleShot cannot unmute the pipeline that replaced it.
+        self._gate_n:      int   = 0    # outstanding mute holds; >0 = silent
+        self._gate_gen:    int   = 0
+        self._gain_gate_token = None    # hold taken while ReplayGain is analysing
+        # Set when a fade-in was requested but the pipeline is muted through a
+        # preroll, so the ramp would finish unheard. _gate_release runs it
+        # instead, at the moment sound can actually come out.
+        self._fade_arm_in_ms: int = 0
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._fade_timer.setInterval(_FADE_TICK_MS)
+        self._fade_timer.timeout.connect(self._tick_fade)
+        self._fade_t0:     float = 0.0   # monotonic start of the current ramp
+        self._fade_dur:    float = 0.0   # ramp length in seconds
+        self._fade_from:   float = 1.0
+        self._fade_to:     float = 1.0
+        # Play state the ramp currently running is heading toward, or None for a
+        # ramp that is not a play/pause transition (crossfade). Read through the
+        # ui_playing property; see play_pause()'s fade branch.
+        self._fade_intent: bool | None = None
+        self._fade_curve   = _fade_curve_cosine
+        self._fade_done_cb = None        # called once the ramp reaches _fade_to
+        # Pipelines handed over by a crossfade: still playing, ramping to
+        # silence, owned by their own timers until they are torn down.
+        self._ghosts: list = []
+        # Set for one load() to make it detach instead of destroy — see load()
+        self._pending_crossfade_ms: int = 0
+        # True once sig_xfade_due has fired for the currently loaded track, so
+        # the position tick emits it exactly once per track.
+        self._xfade_emitted: bool = False
+
         self._chain, self._out = self._detect_chain()
         print(f'[Player] chain: "{self._chain or "(none)"}" → {self._out}  (pre-config default)')
         # Output device; 'pipewire' means the detected software sink
@@ -176,6 +262,21 @@ class Player(QObject):
             Gst.MessageType.WARNING    |
             Gst.MessageType.ELEMENT
         )
+
+        # Local-copy state for shares that cannot seek. All inert unless one is
+        # in play, so every other source keeps exactly its old behaviour.
+        # Tags for the track in play, so reloads (device switch, stall recovery,
+        # the local-copy swap) never re-read them off the network.
+        self._track_meta_cache: dict = {}
+        self._media_path:    Optional[str] = None   # what the pipeline opened
+        self._copy_src:      Optional[str] = None   # share path being copied
+        self._copy_path:     Optional[str] = None   # finished local copy
+        self._copy_thread                  = None
+        self._copy_cancel                  = None
+        self._copy_pct:      int           = 0
+        self._seek_fetch                   = None   # seek waiting on a fetch
+        self._sig_copy_done.connect(self._on_copy_done)
+        self._sig_copy_progress.connect(self._on_copy_progress)
 
         # _drift_pending keeps one position/duration query in flight at a time
         self._drift_pending: bool = False
@@ -255,20 +356,185 @@ class Player(QObject):
         """True iff dev is a real ALSA hw device (not pipewire/pulse/auto)."""
         return bool(dev) and dev not in ("pipewire", "pulseaudio", "pulse", "auto")
 
-    def load(self, filepath: str, paused: bool = False):
+    # ── local copies of non-seekable shares ─────────────────────────────────
+
+    def _start_local_copy(self, filepath: str):
+        """Fetch a seekable local copy of a file on an FTP/FTPS share.
+
+        Started only when a seek asks for it, and with the pipeline torn down
+        first — never in the background while the track plays. Two readers on
+        one GVfs FTP mount do not share it, they serialise: measured on a
+        120 KiB/s link, copying in the background pushed the start of playback
+        from 4.5 s to 33 s while the link sat mostly idle. So the file is read
+        once, by whoever needs it: the pipeline while streaming, this while
+        fetching.
+        """
+        if self._copy_src == filepath and (self._copy_path or self._copy_thread):
+            return                      # already have it, or already fetching
+        self._discard_local_copy()
+        self._copy_src = filepath
+        self._copy_cancel = threading.Event()
+        cancel = self._copy_cancel
+
+        def _run():
+            dest = None
+            try:
+                dest = remote_io.copy_to_local(
+                    filepath, cancel,
+                    lambda pct: self._sig_copy_progress.emit(filepath, pct))
+            except Exception as e:
+                # Cancellation is routine — the user changed track mid-fetch —
+                # so only a real failure is worth reporting.
+                if not cancel.is_set():
+                    print(f'[Player] local copy failed for {filepath}: {e!r}')
+            if cancel.is_set():
+                remote_io.discard_local(dest)
+                return
+            self._sig_copy_done.emit(filepath, dest or '')
+
+        self._copy_thread = threading.Thread(
+            target=_run, daemon=True, name='vp-remote-copy')
+        self._copy_thread.start()
+
+    def _begin_seek_fetch(self, ms: int):
+        """Serve a seek on a share that cannot seek, by fetching the track first.
+
+        The pipeline is torn down before the fetch starts, not left streaming
+        alongside it: one GVfs FTP mount serves one reader at a time, so leaving
+        playback running would slow the fetch to a crawl and stall the audio
+        anyway. Audio therefore stops for the length of the download — the same
+        thing a seek does, just longer — and resumes at the requested position,
+        after which every further seek on this track is instant.
+        """
+        fp = self._last_filepath
+        if not fp:
+            return
+        if self._copy_path and self._copy_src == fp:
+            self._swap_to_local(ms)      # already fetched: jump straight there
+            return
+        self._seek_fetch = {'target': ms, 'was_playing': self._playing, 'path': fp}
+        self._anchor_now(float(ms))      # seekbar sits at the target while waiting
+        self._pos_playing = False
+        self.sig_busy.emit(True)
+        self.sig_buffering.emit(0)
+        self._destroy()                  # release the share before reading it again
+        self._start_local_copy(fp)
+
+    def _on_copy_progress(self, filepath: str, pct: int):
+        if filepath != self._last_filepath:
+            return
+        self._copy_pct = pct
+        self.sig_buffering.emit(pct)
+
+    def _on_copy_done(self, filepath: str, dest: str):
+        """The local copy finished (main thread)."""
+        self._copy_thread = None
+        fetch = self._seek_fetch
+        if filepath != self._last_filepath:
+            remote_io.discard_local(dest)   # user moved on while it downloaded
+            return
+        self._copy_path = dest or None
+        self._copy_pct = 100 if dest else 0
+        self.sig_buffering.emit(self._copy_pct)
+        if fetch is None or fetch.get('path') != filepath:
+            return
+        self._seek_fetch = None
+        self.sig_busy.emit(False)
+        if self._copy_path:
+            self._load_and_seek(filepath, int(fetch['target']),
+                                paused=not fetch['was_playing'],
+                                media_path=self._copy_path)
+        else:
+            # Without the copy the seek can never be served, and the pipeline is
+            # already down. Put the track back the way it was, from the start,
+            # rather than leaving silence and a seekbar parked at a position
+            # nothing ever reached.
+            self.sig_err.emit('Could not seek: this share cannot seek and the '
+                              'local copy failed.')
+            self.load(filepath, paused=not fetch['was_playing'])
+
+    def _swap_to_local(self, ms: int):
+        """Reopen the current track from its local copy, positioned at ms.
+
+        The pipeline is rebuilt rather than retargeted because playbin's uri is
+        fixed once it is playing. That costs the same gap a seek costs anyway,
+        which is why the swap is deferred until a seek actually asks for it:
+        someone who only ever presses play never pays for it.
+        """
+        if not self._copy_path or self._last_filepath is None:
+            return
+        was_playing = self._playing
+        self._load_and_seek(self._last_filepath, int(max(0, ms)),
+                            paused=not was_playing, media_path=self._copy_path)
+
+    def _discard_local_copy(self):
+        """Cancel any fetch in flight and delete the copy on disk."""
+        if self._copy_cancel is not None:
+            self._copy_cancel.set()
+        self._copy_cancel = None
+        self._copy_thread = None
+        remote_io.discard_local(self._copy_path)
+        self._copy_path = None
+        self._copy_src = None
+        self._copy_pct = 0
+
+    def load(self, filepath: str, paused: bool = False, media_path: str = None,
+             track=None):
         self._last_filepath = filepath   # remember for dead-pipe recovery in play_pause
+        # A crossfade keeps the outgoing pipeline alive as a ghost rather than
+        # destroying it, so both streams overlap. _destroy() still runs for its
+        # bookkeeping — the pipe is already gone by then, so it only resets state.
+        xfade_ms = self._pending_crossfade_ms
+        self._pending_crossfade_ms = 0
+        crossfading = bool(xfade_ms) and self._detach_to_ghost(xfade_ms)
         self._destroy()
+        self._xfade_emitted = False
+        # New pipeline, so no mute hold taken against the old one survives, and
+        # no stale singleShot from it may release one against this one.
+        self._gate_reset()
+        if crossfading:
+            self._fade_gain = 0.0
+        else:
+            self._fade_gain = 1.0
         self._spec_serial += 1
         self._pipe = Gst.ElementFactory.make('playbin', None)
         if not self._pipe:
             self.sig_err.emit('playbin unavailable'); return
-        self._pipe.set_property('uri', Path(filepath).as_uri())
+        # media_path is what the pipeline actually opens; filepath stays the
+        # track's identity for metadata, ReplayGain, MPRIS and the playing-row
+        # match. They differ only while playing a local copy of a share that
+        # cannot seek — see _swap_to_local().
+        self._media_path = media_path or filepath
+        if media_path is None:
+            # Any fresh load supersedes a fetch that was still running: its
+            # thread was cancelled and will never report back, so the pending
+            # seek has to be dropped here or position_ms() would keep answering
+            # with a target belonging to a track that is no longer playing.
+            self._seek_fetch = None
+            if self._copy_src == filepath and self._copy_path:
+                # Already fetched for an earlier seek — keep using it, so a
+                # device switch or stall reload does not fall back to the share
+                # and lose seeking again.
+                media_path = self._copy_path
+                self._media_path = media_path
+            elif self._copy_src != filepath:
+                self._discard_local_copy()   # different track: drop the old copy
+        self._pipe.set_property('uri', Path(self._media_path).as_uri())
         self._pipe.set_property('volume', self._effective_volume())
         self._stream_restore_reset = False  # reset once on first ASYNC_DONE
 
         # sig_fs_changed makes ControlBar rebuild its freq→bin tables for the
         # new Nyquist frequency.
-        track = read_metadata(filepath)
+        #
+        # `track` comes from the caller wherever possible. Re-reading the tags
+        # here duplicates work the library scan already did, and on a share that
+        # cannot seek it is worse than wasteful: an Ogg duration lives in the
+        # file's last page, so mutagen has to read the whole thing through the
+        # sequential proxy — 25 s of blocked UI thread on a slow link before a
+        # note is heard. Measured; hence the parameter.
+        if track is None:
+            track = self._track_meta_cache.get(filepath) or read_metadata(filepath)
+        self._track_meta_cache = {filepath: track}   # for reloads of this track
         self._current_fs = track.sample_rate if track.sample_rate > 0 else 48000
         self.sig_fs_changed.emit(self._current_fs)
         self._current_track_gain_db = track.rg_track_gain_db
@@ -282,7 +548,7 @@ class Player(QObject):
             # level and correcting audibly. _on_gain_analyzed resumes it.
             self._awaiting_initial_gain_for = filepath
             paused = True
-            self._pipe.set_property('volume', 0.0)
+            self._gain_gate_token = self._gate_mute()
             self.sig_busy.emit(True)
             self._analyze_loudness_async(filepath)
 
@@ -291,6 +557,7 @@ class Player(QObject):
         self._sync_alsa_reservation()
 
         sink_bin, eq_filters = self._make_sink_bin()
+        self._sink_bin = sink_bin   # used to tell sink warnings from source ones
         if sink_bin:
             self._pipe.set_property('audio-sink', sink_bin)
             self._eq_filters = eq_filters
@@ -360,6 +627,17 @@ class Player(QObject):
         else:
             self._pending_pause_pipe = None
 
+        if crossfading:
+            if paused or self._awaiting_initial_gain_for:
+                # Nothing will be audible to fade in — the ReplayGain hold keeps
+                # the pipeline muted and paused until analysis lands — so drop
+                # straight to unity and let the ghost fade out on its own.
+                self._fade_gain = 1.0
+                self._apply_fade_gain()
+            else:
+                self._start_fade(1.0, xfade_ms, _fade_curve_equal_power_in,
+                                 frm=0.0, scale=False)
+
         # Re-anchor once prerolled (~300-600 ms) to absorb startup latency
         def _post_load_confirm():
             if not self._pipe or not self._playing:
@@ -369,13 +647,41 @@ class Player(QObject):
         if not self._silent_recovery:
             self.sig_playing.emit(True)   # always playing until deferred pause fires
 
-    def play_pause(self):
+    def play_pause(self, fade: bool = True):
+        """Toggle playback.
+
+        fade=True (the default, i.e. every user-driven press) routes through the
+        Fade slider. Internal callers that must not fade — the load-then-pause in
+        MainWindow._navigate_track, and the fade helpers themselves — pass False.
+        """
         if not self._pipe:
             # Pipeline was destroyed (e.g. by a GStreamer error) — reload the last
             # file so the Play press is not silently swallowed.
             if self._last_filepath:
                 pos_ms = int(self._pos_anchor_ms)
                 self._load_and_seek(self._last_filepath, pos_ms)
+            return
+        if fade and self._fade_ms > 0:
+            # A ramp already running means this press reverses it, so drop the
+            # pending completion callback before starting the opposite one.
+            #
+            # self._playing cannot pick the direction here: the pipeline stays
+            # PLAYING for the whole of a pause ramp and only goes to PAUSED in
+            # the completion callback, so mid-ramp it still reads True and the
+            # press would restart the fade-out instead of reversing it. What the
+            # ramp is heading toward is _fade_intent.
+            ramping_to = self._fade_intent if self._fade_timer.isActive() else None
+            self._cancel_fade()
+            if ramping_to is False:
+                # Reversing a pause ramp. The pipeline never left PLAYING, so
+                # there is nothing to resume — just take the level back up.
+                self._start_fade(1.0, self._fade_ms, _fade_curve_cosine,
+                                 intent=True)
+                return
+            if self._playing:
+                self.fade_pause()
+            else:
+                self.fade_resume()
             return
         if self._playing:
             self._pipe.set_state(Gst.State.PAUSED)
@@ -437,7 +743,8 @@ class Player(QObject):
             # Short pauses need nothing extra: drift correction and the
             # real-position stall detector in _apply_drift_correction cover them.
 
-    def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False, paused: bool = False):
+    def _load_and_seek(self, filepath: str, pos_ms: int, silent: bool = False,
+                       paused: bool = False, media_path: str = None):
         """Load filepath and seek to pos_ms after preroll. Used for dead-pipe recovery.
 
         Args:
@@ -468,32 +775,28 @@ class Player(QObject):
         self._gst_pos_adv_wt   = -1.0
 
         if pos_ms > 200:
-            self.load(filepath, paused=paused)
+            self.load(filepath, paused=paused, media_path=media_path)
             # Mute through the ~400 ms preroll so the track's start is never heard
-            if self._pipe:
-                self._pipe.set_property('volume', 0.0)
-            def _do_seek(p=pos_ms, _sil=silent, _paused=paused):
+            tok = self._gate_mute()
+            def _do_seek(p=pos_ms, _sil=silent, _paused=paused, _tok=tok):
                 self.seek(p)
-                def _after_seek(_sil=_sil):
+                def _after_seek(_sil=_sil, _tok=_tok):
                     self._anchor_from_gst()
-                    # Only if this pipeline is still the current one
-                    if self._pipe:
-                        self._pipe.set_property('volume', self._effective_volume())
+                    # Ignored unless this pipeline is still the current one
+                    self._gate_release(_tok)
                     if not _sil:
                         self.sig_busy.emit(False)
                     self._silent_recovery = False
                 QTimer.singleShot(350, _after_seek)
             QTimer.singleShot(400, _do_seek)
         else:
-            self.load(filepath, paused=paused)
+            self.load(filepath, paused=paused, media_path=media_path)
             # Mute briefly even at start-of-track so a codec pre-buffer flush
             # stays inaudible.
-            if self._pipe:
-                self._pipe.set_property('volume', 0.0)
-            def _after_preroll(_sil=silent):
+            tok = self._gate_mute()
+            def _after_preroll(_sil=silent, _tok=tok):
                 self._anchor_from_gst()
-                if self._pipe:
-                    self._pipe.set_property('volume', self._effective_volume())
+                self._gate_release(_tok)
                 if not _sil:
                     self.sig_busy.emit(False)
                 self._silent_recovery = False
@@ -552,7 +855,19 @@ class Player(QObject):
         # Release the guard once the pipeline has had time to preroll and seek
         QTimer.singleShot(1000, lambda: setattr(self, '_reloading', False))
 
-    def stop(self): self._destroy()
+    def stop(self):
+        self._kill_all_ghosts()   # a crossfade tail must not outlive an explicit stop
+        self._seek_fetch = None   # an unfinished seek must not resume after Stop
+        self._discard_local_copy()
+        self._destroy()
+
+    def fade_stop(self):
+        """Fade to silence, then stop. Used by the sleep timer and Stop."""
+        if not self._pipe or not self._playing or self._fade_ms <= 0:
+            self.stop()
+            return
+        self._start_fade(0.0, self._fade_ms, _fade_curve_cosine, self.stop,
+                         intent=False)
 
     def _reload_at_pos(self, fallback_ms: int = 0):
         """Reload the current file at the current position, preserving playback.
@@ -582,23 +897,20 @@ class Player(QObject):
             self.load(fp)
             self._pause_ts = 0.0
             # Mute through preroll so the track's start is never heard
-            if self._pipe:
-                self._pipe.set_property('volume', 0.0)
+            tok = self._gate_mute()
             if pos_ms > 200:
                 # Wait for preroll before seeking, as _resume_with_reload does
-                def _do_seek_silent(p=pos_ms):
+                def _do_seek_silent(p=pos_ms, _tok=tok):
                     self.seek(p)
-                    def _finish():
+                    def _finish(_tok=_tok):
                         self._anchor_from_gst()
-                        if self._pipe:
-                            self._pipe.set_property('volume', self._effective_volume())
+                        self._gate_release(_tok)
                         self._silent_recovery = False
                     QTimer.singleShot(350, _finish)
                 QTimer.singleShot(400, _do_seek_silent)
             else:
-                def _restore_vol_short():
-                    if self._pipe:
-                        self._pipe.set_property('volume', self._effective_volume())
+                def _restore_vol_short(_tok=tok):
+                    self._gate_release(_tok)
                     self._silent_recovery = False
                 QTimer.singleShot(500, _restore_vol_short)
         finally:
@@ -606,6 +918,13 @@ class Player(QObject):
 
     def seek(self, ms: int):
         if not self._pipe:
+            return
+        # A track playing straight off an FTP/FTPS share cannot be seeked: the
+        # transport only reads forward. Fetch it to disk and reopen from there.
+        if (self._media_path is not None
+                and self._media_path == self._last_filepath
+                and remote_io.is_nonseekable(self._media_path)):
+            self._begin_seek_fetch(int(max(0, ms)))
             return
         # Seeking outside PAUSED/PLAYING can hang, and _seek_retries already covers
         # a pipeline that has not got there yet, so the state query stays non-blocking.
@@ -683,8 +1002,289 @@ class Player(QObject):
           - ALSA:     divide by 7.5 (tuned)
         """
         if self._is_hw_device(self._alsa_device):
-            return self._volume / 7.5
-        return self._volume
+            base = self._volume / 7.5
+        else:
+            base = self._volume
+        return base * self._fade_gain * (0.0 if self._gate_n else 1.0)
+
+    # ── Fade / crossfade ────────────────────────────────────────────────────
+
+    def set_fade_ms(self, ms: int):
+        """Fade duration for play/pause (and stop). 0 disables fading."""
+        self._fade_ms = max(0, int(ms))
+
+    def set_crossfade_ms(self, ms: int):
+        """Overlap length for track changes. 0 disables crossfading."""
+        self._crossfade_ms = max(0, int(ms))
+
+    def arm_crossfade(self) -> bool:
+        """Make the next load() overlap the outgoing track instead of cutting it.
+
+        Returns False when a crossfade is not possible right now (disabled,
+        nothing playing, exclusive ALSA output), so the caller can fall back to
+        a plain track change.
+        """
+        if (self._crossfade_ms <= 0 or not self._playing or self._pipe is None
+                or not self.crossfade_supported()):
+            return False
+        self._pending_crossfade_ms = self._crossfade_ms
+        return True
+
+    def crossfade_supported(self) -> bool:
+        """False on an exclusive ALSA hw device.
+
+        A crossfade needs the outgoing and incoming pipelines to hold the sink
+        at the same time; a bare hw:X,Y PCM can only be opened once, and the
+        card is reserved over D-Bus on top of that. PipeWire and PulseAudio mix
+        in the server, so both streams can be open at once there.
+        """
+        return not self._is_hw_device(self._alsa_device)
+
+    def _apply_fade_gain(self):
+        if self._pipe:
+            self._pipe.set_property('volume', self._effective_volume())
+
+    # ── Preroll mute gate ────────────────────────────────────────────────────
+
+    def _gate_mute(self) -> int:
+        """Silence the pipeline without disturbing the fade, and return a token
+        to hand back to _gate_release.
+
+        Holds nest: a seek issued while a load is still prerolling takes a
+        second hold, and the pipeline stays silent until both are released.
+        """
+        self._gate_n += 1
+        self._apply_fade_gain()
+        return self._gate_gen
+
+    def _gate_release(self, token: int = None):
+        """Drop one mute hold. A token from a superseded load is ignored."""
+        if token is not None and token != self._gate_gen:
+            return
+        if self._gate_n <= 0:
+            return
+        self._gate_n -= 1
+        if self._gate_n:
+            return
+        # Sound can be heard again from here on, so this — not the moment the
+        # button was pressed — is when a fade-in that was armed through the
+        # preroll actually gets to run.
+        armed, self._fade_arm_in_ms = self._fade_arm_in_ms, 0
+        if armed > 0 and self._playing and self._pipe:
+            self._start_fade(1.0, armed, _fade_curve_cosine, frm=0.0, intent=True)
+        else:
+            self._apply_fade_gain()
+
+    def _gate_reset(self):
+        """Drop every hold and invalidate outstanding tokens. Called by load(),
+        whose new pipeline starts from a clean slate."""
+        self._gate_gen += 1
+        self._gate_n    = 0
+        self._fade_arm_in_ms = 0
+
+    # ── Ramps ────────────────────────────────────────────────────────────────
+
+    def _start_fade(self, to: float, dur_ms: int, curve=None, done_cb=None,
+                    frm: float = None, intent: bool | None = None,
+                    scale: bool = True):
+        """Ramp _fade_gain to `to` over dur_ms, then call done_cb.
+
+        A zero-length ramp jumps straight there and still calls done_cb, so
+        callers do not need a separate no-fade branch.
+
+        `scale` makes dur_ms the time for a *full* 0→1 ramp, so a ramp that
+        starts part-way runs at the same rate rather than taking the whole Fade
+        setting to cover a sliver. Without it, reversing a 5 s fade-out 200 ms
+        in spent another 5 s crawling from 0.06 to silence — inaudible almost
+        immediately, yet the pipeline stayed PLAYING for five more seconds and
+        the button had already flipped. That is the "fade is sometimes delayed"
+        case. Crossfades pass scale=False: their two ramps have to stay time-
+        aligned with each other and with the ghost, whatever level they start at.
+
+        `intent` is the play state this ramp is heading toward, for the ramps
+        that are a play/pause transition (fade_pause, fade_resume, fade_stop).
+        It is what ui_playing reports while the ramp runs, since the pipeline
+        itself does not change state until the ramp finishes.
+        """
+        self._fade_timer.stop()
+        self._fade_from  = self._fade_gain if frm is None else frm
+        self._fade_to    = max(0.0, min(1.0, to))
+        self._fade_curve = curve or _fade_curve_cosine
+        self._fade_done_cb = done_cb
+        self._fade_intent  = intent
+        dist = abs(self._fade_to - self._fade_from)
+        if scale and dur_ms > 0:
+            dur_ms = max(_FADE_MIN_MS, int(dur_ms * dist))
+        if dur_ms <= 0 or dist < 1e-4:
+            self._fade_gain = self._fade_to
+            self._apply_fade_gain()
+            self._fade_done_cb = None
+            self._fade_intent  = None
+            if done_cb:
+                done_cb()
+            return
+        self._fade_gain = self._fade_from
+        self._apply_fade_gain()
+        self._fade_dur = dur_ms / 1000.0
+        self._fade_t0  = _monotonic()
+        self._fade_timer.start()
+
+    def _cancel_fade(self, reset_to: float = None):
+        """Stop any ramp in progress without running its completion callback."""
+        self._fade_timer.stop()
+        self._fade_done_cb = None
+        self._fade_intent  = None
+        self._fade_arm_in_ms = 0
+        if reset_to is not None:
+            self._fade_gain = reset_to
+            self._apply_fade_gain()
+
+    def _viz_gain(self) -> float:
+        """Level to draw the visualiser at for the frame being computed now.
+
+        Deliberately the *live* gain, with no offset for ControlBar's viz Delay
+        setting. The scaling is baked into the frame here, and that frame then
+        travels through the delay ring buffer like any other, so it arrives on
+        screen carrying the gain from its own instant. Looking the gain back by
+        delay_ms as well would delay it twice over, and the bars would hold at
+        full height for the first delay_ms of every fade.
+        """
+        return 0.0 if self._gate_n else self._fade_gain
+
+    def _tick_fade(self):
+        x = (_monotonic() - self._fade_t0) / self._fade_dur if self._fade_dur > 0 else 1.0
+        if x >= 1.0:
+            self._fade_timer.stop()
+            self._fade_gain = self._fade_to
+            self._apply_fade_gain()
+            cb, self._fade_done_cb = self._fade_done_cb, None
+            self._fade_intent = None
+            if cb:
+                cb()
+            return
+        shaped = self._fade_curve(x)
+        # The curve runs 0→1; map it onto the actual endpoints so a ramp that
+        # starts part-way through a previous one does not jump.
+        self._fade_gain = self._fade_from + (self._fade_to - self._fade_from) * shaped
+        self._apply_fade_gain()
+
+    def _detach_to_ghost(self, fade_ms: int) -> bool:
+        """Hand the live pipeline over to a fading-out ghost instead of tearing
+        it down, so load() can build the incoming one alongside it.
+
+        The ghost keeps playing on its own; nothing polls its bus, so its EOS is
+        ignored — which is what we want, since MainWindow has already moved on
+        to the next track by the time this runs.
+        """
+        pipe = self._pipe
+        if pipe is None:
+            return False
+        self._bus_timer.stop()
+        self._bus  = None
+        self._pipe = None
+        self._spec_el = None
+        self._pending_pause_pipe = None
+        self._cancel_fade()
+
+        ghost = {'pipe': pipe,
+                 'v0':   pipe.get_property('volume'),
+                 't0':   _monotonic(),
+                 'dur':  max(0.05, fade_ms / 1000.0)}
+        timer = QTimer(self)
+        timer.setTimerType(Qt.TimerType.PreciseTimer)
+        timer.setInterval(_FADE_TICK_MS)
+        ghost['timer'] = timer
+        timer.timeout.connect(lambda g=ghost: self._tick_ghost(g))
+        self._ghosts.append(ghost)
+        timer.start()
+        return True
+
+    def _tick_ghost(self, ghost: dict):
+        x = (_monotonic() - ghost['t0']) / ghost['dur']
+        if x >= 1.0:
+            self._kill_ghost(ghost)
+            return
+        try:
+            ghost['pipe'].set_property(
+                'volume', ghost['v0'] * _fade_curve_equal_power_out(x))
+        except Exception:
+            self._kill_ghost(ghost)
+
+    def _kill_ghost(self, ghost: dict):
+        timer = ghost.get('timer')
+        if timer is not None:
+            timer.stop(); timer.deleteLater()
+            ghost['timer'] = None
+        pipe = ghost.get('pipe')
+        ghost['pipe'] = None
+        if ghost in self._ghosts:
+            self._ghosts.remove(ghost)
+        if pipe is not None:
+            # Same reasoning as _destroy(): set_state(NULL) can block for
+            # seconds on pipewiresink, so it never runs on the UI thread.
+            threading.Thread(target=pipe.set_state, args=(Gst.State.NULL,),
+                             daemon=True, name='gst-null-ghost').start()
+
+    def _kill_all_ghosts(self):
+        for ghost in list(self._ghosts):
+            self._kill_ghost(ghost)
+
+    def fade_pause(self):
+        """Fade to silence, then pause. Falls back to a plain pause at 0 ms."""
+        if not self._pipe or not self._playing:
+            self.play_pause(fade=False)
+            return
+        def _then_pause():
+            # State may have changed while the ramp ran (a track change, an
+            # error teardown); only pause if we are still the playing pipeline.
+            if self._pipe and self._playing:
+                self.play_pause(fade=False)
+            # The bars are driven by _viz_gain(), which reads _fade_gain — and
+            # the line below puts that back to unity. Zero them here or the last
+            # frame of the fade-out, drawn from a pipeline that is now silent,
+            # would spring back to full height and freeze there, since the
+            # render timer stops as soon as playback does.
+            self._viz_bar_buf[:] = 0.0
+            self._viz_spec[:] = MIN_DB
+            # Back to unity while the pipeline is paused (so inaudible), which
+            # keeps the invariant that the pipe's volume always equals
+            # _effective_volume() — a later resume that does not fade, because
+            # the slider moved to 0 meanwhile, then starts at the right level.
+            self._fade_gain = 1.0
+            self._apply_fade_gain()
+        self._start_fade(0.0, self._fade_ms, _fade_curve_cosine, _then_pause,
+                         intent=False)
+
+    def fade_resume(self):
+        """Resume from silence and fade up."""
+        if self._playing:
+            return
+        # Silence first, then start the pipeline: the other order plays a few
+        # milliseconds at full level before the ramp's first tick lands.
+        self._fade_gain = 0.0 if self._fade_ms > 0 else 1.0
+        self._apply_fade_gain()
+        self.play_pause(fade=False)
+        if self._fade_ms <= 0:
+            return
+        if self._gate_n:
+            # play_pause() rebuilt the pipeline instead of resuming one: the sink
+            # had been reclaimed over a long pause, or the pipe was already dead.
+            # That reload mutes itself through its ~500 ms preroll, so a ramp
+            # started now would run to completion behind the mute and the track
+            # would simply appear at full level the instant the mute lifted —
+            # the "fade did nothing, then it jumped in" case. Hand the ramp to
+            # _gate_release, which runs it when there is something to hear.
+            #
+            # Keyed on the hold itself rather than on the pipeline having been
+            # replaced: an arm is only ever safe when something is guaranteed to
+            # release it. Arming against a reload that took no hold would leave
+            # the ramp waiting for a release that never comes, i.e. silence.
+            self._fade_arm_in_ms = self._fade_ms
+            self._fade_gain = 0.0
+            self._apply_fade_gain()
+            return
+        self._start_fade(1.0, self._fade_ms, _fade_curve_cosine, frm=0.0,
+                         intent=True)
 
     def set_viz_tables(self, ba, bb, bt, inertia, overlay_cb=None):
         """Called from ControlBar (main thread) to update viz mapping tables.
@@ -699,6 +1299,16 @@ class Player(QObject):
         self._viz_overlay_cb = overlay_cb
         self._viz_spec[:] = MIN_DB   # reset inertia on table change
         self._viz_reset_queue()      # queued frames belong to the old mapping
+
+    def set_viz_gamma(self, g: float):
+        """Bar-height gamma, from config.json's viz_gamma.
+
+        Below 1.0 lifts quiet bands, above 1.0 pushes them down; 1.0 is a
+        straight dB scale. Clamped well away from zero because the exponent goes
+        straight into np.power over the whole frame — 0 would flatten every bar
+        to full height, and a negative one would send the floor to infinity.
+        """
+        self._viz_gamma = max(0.05, min(3.0, float(g)))
 
     def set_viz_active(self, on: bool):
         self._viz_on = on
@@ -903,7 +1513,8 @@ class Player(QObject):
             self._awaiting_initial_gain_for = None
             self._apply_preamp()   # bake in the now-known gain before anyone hears it
             if self._pipe and filepath == self._last_filepath:
-                self._pipe.set_property('volume', self._effective_volume())
+                tok, self._gain_gate_token = self._gain_gate_token, None
+                self._gate_release(tok)
                 if self._playing:
                     # Analysis beat preroll: cancel the pending pause so playback
                     # runs straight through instead of pausing and resuming.
@@ -1039,6 +1650,9 @@ class Player(QObject):
         sees NameOwnerChanged while our sink is already gone, so it re-opens the
         card on the first try.
         """
+        self._kill_all_ghosts()
+        self._seek_fetch = None
+        self._discard_local_copy()
         self._destroy()
         alsa.release()
 
@@ -1049,6 +1663,9 @@ class Player(QObject):
         (startup restore) the device is stored silently and takes effect on first play."""
         if device_id == self._alsa_device:
             return
+        # A crossfade tail still holds the old sink open. That is fatal when the
+        # new device is an exclusive ALSA card, and pointless otherwise.
+        self._kill_all_ghosts()
         self._alsa_device = device_id
         print(f'[Player] output device -> {device_id}')
         if self._is_hw_device(device_id):
@@ -1401,6 +2018,21 @@ class Player(QObject):
 
     @property
     def playing(self)     -> bool: return self._playing
+
+    @property
+    def ui_playing(self)  -> bool:
+        """Play state as the user should see it — what the play/pause button and
+        MPRIS PlaybackStatus report.
+
+        Identical to `playing` except while a play/pause fade is ramping. The
+        pipeline stays PLAYING for the whole of a pause ramp, so `playing` would
+        keep the button on ⏸ for the length of the Fade slider after the press
+        and then never correct itself, because the deferred pause updates no UI.
+        """
+        if self._fade_timer.isActive() and self._fade_intent is not None:
+            return self._fade_intent
+        return self._playing
+
     @property
     def has_pipe(self)    -> bool: return self._pipe is not None
     @property
@@ -1439,6 +2071,12 @@ class Player(QObject):
         play, and pause events.  GStreamer is only queried periodically for
         drift correction (see _tick_pos).
         """
+        if self._seek_fetch is not None:
+            # A seek on a non-seekable share is being served by fetching the
+            # track, and the pipeline is down while that runs. Report where
+            # playback is about to resume, so the seekbar stays where the user
+            # put it instead of snapping back to zero.
+            return int(self._seek_fetch['target'])
         if not self._pipe:
             return 0
         if self._pos_playing:
@@ -1453,6 +2091,12 @@ class Player(QObject):
 
     def _destroy(self):
         was_playing = self._playing
+        # _seek_fetch is deliberately NOT cleared here: _begin_seek_fetch()
+        # tears the pipeline down as part of servicing the seek.
+        # Any ramp in progress belongs to the pipeline being torn down. Its
+        # completion callback (a deferred pause) must not fire against whatever
+        # replaces it; load() sets the starting gain for the new pipeline itself.
+        self._cancel_fade()
         if self._pipe:
             # Stop polling and drop the bus reference before the teardown below,
             # so no further messages from this pipeline are dispatched.
@@ -1471,6 +2115,12 @@ class Player(QObject):
                 name='gst-null'
             ).start()
         self._pending_pause_pipe = None   # cancel any in-flight deferred pause
+        # Holds belong to the pipeline being torn down. Dropping them here as
+        # well as in load() covers stop() and the error paths, which destroy
+        # without loading anything back — a hold left standing there would mute
+        # whatever is loaded next until something happened to take it away.
+        self._gate_reset()
+        self._gain_gate_token = None
         self._spec_el = None; self._playing = False
         self._pos_timer_burst = 0
         self._pos_timer.setInterval(250)
@@ -1519,6 +2169,7 @@ class Player(QObject):
                 self._pos_timer.setInterval(250)
         pos = self.position_ms()
         self.sig_pos.emit(pos)
+        self._check_xfade_point(pos)
 
         _t1 = _monotonic()
         _tick_ms = (_t1 - _t0) * 1000.0
@@ -1545,6 +2196,28 @@ class Player(QObject):
             self._drift_pending = True
             QTimer.singleShot(1, self._drift_query_glib)
 
+
+    def _check_xfade_point(self, pos_ms: int):
+        """Emit sig_xfade_due once when the track reaches its crossfade point.
+
+        MainWindow answers by starting the next track, which reaches load() with
+        _pending_crossfade_ms set, so the outgoing pipeline becomes a ghost and
+        the two overlap. Position polling runs at 250 ms, so the real overlap can
+        start up to a quarter second late — inaudible at any usable crossfade
+        length, and the alternative (a dedicated high-rate timer) costs far more
+        than it buys.
+        """
+        if (self._xfade_emitted or self._crossfade_ms <= 0 or not self._playing
+                or self._silent_recovery or not self.crossfade_supported()):
+            return
+        dur = self._dur_ms_cached
+        # A crossfade longer than the track itself would fire at load, chaining
+        # skips; require the trigger point to sit past the halfway mark.
+        if dur <= 0 or self._crossfade_ms * 2 >= dur:
+            return
+        if pos_ms >= dur - self._crossfade_ms:
+            self._xfade_emitted = True
+            self.sig_xfade_due.emit()
 
     def _drift_query_glib(self):
         """Query pipeline position (for drift) and duration if not cached yet.
@@ -1625,6 +2298,31 @@ class Player(QObject):
         if self._dur_ms_cached == 0 and dur_ms > 0:
             self._dur_ms_cached = dur_ms
             self.sig_dur.emit(dur_ms)
+
+    def _warning_is_sink_side(self, msg) -> bool:
+        """Did this warning come from the audio sink chain, or from upstream?
+
+        Warnings used to be classified by keyword alone, which was safe while
+        every element in the pipeline was local: only the sink could plausibly
+        warn about a 'resource'. Playing from a share URI puts giosrc and queue2
+        in the pipeline, and those post 'Could not close resource' as a matter of
+        course — read as sink loss, that reloaded the pipeline dozens of times a
+        second and tore down the download buffer with it, so seeking never had
+        anything to seek into.
+
+        Provenance is the honest test. When it cannot be established the old
+        behaviour is kept, so a genuine sink warning is never ignored.
+        """
+        sink = getattr(self, '_sink_bin', None)
+        el = msg.src
+        if sink is None or el is None:
+            return True
+        sink_name = sink.get_name()
+        while el is not None:
+            if el is sink or el.get_name() == sink_name:
+                return True
+            el = el.get_parent()
+        return False
 
     def _poll_bus(self):
         """Qt main thread: drain pending GStreamer bus messages (non-blocking).
@@ -1740,8 +2438,11 @@ class Player(QObject):
             try:
                 warn, dbg = msg.parse_warning()
                 txt = (str(warn) + ' ' + (dbg or '')).lower()
-                if any(k in txt for k in ('resource', 'write', 'open', 'pipewire',
-                                           'pulse', 'alsa', 'sink', 'output')):
+                if not self._warning_is_sink_side(msg):
+                    # Source-side noise, not sink loss — see the helper.
+                    print(f'[Player] source warning (no reload): {warn}')
+                elif any(k in txt for k in ('resource', 'write', 'open', 'pipewire',
+                                            'pulse', 'alsa', 'sink', 'output')):
                     # ALSA xruns and underruns are transient and reloading on them
                     # loops forever. On PipeWire/Pulse a warning means real sink loss.
                     if self._is_hw_device(self._alsa_device):
@@ -1876,8 +2577,9 @@ class Player(QObject):
              real elapsed time.
           2. Linear interpolation from GST_BANDS FFT bins → VIZ_BANDS display bars
           3. Clip + normalise dB to [0, 1]
-          4. Power-law perceptual gamma (0.38)
-          5. Publish to _viz_bar_buf
+          4. Power-law perceptual gamma (viz_gamma, from config.json)
+          5. Scale by the play/pause/crossfade ramp's level
+          6. Publish to _viz_bar_buf
 
         The overlay callback is invoked by ControlBar._render_tick, not here —
         it needs the delay-ring-buffer-adjusted frame, which only exists after
@@ -1951,9 +2653,33 @@ class Player(QObject):
             _np.clip(bh, 0.0, 1.0, out=bh)
 
             # ── 4. Perceptual gamma ───────────────────────────────────────────
-            _np.power(bh, 0.38, out=bh)
+            _np.power(bh, self._viz_gamma, out=bh)
 
-            # ── 5. Publish ─────────────────────────────────────────────────────
+            # ── 5. Fade: scale the bars by the ramp's level ────────────────────
+            # The spectrum is tapped as playbin's audio-filter, i.e. *before* the
+            # volume element, so a fade never reaches the FFT — without this the
+            # bars keep dancing at full height over a track that is fading to
+            # silence.
+            #
+            # Height is scaled directly rather than the dB offset a fade really
+            # is. Shifting the spectrum by 20·log10(g) before step 3 is exactly
+            # right and costs nothing, but against a -70 dB floor half volume is
+            # only -6 dB — a 5 % change in bar height. The bars would sit there
+            # looking frozen for four fifths of the fade and then drop off a
+            # cliff. Scaling makes bar height track the level being heard, which
+            # is what a fade is supposed to look like.
+            #
+            # Applied after the EMA, not before it: inertia exists to smooth the
+            # FFT's own jitter, and running the fade through it too would drag
+            # the bars behind the ramp by the inertia time constant. Scaling here
+            # rather than at paint time also puts the gain into the frame before
+            # it enters ControlBar's delay ring buffer, so it reaches the screen
+            # with the spectrum it belongs to at any Delay setting.
+            g = self._viz_gain()
+            if g < 0.999:
+                bh *= g
+
+            # ── 6. Publish ─────────────────────────────────────────────────────
             _np.copyto(self._viz_bar_buf, bh)
         except Exception as _ve:
             print(f'[VizFrame] {type(_ve).__name__}: {_ve}')

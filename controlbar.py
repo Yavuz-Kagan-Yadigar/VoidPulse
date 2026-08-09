@@ -14,7 +14,7 @@ from library import RenamePopup
 from fetch_popups import (LyricsFetchPopup, TagFetchPopup, GainFetchPopup,
                           CoverFetchPopup, _BaseFetchPopup)
 from widgets_base import _ModalOverlay, _SpinningOverlay
-from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
+from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
 from time import monotonic as _monotonic
 import numpy as _np
 import gc as _gc
@@ -79,6 +79,9 @@ class ControlBar(QFrame):
         self._viz_rbuf_count= 0
         # The frame paintEvent reads, live or delayed
         self._viz_display_buf = _np.zeros(VIZ_BANDS, dtype=_np.float32)
+        # Monotonic deadline while the ring buffer is being played out after
+        # playback stopped; 0 when not draining. See _on_playing_changed.
+        self._viz_drain_until = 0.0
 
         # Paint buffers, rebuilt by _precompute_bars and reused every frame
         self._paint_bar_px      = _np.zeros(VIZ_BANDS, dtype=_np.int32)
@@ -199,19 +202,22 @@ class ControlBar(QFrame):
         self.btn_lyrics = QPushButton('≡'); self.btn_lyrics.setObjectName('icon_btn')
         self.btn_lyrics.setToolTip('Lyrics')
         self.btn_lyrics.setCheckable(True)
+        self.btn_queue = QPushButton('☰'); self.btn_queue.setObjectName('icon_btn')
+        self.btn_queue.setToolTip('Play Queue')
+        self.btn_queue.setCheckable(True)
         self.btn_fullscreen = _FullscreenBtn(self)
         self.btn_fullscreen.setObjectName('icon_btn')
         self.btn_fullscreen.setToolTip('Fullscreen')
         self.btn_settings = QPushButton('...');  self.btn_settings.setObjectName('icon_btn')
         self.btn_settings.setToolTip('Settings')
-        for b in (self.btn_blackout, self.btn_eq, self.btn_lyrics,
+        for b in (self.btn_blackout, self.btn_eq, self.btn_lyrics, self.btn_queue,
                   self.btn_fullscreen, self.btn_settings):
             b.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.btn_eq.clicked.connect(self._toggle_eq)
         self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
         self.btn_settings.clicked.connect(self._toggle_settings)
         rl.addWidget(self.btn_blackout); rl.addWidget(self.btn_eq)
-        rl.addWidget(self.btn_lyrics)
+        rl.addWidget(self.btn_lyrics); rl.addWidget(self.btn_queue)
         rl.addWidget(self.btn_fullscreen); rl.addWidget(self.btn_settings)
         row2.addWidget(right, 3)
         root.addLayout(row2)
@@ -335,8 +341,14 @@ class ControlBar(QFrame):
             pop.gain_fetch_action.connect(self._on_gain_fetch_btn)
             pop.rename_toggled.connect(self._on_rename_btn)
             pop.radius_changed.connect(self._on_radius_change)
+            pop.crossfade_changed.connect(self._player.set_crossfade_ms)
+            pop.fade_changed.connect(self._player.set_fade_ms)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            # Crossfading needs a mixing sink, so the slider follows the device
+            pop.output_device_changed.connect(
+                lambda _: pop.set_crossfade_available(self._player.crossfade_supported()))
+            pop.set_crossfade_available(self._player.crossfade_supported())
             # Keep the slider in step with volume changes made by the player
             self._player.sig_volume_changed.connect(pop.set_volume)
             # Connected here rather than in MainWindow.__init__: the popup does
@@ -348,6 +360,8 @@ class ControlBar(QFrame):
                 pop.adaptive_rate_toggled.connect(win._on_adaptive_rate_toggled)
             if win is not None and hasattr(win, '_on_bg_opt_toggled'):
                 pop.bg_opt_toggled.connect(win._on_bg_opt_toggled)
+            if win is not None and hasattr(win, '_on_sleep_timer_changed'):
+                pop.sleep_timer_changed.connect(win._on_sleep_timer_changed)
             if not self._player.has_spectrum:
                 pop._viz_sw.setEnabled(False); pop._log_sw.setEnabled(False)
             _save_sigs = [
@@ -361,6 +375,7 @@ class ControlBar(QFrame):
                 pop.list_scale_changed, pop.gallery_scale_changed,
                 pop.radius_changed, pop.output_device_changed,
                 pop.adaptive_rate_toggled, pop.bg_opt_toggled,
+                pop.crossfade_changed, pop.fade_changed, pop.sleep_timer_changed,
             ]
             for sig in _save_sigs:
                 sig.connect(lambda *_: self.settings_changed.emit())
@@ -748,6 +763,13 @@ class ControlBar(QFrame):
         pop = self._ensure_settings_popup()
         volume  = int(float(cfg.get('volume',       80)))
         delay   = int(float(cfg.get('viz_delay_ms',  0)))
+        # No slider for this one — it is a hand-edited key at the top of
+        # config.json. A bad value there must not take the whole load path down
+        # with it, so fall back to the built-in default rather than raise.
+        try:
+            self._player.set_viz_gamma(float(cfg.get('viz_gamma', VIZ_GAMMA)))
+        except (TypeError, ValueError):
+            self._player.set_viz_gamma(VIZ_GAMMA)
         _raw_inertia = int(float(cfg.get('inertia', 50)))
         inertia = max(10, min(100, _raw_inertia))
         bright  = int(float(cfg.get('brightness',    40)))
@@ -859,6 +881,18 @@ class ControlBar(QFrame):
         self._ensure_eq_popup().set_loudness_norm_enabled(_loudness)
         self._player.set_loudness_norm(_loudness)
 
+        # Crossfade / fade. The sleep timer is deliberately not restored: a timer
+        # that survived a restart would stop playback at a moment the user has
+        # no reason to expect.
+        _xfade = int(float(cfg.get('crossfade_ms', 0)))
+        _fade  = int(float(cfg.get('fade_ms', 0)))
+        pop.set_crossfade_ms(_xfade)
+        pop.set_fade_ms(_fade)
+        self._player.set_crossfade_ms(_xfade)
+        self._player.set_fade_ms(_fade)
+        pop.set_sleep_minutes(0)
+        pop.set_crossfade_available(self._player.crossfade_supported())
+
         # Assume hw:X,Y works; the first _alsa_play() probe confirms it for real
         if Player._is_hw_device(_pipeline_dev):
             win = self.window()
@@ -944,6 +978,8 @@ class ControlBar(QFrame):
                     'viz_type': pop.viz_type(),
                     'corner_radius': pop.radius(),
                     'output_device': pop.output_device(),
+                    'crossfade_ms': pop.crossfade_ms(),
+                    'fade_ms': pop.fade_ms(),
                     'pipewire_adaptive_rate': pop.adaptive_rate_enabled()})
         eq_pop = self._ensure_eq_popup()
         cfg['eq_profiles'] = eq_pop.get_profiles()
@@ -1367,20 +1403,26 @@ class ControlBar(QFrame):
     def _render_tick(self):
         # Nothing to draw when the overlay covers the bar and its own viz is off
         needs_render = (self._viz_on and not self._overlay_open) or self._overlay_viz_enabled
-        if not needs_render or self._viz_paused:
+        # Playing out the tail of the delay ring buffer after playback stopped.
+        # The pipeline is gone, so there is nothing to compute and nothing new to
+        # store — this pass only walks the read cursor forward through frames
+        # that are already there.
+        draining = self._viz_drain_until > 0.0
+        if not needs_render or (self._viz_paused and not draining):
             self._stop_render_timer()
             return
-        # Runs every tick: gating on message arrival would tie the frame rate to
-        # the codec's block size. _compute_viz_frame paces the queue itself.
-        self._player._compute_viz_frame()
-        if not self._player._viz_has_any:
-            # No spectrum has arrived for this track yet — stop if playback ended
-            # or nothing needs rendering any more.
-            if not self._player.playing or not needs_render:
-                self._stop_render_timer()
-                if self._viz_on:
-                    self.update()
-            return
+        if not draining:
+            # Runs every tick: gating on message arrival would tie the frame rate
+            # to the codec's block size. _compute_viz_frame paces the queue itself.
+            self._player._compute_viz_frame()
+            if not self._player._viz_has_any:
+                # No spectrum has arrived for this track yet — stop if playback
+                # ended or nothing needs rendering any more.
+                if not self._player.playing or not needs_render:
+                    self._stop_render_timer()
+                    if self._viz_on:
+                        self.update()
+                return
 
         _now = _monotonic()
         if (_now - self._render_last_wt) < _FRAME_S * 0.85:
@@ -1391,12 +1433,13 @@ class ControlBar(QFrame):
         delay_ms = self._delay_ms
         src      = self._player._viz_bar_buf
         if delay_ms > 0:
-            N    = self._viz_rbuf_n
-            head = self._viz_rbuf_head
-            self._viz_rbuf[head]   = src
-            self._viz_rbuf_ts[head] = _now
-            self._viz_rbuf_head    = (head + 1) % N
-            self._viz_rbuf_count   = min(self._viz_rbuf_count + 1, N)
+            if not draining:
+                N    = self._viz_rbuf_n
+                head = self._viz_rbuf_head
+                self._viz_rbuf[head]   = src
+                self._viz_rbuf_ts[head] = _now
+                self._viz_rbuf_head    = (head + 1) % N
+                self._viz_rbuf_count   = min(self._viz_rbuf_count + 1, N)
             # Newest frame that is already at least delay_ms old. Masking then
             # argmax keeps the timestamps in numpy instead of boxing each one.
             target_t = _now - delay_ms * 0.001
@@ -1431,6 +1474,10 @@ class ControlBar(QFrame):
                 self._viz_last_ih = ih
                 _np.copyto(self._viz_px_last, cur)
                 self.update()
+
+        # The buffer is spent and the bars have reached the floor — park them.
+        if draining and _now >= self._viz_drain_until:
+            self._finish_viz_stop()
 
 
     def resizeEvent(self, e):
@@ -1727,6 +1774,7 @@ class ControlBar(QFrame):
 
     def _on_playing_changed(self, playing: bool):
         if playing:
+            self._viz_drain_until = 0.0   # cancel a drain still in flight
             _focus_paused = getattr(self, '_focus_paused', False)
             self._viz_paused = _focus_paused
             self._player.set_viz_active(self._viz_on and not _focus_paused)
@@ -1735,19 +1783,41 @@ class ControlBar(QFrame):
             if (self._viz_on or self._overlay_viz_enabled) and not _focus_paused:
                 self._start_render_timer()
         else:
-            self._viz_paused = True
             # Silence the spectrum element before _destroy() hands the dying
             # pipeline off for teardown, otherwise its FFT keeps running at
             # 30 fps while the new pipeline prerolls.
             self._player.set_viz_active(False)
-            self._stop_render_timer()
-            self._player._viz_spec[:] = MIN_DB
-            self._player._viz_reset_queue()
-            self._player._viz_bar_buf[:] = 0.0
-            self.update()
-            _bref = getattr(self, '_blackout_ref', None)
-            if _bref is not None and getattr(_bref, '_ov_viz', False):
-                _bref.push_viz_frame(self._player._viz_bar_buf)  # already zeroed above
+            # A pause fade ends at the instant the pipeline pauses, but with a
+            # Delay set the bars are showing the frame from delay_ms ago — so at
+            # this moment they are only part-way down the fade, and stopping here
+            # makes them vanish mid-collapse. The last delay_ms of the ramp is
+            # already sitting in the ring buffer, each frame carrying the gain it
+            # was computed with, so keep rendering (writing nothing new) until it
+            # has played out and the bars have reached the floor on their own.
+            needs_render = ((self._viz_on and not self._overlay_open)
+                            or self._overlay_viz_enabled)
+            if self._delay_ms > 0 and self._viz_rbuf_count > 0 and needs_render:
+                self._viz_drain_until = _monotonic() + self._delay_ms * 0.001
+                self._start_render_timer()
+                return
+            self._finish_viz_stop()
+
+    def _finish_viz_stop(self):
+        """Park the visualiser: bars away, timer off, spectrum state cleared.
+
+        Split out of _on_playing_changed so the delay ring buffer can be drained
+        first — everything here is destructive to what the drain is showing.
+        """
+        self._viz_drain_until = 0.0
+        self._viz_paused = True
+        self._stop_render_timer()
+        self._player._viz_spec[:] = MIN_DB
+        self._player._viz_reset_queue()
+        self._player._viz_bar_buf[:] = 0.0
+        self.update()
+        _bref = getattr(self, '_blackout_ref', None)
+        if _bref is not None and getattr(_bref, '_ov_viz', False):
+            _bref.push_viz_frame(self._player._viz_bar_buf)  # already zeroed above
 
     def _on_press(self):   self._seeking = True
     def _on_release(self):

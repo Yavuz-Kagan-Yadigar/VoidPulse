@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Build trees — voidpulse_build.sh regenerates these
+.flatpak-builder/
+org.voidpulse.VoidPulse-build/
+org.voidpulse.VoidPulse-repo/
+apk-build/
+apk-out/
+
+# Built packages: published as GitHub release assets, never tracked in git.
+# Also covers the downloaded appimagetool-*.AppImage helper.
+*.flatpak
+*.deb
+*.rpm
+*.apk
+*.AppImage
+*.asc
+*.tar.gz
+
+# Local Claude Code preferences
+.claude/settings.local.json

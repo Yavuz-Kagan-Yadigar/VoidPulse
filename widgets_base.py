@@ -426,12 +426,26 @@ class SliderRow(QWidget):
     valueChanged = pyqtSignal(int)
 
     def __init__(self, label: str, lo: int, hi: int, val: int,
-                 fmt=str, parent=None, step: int = 1):
+                 fmt=str, parent=None, step: int = 1, snap: bool = False):
+        """snap=True forces every reported value onto a multiple of `step`.
+
+        JumpSlider maps a click straight to the handle position, which ignores
+        singleStep entirely, so a slider that must only ever produce e.g. whole
+        5-minute values has to round the result itself.
+        """
         super().__init__(parent)
-        self._fmt = fmt
+        self._fmt  = fmt
+        self._snap = snap
+        self._step = max(1, step)
+        self._lo   = lo
         lay = QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         lbl = QLabel(label); lbl.setObjectName('setting_lbl')
         lbl.setFixedWidth(70)
+        # Names longer than the 70px column ('Sleep Timer' at a large system
+        # font, 'Gallery size' at high DPI) wrap onto a second line instead of
+        # being elided. A name that already fits still occupies one line, so
+        # this costs nothing for the short ones.
+        lbl.setWordWrap(True)
         lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._sl = JumpSlider(Qt.Orientation.Horizontal)
         self._sl.setRange(lo, hi); self._sl.setValue(val)
@@ -446,6 +460,13 @@ class SliderRow(QWidget):
         lay.addWidget(lbl); lay.addWidget(self._sl, 1); lay.addWidget(self._val_lbl)
 
     def _on_change(self, v):
+        if self._snap:
+            snapped = self._lo + round((v - self._lo) / self._step) * self._step
+            snapped = max(self._sl.minimum(), min(self._sl.maximum(), snapped))
+            if snapped != v:
+                # Re-enters here with the rounded value, which then falls through
+                self._sl.setValue(snapped)
+                return
         self._val_lbl.setText(self._fmt(v)); self.valueChanged.emit(v)
 
     def value(self) -> int: return self._sl.value()

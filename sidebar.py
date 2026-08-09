@@ -118,6 +118,7 @@ class Sidebar(QWidget):
     source_selected   = pyqtSignal(int)
     search_changed    = pyqtSignal(str)
     export_m3u_req    = pyqtSignal()
+    network_share_req = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -135,8 +136,18 @@ class Sidebar(QWidget):
         logo.setObjectName('logo_lbl')
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo.setStyleSheet(f'color:{ACC}; font-size:15px; font-weight:900;'
-                           f' letter-spacing:5px; padding:16px 0 10px 0; background:{BG};')
+                           f' letter-spacing:5px; padding:16px 0 1px 0; background:{BG};')
         root.addWidget(logo)
+
+        # The logo gives up its bottom padding to this line, so the pair keeps
+        # the vertical space the logo used to occupy on its own.
+        ver = QLabel(APP_VERSION)
+        self._ver_lbl = ver
+        ver.setObjectName('ver_lbl')
+        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ver.setStyleSheet(f'color:{FG2}; font-size:9px; letter-spacing:1px;'
+                          f' padding:0 0 9px 0; background:{BG};')
+        root.addWidget(ver)
 
         sf = QWidget(); sf.setStyleSheet(f'background:{BG};')
         self._sf = sf
@@ -198,6 +209,9 @@ class Sidebar(QWidget):
         # a placeholder box instead.
         add_f    = QPushButton('+  Add Folder')
         add_m    = QPushButton('+  Import M3U / M3U8')
+        add_net  = QPushButton('⇄  Network Share…')
+        add_net.setToolTip('Connect a Samba/SMB, FTP, FTPS or SFTP share and add it '
+                           'to the library')
         new_pl   = QPushButton('+ Create New Playlist')
         new_pl.setToolTip('Create an empty playlist and save as M3U8')
         refresh  = QPushButton('↺  Refresh Library')
@@ -205,10 +219,11 @@ class Sidebar(QWidget):
         export_m = QPushButton('↑  Export as M3U8')
         export_m.setToolTip('Export current playlist to an M3U8 file')
         add_f.clicked.connect(self.add_folder_req); add_m.clicked.connect(self.add_m3u_req)
+        add_net.clicked.connect(self.network_share_req)
         new_pl.clicked.connect(self.new_playlist_req)
         refresh.clicked.connect(self.refresh_req)
         export_m.clicked.connect(self.export_m3u_req)
-        self._action_btns = [add_f, add_m, new_pl, refresh, export_m]
+        self._action_btns = [add_f, add_m, add_net, new_pl, refresh, export_m]
         # Fixed rather than Preferred: _apply_action_btn_height() drives the height
         # from bf's resizeEvent, so the buttons thin out instead of clipping.
         for b in self._action_btns:
@@ -409,7 +424,7 @@ class Sidebar(QWidget):
         if logo:
             logo.setStyleSheet(
                 f'color:{ACC}; font-size:15px; font-weight:900;'
-                f' letter-spacing:5px; padding:16px 0 10px 0; background:{BG};')
+                f' letter-spacing:5px; padding:16px 0 1px 0; background:{BG};')
         for row in self._pl_rows:
             row.update_accent()
 
@@ -417,6 +432,9 @@ class Sidebar(QWidget):
         """Re-apply all palette globals after a dark/light switch."""
         self._sf.setStyleSheet(f'background:{BG};')
         self._bf.setStyleSheet(f'background:{BG};')
+        # Carries no accent colour, so it sits here rather than in update_accent.
+        self._ver_lbl.setStyleSheet(f'color:{FG2}; font-size:9px; letter-spacing:1px;'
+                                    f' padding:0 0 9px 0; background:{BG};')
         self._sidebar_div.setStyleSheet(f'background:{BORD};')
         self._sidebar_bdiv.setStyleSheet(f'background:{BORD};')
         # RAD_PCT may have changed, so clear the height guard to force a rebuild
