@@ -14,9 +14,7 @@
 #          voidpulse-1.0.0-1.noarch.rpm    (ARM auto-detected; pick a target with --target)
 #          voidpulse-1.0.0-r0.apk          (Alpine Linux only)
 #          VoidPulse-1.0.0-x86_64.AppImage
-#          VoidPulse-1.0.0-aarch64.AppImage ┐
-#          VoidPulse-1.0.0-armhf.AppImage   │ appimage-multiarch
-#          VoidPulse-1.0.0-i686.AppImage    ┘
+#          VoidPulse-1.0.0-aarch64.AppImage   appimage-multiarch
 #
 #  Usage : ./build-packages.sh [flatpak|deb|deb-multiarch|rpm|apk|appimage|appimage-multiarch|all]
 #          With no argument, an interactive menu is shown.
@@ -25,9 +23,13 @@
 #    DEB_ARCH_TARGETS="arm64,armhf"          → deb-multiarch target architectures
 #    RPM_TARGET_ARCH=aarch64                  → rpm target architecture
 #    APPIMAGE_TARGET_ARCH=aarch64             → appimage single target architecture
-#    APPIMAGE_ARCH_TARGETS="aarch64,armhf"   → appimage-multiarch targets
+#    APPIMAGE_ARCH_TARGETS="x86_64,aarch64"  → appimage-multiarch targets
+#    APPIMAGE_PY_VERSION=3.12                 → bundled Python version
+#    APPIMAGE_PYQT_VERSION=6.7.1              → bundled PyQt6 version
 #    GPG_KEY_ID=<key-id>                      → sign with this key instead of
 #                                               the first secret key found
+#    APP_VERSION=2.0.0                        → skip the interactive version
+#                                               prompt (required in CI)
 #
 #  openSUSE: the rpm target uses openSUSE package names automatically.
 #  Alpine  : the apk target is skipped automatically on non-Alpine systems.
@@ -59,16 +61,29 @@ APP_LICENSE="GPL-3.0-or-later"
 APP_URL="https://github.com/Yavuz-Kagan-Yadigar/VoidPulse"
 APP_MAINTAINER="Yavuz"
 
-# ── Version prompt ────────────────────────────────────────────────────────────
+# ── Version: environment variable or interactive prompt ──────────────────────
+# APP_VERSION lets CI drive the script without a TTY. The :- default is what
+# lets the environment win, exactly as with GPG_KEY_ID below.
+APP_VERSION="${APP_VERSION:-}"
+
 sep
 echo -e "${BOLD}  VoidPulse — Universal Package Builder v8${NC}"
 sep
-while true; do
-    read -rp "  Enter version number (e.g. 1.2.0): " APP_VERSION
-    [[ "${APP_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
-    warn "Invalid format. Please use X.Y.Z (e.g. 1.2.0)."
-done
-info "Version: ${APP_VERSION} ✓"
+if [[ -n "${APP_VERSION}" ]]; then
+    [[ "${APP_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+        die "APP_VERSION is not in X.Y.Z form: ${APP_VERSION}"
+    info "Version (from APP_VERSION): ${APP_VERSION} ✓"
+else
+    # No TTY and no APP_VERSION means nobody can answer the prompt — say so
+    # instead of spinning on a read that returns empty forever.
+    [[ -t 0 ]] || die "No TTY available. Pass the version as APP_VERSION=X.Y.Z."
+    while true; do
+        read -rp "  Enter version number (e.g. 1.2.0): " APP_VERSION
+        [[ "${APP_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
+        warn "Invalid format. Please use X.Y.Z (e.g. 1.2.0)."
+    done
+    info "Version: ${APP_VERSION} ✓"
+fi
 sep
 
 RUNTIME_NAME="org.gnome.Platform"
@@ -929,7 +944,7 @@ APPDATA
     # Fedora  : python3-PyQt6, gstreamer1-plugins-good/bad-free
     # A PyQt5 fallback is added on ARM distros (the PyQt6 package may be missing)
     local PYQT_PKG PYQT_FALLBACK GST_GOOD GST_BAD MUTAGEN_PKG NUMPY_PKG SOXR_PKG
-    local PYTHON_REQ FILES_LICENSE
+    local PYTHON_REQ
     if [[ "${IS_OPENSUSE}" -eq 1 ]]; then
         PYQT_PKG="python3-qt6"
         GST_GOOD="gstreamer-plugins-good"
@@ -940,7 +955,6 @@ APPDATA
         # convention as its python313-numpy, unlike Fedora's plain python3-soxr).
         SOXR_PKG="python313-soxr"
         PYTHON_REQ="python3 >= 3.10"
-        FILES_LICENSE="%doc /usr/lib/voidpulse/voidpulse.py"
     else
         PYQT_PKG="python3-PyQt6"
         GST_GOOD="gstreamer1-plugins-good"
@@ -949,7 +963,6 @@ APPDATA
         NUMPY_PKG="python3-numpy"
         SOXR_PKG="python3-soxr"
         PYTHON_REQ="python3 >= 3.10"
-        FILES_LICENSE="%license /usr/lib/voidpulse/voidpulse.py"
     fi
     # On ARM architectures, add python3-PyQt5 as a Suggests entry
     local ARM_SUGGESTS_LINE=""
@@ -1016,7 +1029,6 @@ fc-cache -f 2>/dev/null || :
 update-desktop-database /usr/share/applications/ 2>/dev/null || :
 
 %files
-${FILES_LICENSE}
 /usr/bin/voidpulse
 /usr/lib/voidpulse/*.py
 /usr/share/applications/${APP_ID}.desktop
@@ -1160,16 +1172,24 @@ LAUNCHER
 </component>
 APPDATA
 
+    # ── Remaining sources ─────────────────────────────────────────────────────
+    # abuild resolves any source entry without a "://" scheme relative to its own
+    # directory, so an absolute path in source= is not found. Copy these next to
+    # the APKBUILD and reference them by bare name, as the other sources already are.
+    cp "${SOURCE_DIR}/${APP_ID}.desktop" "${APK_BUILD_DIR}/${APP_ID}.desktop"
+    cp "${SOURCE_DIR}/${APP_ID}.svg"     "${APK_BUILD_DIR}/${APP_ID}.svg"
+    cp "${FONT_FILE}"                    "${APK_BUILD_DIR}/NotoMusic-Regular.ttf"
+
     # ── Compute SHA512 checksums ──────────────────────────────────────────────
     local SHA_TAR SHA_LAUNCHER SHA_META
     SHA_TAR=$(sha512sum "${APK_BUILD_DIR}/${TAR_NAME}.tar.gz"              | cut -d' ' -f1)
     SHA_LAUNCHER=$(sha512sum "${APK_BUILD_DIR}/voidpulse-launcher.sh"      | cut -d' ' -f1)
     SHA_META=$(sha512sum "${APK_BUILD_DIR}/${APP_ID}.appdata.xml"          | cut -d' ' -f1)
     local SHA_DT SHA_ICO
-    SHA_DT=$(sha512sum "${SOURCE_DIR}/${APP_ID}.desktop"   | cut -d' ' -f1)
-    SHA_ICO=$(sha512sum "${SOURCE_DIR}/${APP_ID}.svg"       | cut -d' ' -f1)
+    SHA_DT=$(sha512sum "${APK_BUILD_DIR}/${APP_ID}.desktop" | cut -d' ' -f1)
+    SHA_ICO=$(sha512sum "${APK_BUILD_DIR}/${APP_ID}.svg"    | cut -d' ' -f1)
     local SHA_FONT
-    SHA_FONT=$(sha512sum "${FONT_FILE}" | cut -d' ' -f1)
+    SHA_FONT=$(sha512sum "${APK_BUILD_DIR}/NotoMusic-Regular.ttf" | cut -d' ' -f1)
 
     # ── APKBUILD ──────────────────────────────────────────────────────────────
     local APKBUILD="${APK_BUILD_DIR}/APKBUILD"
@@ -1185,11 +1205,15 @@ arch="noarch"
 license="GPL-3.0-or-later"
 depends="
     python3
-    py3-pyqt6
+    py3-qt6
+    py3-gobject3
     py3-mutagen
     py3-numpy
+    gstreamer
+    gst-plugins-base
     gst-plugins-good
     gst-plugins-bad
+    qt6-qtwayland
 "
 makedepends="python3"
 install=""
@@ -1199,9 +1223,9 @@ source="
     ${TAR_NAME}.tar.gz
     voidpulse-launcher.sh
     ${APP_ID}.appdata.xml
-    ${APP_ID}.desktop::${SOURCE_DIR}/${APP_ID}.desktop
-    ${APP_ID}.svg::${SOURCE_DIR}/${APP_ID}.svg
-    NotoMusic-Regular.ttf::${FONT_FILE}
+    ${APP_ID}.desktop
+    ${APP_ID}.svg
+    NotoMusic-Regular.ttf
 "
 sha512sums="
 ${SHA_TAR}  ${TAR_NAME}.tar.gz
@@ -1285,119 +1309,393 @@ APKBUILD
 }
 
 # =============================================================================
-#  APPIMAGE — Full ARM support
-#  Supported architectures: x86_64 · aarch64 · armhf · i686
+#  APPIMAGE — self-contained bundle
+#  Supported architectures: x86_64 · aarch64
 #
 #  Single arch (current system):   build_appimage
 #  Multi-arch:                 build_appimage_multiarch  (selectable from the menu)
 #
-#  The architecture can be overridden with the APPIMAGE_TARGET_ARCH env variable.
-#  Example: APPIMAGE_TARGET_ARCH=aarch64 ./build-flatpak.sh appimage
+#  Unlike the deb/rpm/apk targets, this bundles its own Python, PyQt6 and
+#  GStreamer, so the target system needs nothing preinstalled. The base is a
+#  python-appimage manylinux_2_28 build; PyQt6/numpy/soxr/mutagen come from
+#  PyPI wheels, and GStreamer is collected from the build host with ldd.
 #
-#  appimagetool → downloaded from AppImageKit GitHub releases/continuous.
-#  A separate binary exists per architecture; the script picks one automatically.
+#  Architecture support is limited by PyQt6's wheels, which exist only for
+#  x86_64 and aarch64 — there is no armhf or i686 wheel, and building Qt6 from
+#  source for them is not viable. Those two architectures are served by the
+#  deb/rpm/apk targets instead, which use the distribution's own PyQt6.
 #
-#  Dependency note on ARM:
-#    - Python3, PyQt6 (or PyQt5), mutagen, numpy, GStreamer
-#      must be installed on the target system.
-#    - The AppImage runtime (squashfuse-based) exists and works on ARM.
+#  Cross-building is NOT supported: the ldd step needs to run against libraries
+#  of the target architecture, so each arch must be built on its own machine
+#  (in CI, a native runner per arch).
+#
+#  glibc floor: whatever the build host provides. Building on Ubuntu 22.04
+#  (glibc 2.35) covers Ubuntu 22.04+, Debian 12+ and Fedora 36+.
 # =============================================================================
 
-# ── Internal helper: download/verify appimagetool ────────────────────────────
-# Output: writes the tool path to stdout
+# Bundled component versions — overridable from the environment.
+# PyQt6 is pinned deliberately: 6.7.1 is the last release whose aarch64 wheel
+# targets glibc 2.28. From 6.8.0 on the aarch64 wheel needs glibc 2.39, which
+# would exclude Raspberry Pi OS bookworm and most SBC distributions.
+APPIMAGE_PY_VERSION="${APPIMAGE_PY_VERSION:-3.12}"
+APPIMAGE_PYQT_VERSION="${APPIMAGE_PYQT_VERSION:-6.7.1}"
+
+# ── Internal helper: uname -m → AppImage ARCH tag ───────────────────────────
+_uname_to_appimage_arch() {
+    case "$1" in
+        x86_64|amd64)   echo "x86_64"  ;;
+        aarch64|arm64)  echo "aarch64" ;;
+        *)              echo "$1"      ;;
+    esac
+}
+
+# ── Internal helper: reject architectures we cannot bundle for ───────────────
+_appimage_check_arch() {
+    local a="$1"
+    case "${a}" in
+        x86_64|aarch64) return 0 ;;
+    esac
+    die "AppImage architecture not supported: ${a}\n   PyQt6 ships wheels only for x86_64 and aarch64.\n   Use the deb/rpm/apk targets for ${a}."
+}
+
+# ── Internal helper: refuse to cross-build ───────────────────────────────────
+_appimage_check_native() {
+    local target="$1" host
+    host=$(_uname_to_appimage_arch "$(uname -m)")
+    [[ "${target}" == "${host}" ]] || \
+        die "Cannot cross-build an AppImage: target ${target}, host ${host}.\n   The bundle is assembled with ldd against ${target} libraries.\n   Build ${target} on a ${target} machine (CI uses a native runner per arch)."
+}
+
+# ── Internal helper: download the python-appimage base ──────────────────────
+# Output: writes the downloaded file path to stdout
+_get_python_appimage() {
+    local ARCH_TAG="$1"
+    local CACHE="${SOURCE_DIR}/.appimage-cache"
+    mkdir -p "${CACHE}"
+
+    # Ask the GitHub API which asset matches this Python version and arch, so
+    # the exact patch release (3.12.13, …) does not have to be hardcoded.
+    local API="https://api.github.com/repos/niess/python-appimage/releases/tags/python${APPIMAGE_PY_VERSION}"
+    local URL
+    URL=$(curl -fsSL "${API}" \
+          | grep -o "https://[^\"]*manylinux_2_28_${ARCH_TAG}\.AppImage" \
+          | head -1) || true
+
+    [[ -n "${URL}" ]] || \
+        die "Could not find a python-appimage build for python${APPIMAGE_PY_VERSION}/${ARCH_TAG}.\n   Checked: ${API}"
+
+    local DEST="${CACHE}/$(basename "${URL}")"
+    if [[ -f "${DEST}" ]]; then
+        info "python-appimage already cached: $(basename "${DEST}") ✓" >&2
+    else
+        log "Downloading python-appimage: $(basename "${URL}")" >&2
+        curl -fL --progress-bar -o "${DEST}.part" "${URL}" || \
+            die "python-appimage download failed: ${URL}"
+        mv "${DEST}.part" "${DEST}"
+    fi
+    chmod +x "${DEST}"
+    echo "${DEST}"
+}
+
+# ── Internal helper: download the AppImage runtime for a target arch ────────
+# Output: writes the runtime file path to stdout
 #
-# NOTE: the x86_64 appimagetool is always used, whatever the target arch is.
-# appimagetool supports cross-arch packaging; the target arch is given by the
-# ARCH env variable (set inside _build_single_appimage).
-# ARM/i686 binaries cannot run on an x86_64 host (Exec format error).
+# This is what the old builder got wrong: appimagetool embeds its OWN host
+# runtime unless it is handed one explicitly, so every "ARM" AppImage it
+# produced was in fact an x86_64 binary. --runtime-file fixes that.
+_get_appimage_runtime() {
+    local ARCH_TAG="$1"
+    local CACHE="${SOURCE_DIR}/.appimage-cache"
+    mkdir -p "${CACHE}"
+    local DEST="${CACHE}/runtime-${ARCH_TAG}"
+
+    if [[ -f "${DEST}" ]]; then
+        info "AppImage runtime already cached: runtime-${ARCH_TAG} ✓" >&2
+    else
+        log "Downloading AppImage runtime: runtime-${ARCH_TAG}" >&2
+        curl -fL --progress-bar -o "${DEST}.part" \
+            "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH_TAG}" || \
+            die "Could not download the AppImage runtime (${ARCH_TAG})."
+        mv "${DEST}.part" "${DEST}"
+    fi
+    echo "${DEST}"
+}
+
+# ── Internal helper: download/verify appimagetool for the HOST arch ─────────
+# Output: writes the tool path to stdout
 _get_appimagetool() {
-    local TOOL="${SOURCE_DIR}/appimagetool-x86_64.AppImage"
-    if [[ ! -x "${TOOL}" ]]; then
-        log "Downloading appimagetool (x86_64)..." >&2
-        curl -L --fail \
-            -o "${TOOL}" \
-            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" || \
-            die "Could not download appimagetool.\n   URL: https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-        chmod +x "${TOOL}"
+    local HOST_ARCH
+    HOST_ARCH=$(_uname_to_appimage_arch "$(uname -m)")
+    local TOOL="${SOURCE_DIR}/appimagetool-${HOST_ARCH}.AppImage"
+
+    if [[ ! -f "${TOOL}" ]]; then
+        log "Downloading appimagetool (${HOST_ARCH})..." >&2
+        curl -fL --progress-bar -o "${TOOL}" \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${HOST_ARCH}.AppImage" || \
+            die "Could not download appimagetool (${HOST_ARCH})."
         info "appimagetool saved: ${TOOL}" >&2
     else
         info "appimagetool already present: ${TOOL} ✓" >&2
     fi
+    chmod +x "${TOOL}"
     echo "${TOOL}"
 }
 
-# ── Internal helper: uname -m → AppImage ARCH tag ───────────────────────────
-# AppImageKit expects its own tags in the ARCH env variable (unlike rpm/deb).
-_uname_to_appimage_arch() {
+# ── Internal helper: libraries that must come from the host, never bundled ──
+# Bundling these breaks more than it fixes: the loader/libc pair must match the
+# kernel, the GL stack must match the driver, and the audio clients must match
+# the daemon they talk to. Everything else is fair game.
+_appimage_lib_is_excluded() {
     case "$1" in
-        x86_64)          echo "x86_64"  ;;
-        aarch64)         echo "aarch64" ;;
-        armv7l|armv7*)   echo "armhf"   ;;
-        armv6l|armv6*)   echo "armhf"   ;;   # armv6 uses the armhf tool as well
-        i?86)            echo "i686"    ;;
-        *)               echo "$1"      ;;   # unknown → try it as-is
+        ld-linux*|ld64.so*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*) return 0 ;;
+        librt.so.*|libresolv.so.*|libutil.so.*|libnsl.so.*|libcrypt.so.*)   return 0 ;;
+        libgcc_s.so.*|libstdc++.so.*)                                      return 0 ;;
+        # Graphics stack — must match the installed driver
+        libGL.so.*|libEGL.so.*|libGLX.so.*|libGLdispatch.so.*|libOpenGL.so.*) return 0 ;;
+        libdrm.so.*|libgbm.so.*|libglapi.so.*)                             return 0 ;;
+        # Display servers
+        libX11*.so.*|libxcb*.so.*|libXext.so.*|libXrender.so.*|libXi.so.*)  return 0 ;;
+        libwayland-*.so.*)                                                 return 0 ;;
+        # Audio clients — must match the host daemon/kernel interface
+        libasound.so.*|libpulse*.so.*|libpipewire-*.so.*|libjack*.so.*)     return 0 ;;
+        # System services
+        libsystemd.so.*|libudev.so.*|libdbus-1.so.*|libselinux.so.*)        return 0 ;;
     esac
+    return 1
 }
 
-# ── Internal helper: AppImage ARCH tag → appimagetool ARCH env value ─────────
-# appimagetool extract_arch_from_text() only accepts specific strings:
-#   "x86_64"      → x86_64
-#   "i686" etc.   → i386 family (i686 matches)
-#   "arm"         → armhf (32-bit ARM)
-#   "arm_aarch64" → aarch64
-# The "aarch64" and "armhf" tags we use in file names do not pass directly.
-_arch_to_appimage_env() {
-    case "$1" in
-        x86_64)  echo "x86_64"      ;;
-        aarch64) echo "arm_aarch64" ;;
-        armhf)   echo "arm"         ;;
-        i686)    echo "i686"        ;;
-        *)       echo "$1"          ;;
-    esac
+# ── Internal helper: walk ldd output and copy dependencies into the AppDir ──
+# $1 = AppDir, remaining args = binaries to scan. Runs to a fixed point so
+# dependencies of dependencies are picked up too.
+_appimage_bundle_libs() {
+    local APPDIR="$1"; shift
+    local LIBDIR="${APPDIR}/usr/lib"
+    mkdir -p "${LIBDIR}"
+
+    local -a queue=("$@")
+    local -A seen=()
+    local copied=0
+
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        local -a next=()
+        local bin
+        for bin in "${queue[@]}"; do
+            [[ -f "${bin}" ]] || continue
+            local line soname path
+            # ldd prints "soname => /path (0x…)"; entries without a path are
+            # vDSO or the loader itself and are skipped by the => filter.
+            while IFS= read -r line; do
+                soname="${line%% =>*}"
+                soname="${soname##*[[:space:]]}"
+                path="${line#*=> }"
+                path="${path%% (*}"
+                [[ -n "${path}" && -f "${path}" ]] || continue
+                _appimage_lib_is_excluded "${soname}" && continue
+                [[ -n "${seen[${soname}]:-}" ]] && continue
+                seen["${soname}"]=1
+                cp -L "${path}" "${LIBDIR}/${soname}"
+                copied=$((copied + 1))
+                next+=("${LIBDIR}/${soname}")
+            done < <(ldd "${bin}" 2>/dev/null | grep ' => ')
+        done
+        queue=("${next[@]}")
+    done
+
+    info "Native libraries bundled: ${copied}" >&2
 }
 
-# ── Internal helper: build AppDir + package AppImage ─────────────────────────
-# $1 = target AppImage ARCH tag (x86_64, aarch64, armhf, i686)
+# ── Internal helper: GStreamer plugins worth bundling ───────────────────────
+# An allowlist rather than "copy the whole plugin directory": the full set drags
+# in the video stack (libav, x264, mesa) and multiplies the bundle size for
+# elements an audio player never instantiates. Everything the code actually uses
+# is here — see the ElementFactory.make calls in player.py/eq.py/resampler.py —
+# plus the demuxers and decoders for the formats library.py accepts.
+_APPIMAGE_GST_PLUGINS=(
+    # core / infrastructure
+    libgstcoreelements.so libgstapp.so libgstplayback.so libgstautodetect.so
+    libgsttypefindfunctions.so libgstaudioconvert.so libgstaudioresample.so
+    libgstaudiorate.so libgstvolume.so libgstaudiotestsrc.so
+    # processing — audioamplify, audiodynamic, audioiirfilter, audiopanorama,
+    # spectrum, rganalysis, equalizer
+    libgstaudiofx.so libgstaudioparsers.so libgstspectrum.so libgstlevel.so
+    libgstreplaygain.so libgstequalizer.so
+    # containers / demuxers
+    libgstogg.so libgstisomp4.so libgstmatroska.so libgstwavparse.so
+    libgstid3demux.so libgstapetag.so libgsttaglib.so libgstid3tag.so
+    # decoders
+    libgstflac.so libgstvorbis.so libgstopus.so libgstaudiolame.so
+    libgstmpg123.so libgstfaad.so libgstopenh264.so
+    # sinks — pipewiresink / pulsesink / autoaudiosink fallbacks
+    libgstalsa.so libgstpulseaudio.so libgstpipewire.so
+)
+
+# ── Internal helper: bundle GStreamer into the AppDir ───────────────────────
+_appimage_bundle_gstreamer() {
+    local APPDIR="$1"
+    local GST_DEST="${APPDIR}/usr/lib/gstreamer-1.0"
+    mkdir -p "${GST_DEST}"
+
+    # Locate the host plugin directory
+    local GST_SRC=""
+    if command -v pkg-config &>/dev/null; then
+        GST_SRC=$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null) || true
+    fi
+    if [[ -z "${GST_SRC}" || ! -d "${GST_SRC}" ]]; then
+        local c
+        for c in /usr/lib/*/gstreamer-1.0 /usr/lib64/gstreamer-1.0 /usr/lib/gstreamer-1.0; do
+            [[ -d "${c}" ]] && { GST_SRC="${c}"; break; }
+        done
+    fi
+    [[ -d "${GST_SRC}" ]] || die "GStreamer plugin directory not found. Install the gstreamer1.0-plugins-* packages."
+    info "GStreamer plugins: ${GST_SRC}" >&2
+
+    local -a bundled=()
+    local p missing=0
+    for p in "${_APPIMAGE_GST_PLUGINS[@]}"; do
+        if [[ -f "${GST_SRC}/${p}" ]]; then
+            cp -L "${GST_SRC}/${p}" "${GST_DEST}/${p}"
+            bundled+=("${GST_DEST}/${p}")
+        else
+            # Not fatal: plugin sets differ per distribution, and a missing
+            # decoder costs one format rather than the whole build.
+            warn "GStreamer plugin not found, skipping: ${p}" >&2
+            missing=$((missing + 1))
+        fi
+    done
+    [[ ${#bundled[@]} -gt 0 ]] || die "No GStreamer plugins could be bundled — check the gstreamer1.0-plugins-* packages."
+    info "GStreamer plugins bundled: ${#bundled[@]} (${missing} missing)" >&2
+
+    # The plugin scanner runs as a helper process at registry build time.
+    local SCANNER=""
+    local c
+    for c in /usr/libexec/gstreamer-1.0/gst-plugin-scanner \
+             /usr/lib/*/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner \
+             /usr/lib/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner; do
+        [[ -f "${c}" ]] && { SCANNER="${c}"; break; }
+    done
+    if [[ -n "${SCANNER}" ]]; then
+        mkdir -p "${APPDIR}/usr/libexec/gstreamer-1.0"
+        cp -L "${SCANNER}" "${APPDIR}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+        info "gst-plugin-scanner bundled ✓" >&2
+    else
+        warn "gst-plugin-scanner not found — GStreamer will scan in-process." >&2
+    fi
+
+    # GObject-Introspection typelibs: without these `gi.require_version('Gst')`
+    # in constants.py fails even though the shared libraries are present.
+    local GIR_DEST="${APPDIR}/usr/lib/girepository-1.0"
+    mkdir -p "${GIR_DEST}"
+    local GIR_SRC=""
+    for c in /usr/lib/*/girepository-1.0 /usr/lib64/girepository-1.0 /usr/lib/girepository-1.0; do
+        [[ -d "${c}" ]] && { GIR_SRC="${c}"; break; }
+    done
+    [[ -d "${GIR_SRC}" ]] || die "girepository-1.0 directory not found. Install gir1.2-gstreamer-1.0."
+
+    local t count=0
+    for t in GLib-2.0 GObject-2.0 Gio-2.0 GModule-2.0 \
+             Gst-1.0 GstBase-1.0 GstAudio-1.0 GstApp-1.0 GstPbutils-1.0 \
+             GstTag-1.0 GstVideo-1.0 GstController-1.0; do
+        if [[ -f "${GIR_SRC}/${t}.typelib" ]]; then
+            cp -L "${GIR_SRC}/${t}.typelib" "${GIR_DEST}/${t}.typelib"
+            count=$((count + 1))
+        else
+            warn "typelib not found, skipping: ${t}" >&2
+        fi
+    done
+    info "Typelibs bundled: ${count}" >&2
+
+    # Pull every shared library these plugins and the scanner need.
+    _appimage_bundle_libs "${APPDIR}" "${bundled[@]}" \
+        "${APPDIR}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+}
+
+# ── Internal helper: build AppDir + package AppImage ────────────────────────
+# $1 = target arch tag (x86_64, aarch64)
 _build_single_appimage() {
-    # The whole function writes to stderr; only the final echo (the file path) goes to stdout.
-    # This way OUT_AI=$(_build_single_appimage ...) captures a clean path.
+    # The whole function writes to stderr; only the final echo (the file path)
+    # goes to stdout, so OUT_AI=$(_build_single_appimage …) stays clean.
     exec 3>&1 1>&2
 
     local TARGET_ARCH="$1"
+    _appimage_check_arch   "${TARGET_ARCH}"
+    _appimage_check_native "${TARGET_ARCH}"
 
     local APPDIR="${SOURCE_DIR}/AppDir-${TARGET_ARCH}"
     log "Creating AppDir (${TARGET_ARCH}): ${APPDIR}"
     rm -rf "${APPDIR}"
-    mkdir -p \
-        "${APPDIR}/usr/bin" \
-        "${APPDIR}/usr/lib/${APP_NAME}" \
-        "${APPDIR}/usr/share/applications" \
-        "${APPDIR}/usr/share/icons/hicolor/scalable/apps" \
-        "${APPDIR}/usr/share/metainfo" \
-        "${APPDIR}/usr/share/fonts/NotoMusic"
 
-    # ── Place files ───────────────────────────────────────────────────────────
-    # NOTE: voidpulse.py is no longer a single file — after the refactor constants.py
-    # and the other helper modules live in separate files. Copy them all, or
-    # errors like "ModuleNotFoundError: No module named 'constants'" appear.
+    # ── 1. Unpack the python-appimage base ────────────────────────────────────
+    local PY_AI
+    PY_AI=$(_get_python_appimage "${TARGET_ARCH}")
+    log "Unpacking the Python base..."
+    local EXTRACT_TMP="${SOURCE_DIR}/.appimage-extract-${TARGET_ARCH}"
+    rm -rf "${EXTRACT_TMP}"
+    mkdir -p "${EXTRACT_TMP}"
+    ( cd "${EXTRACT_TMP}" && APPIMAGE_EXTRACT_AND_RUN=1 "${PY_AI}" --appimage-extract >/dev/null ) || \
+        die "Could not unpack the python-appimage base."
+    mv "${EXTRACT_TMP}/squashfs-root" "${APPDIR}"
+    rm -rf "${EXTRACT_TMP}"
+
+    # python-appimage ships its own AppRun/.desktop/icon for a bare interpreter;
+    # ours replace them further down.
+    rm -f "${APPDIR}"/AppRun "${APPDIR}"/*.desktop "${APPDIR}"/*.png "${APPDIR}"/.DirIcon
+
+    local PYBIN="${APPDIR}/usr/bin/python${APPIMAGE_PY_VERSION}"
+    [[ -x "${PYBIN}" ]] || die "Bundled interpreter not found: ${PYBIN}"
+    info "Python base ready: $("${PYBIN}" --version 2>&1) ✓"
+
+    # ── 2. Python dependencies from PyPI ──────────────────────────────────────
+    log "Installing Python dependencies (PyQt6 ${APPIMAGE_PYQT_VERSION}, numpy, soxr, mutagen, PyGObject)..."
+    # PyGObject is pinned below 3.50: later releases require girepository-2.0
+    # (glib 2.80+), which build hosts like Ubuntu 22.04 do not have.
+    "${PYBIN}" -m pip install --no-cache-dir --disable-pip-version-check \
+        --target "${APPDIR}/usr/lib/python${APPIMAGE_PY_VERSION}/site-packages" \
+        --upgrade \
+        "PyQt6==${APPIMAGE_PYQT_VERSION}" \
+        numpy soxr mutagen "PyGObject<3.50" || \
+        die "Python dependencies could not be installed."
+
+    local SITE="${APPDIR}/usr/lib/python${APPIMAGE_PY_VERSION}/site-packages"
+    [[ -d "${SITE}/PyQt6" ]] || die "PyQt6 was not installed into ${SITE}."
+    [[ -d "${SITE}/gi"    ]] || die "PyGObject (gi) was not installed into ${SITE}."
+    info "Python dependencies installed ✓"
+
+    # ── 3. GStreamer ──────────────────────────────────────────────────────────
+    log "Bundling GStreamer..."
+    _appimage_bundle_gstreamer "${APPDIR}"
+
+    # gi's compiled extension links against libgirepository; make sure its
+    # dependencies travel with it too.
+    shopt -s nullglob
+    local _gi_ext=("${SITE}"/gi/_gi*.so)
+    shopt -u nullglob
+    [[ ${#_gi_ext[@]} -gt 0 ]] && _appimage_bundle_libs "${APPDIR}" "${_gi_ext[@]}"
+
+    # ── 4. VoidPulse itself ───────────────────────────────────────────────────
+    mkdir -p "${APPDIR}/usr/lib/${APP_NAME}" \
+             "${APPDIR}/usr/share/applications" \
+             "${APPDIR}/usr/share/icons/hicolor/scalable/apps" \
+             "${APPDIR}/usr/share/metainfo" \
+             "${APPDIR}/usr/share/fonts/NotoMusic"
+
     shopt -s nullglob
     local _py_modules=("${SOURCE_DIR}"/*.py)
     shopt -u nullglob
     [[ ${#_py_modules[@]} -eq 0 ]] && die "No .py files found in the source directory: ${SOURCE_DIR}"
+    local _pyfile
     for _pyfile in "${_py_modules[@]}"; do
         install -Dm644 "${_pyfile}" "${APPDIR}/usr/lib/${APP_NAME}/$(basename "${_pyfile}")"
     done
     info "Python modules copied: ${#_py_modules[@]}"
+
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.desktop" "${APPDIR}/usr/share/applications/${APP_ID}.desktop"
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.svg"     "${APPDIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
     install -Dm644 "${FONT_FILE}"                    "${APPDIR}/usr/share/fonts/NotoMusic/NotoMusic-Regular.ttf"
 
-    # AppDir root requirements
     cp "${SOURCE_DIR}/${APP_ID}.svg"     "${APPDIR}/${APP_ID}.svg"
     ln -sf "${APP_ID}.svg"               "${APPDIR}/.DirIcon"
     cp "${SOURCE_DIR}/${APP_ID}.desktop" "${APPDIR}/${APP_ID}.desktop"
 
-    # ── AppStream metainfo ────────────────────────────────────────────────────
     cat > "${APPDIR}/usr/share/metainfo/${APP_ID}.appdata.xml" << APPDATA
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
@@ -1419,39 +1717,69 @@ _build_single_appimage() {
 </component>
 APPDATA
 
-    # ── AppRun — works on every architecture, ARM included ────────────────────
-    cat > "${APPDIR}/AppRun" << 'APPRUN'
+    # ── 5. AppRun ─────────────────────────────────────────────────────────────
+    cat > "${APPDIR}/AppRun" << APPRUN
 #!/bin/sh
-# VoidPulse AppImage entry point — x86_64 / aarch64 / armhf / i686
-HERE="$(dirname "$(readlink -f "${0}")")"
-export PYTHONPATH="${HERE}/usr/lib/voidpulse:${PYTHONPATH:-}"
+# VoidPulse AppImage entry point — self-contained (Python, PyQt6, GStreamer)
+HERE="\$(dirname "\$(readlink -f "\${0}")")"
+PYVER="${APPIMAGE_PY_VERSION}"
+APPRUN
+    cat >> "${APPDIR}/AppRun" << 'APPRUN'
+
+export APPDIR="${HERE}"
+
+# Use the bundled interpreter and its standard library, not the host's.
+export PYTHONHOME="${HERE}/usr"
+export PYTHONPATH="${HERE}/usr/lib/python${PYVER}/site-packages:${HERE}/usr/lib/voidpulse"
+export PYTHONDONTWRITEBYTECODE=1
+
+# The :+ form matters: a bare ${LD_LIBRARY_PATH} leaves a trailing colon when
+# the variable is unset, and an empty path element means "current directory".
+export LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+# GStreamer: SYSTEM_PATH (not PATH) so the host's plugin directory is not also
+# scanned — mixing plugin ABIs across versions crashes the registry scan. The
+# registry itself is per-user and per-bundle so a stale cache is never reused.
+export GST_PLUGIN_SYSTEM_PATH="${HERE}/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_PATH="${HERE}/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_SCANNER="${HERE}/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+export GST_REGISTRY="${XDG_CACHE_HOME:-${HOME}/.cache}/voidpulse/gst-registry-$(uname -m).bin"
+mkdir -p "$(dirname "${GST_REGISTRY}")" 2>/dev/null || true
+
+export GI_TYPELIB_PATH="${HERE}/usr/lib/girepository-1.0"
+
+# Qt platform plugins ship inside the PyQt6 wheel.
+export QT_PLUGIN_PATH="${HERE}/usr/lib/python${PYVER}/site-packages/PyQt6/Qt6/plugins"
+export QML2_IMPORT_PATH="${HERE}/usr/lib/python${PYVER}/site-packages/PyQt6/Qt6/qml"
+
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-export FONTCONFIG_PATH="${HERE}/usr/share/fonts:${FONTCONFIG_PATH:-}"
-# Add the GStreamer plugin path too (falls back to the system install)
-export GST_PLUGIN_PATH="${HERE}/usr/lib/gstreamer-1.0:${GST_PLUGIN_PATH:-}"
-exec python3 "${HERE}/usr/lib/voidpulse/voidpulse.py" "$@"
+
+# Escape hatch: `VoidPulse.AppImage --python foo.py` runs the bundled
+# interpreter instead of the player, with this exact environment. Used by the
+# CI smoke test, and the fastest way to debug a bundling problem by hand.
+if [ "${1:-}" = "--python" ]; then
+    shift
+    exec "${HERE}/usr/bin/python${PYVER}" "$@"
+fi
+
+exec "${HERE}/usr/bin/python${PYVER}" "${HERE}/usr/lib/voidpulse/voidpulse.py" "$@"
 APPRUN
     chmod +x "${APPDIR}/AppRun"
 
-    # ── Obtain and run appimagetool ───────────────────────────────────────────
-    local APPIMAGETOOL
-    APPIMAGETOOL=$(_get_appimagetool "${TARGET_ARCH}")
+    # ── 6. Package ────────────────────────────────────────────────────────────
+    local APPIMAGETOOL RUNTIME
+    APPIMAGETOOL=$(_get_appimagetool)
+    RUNTIME=$(_get_appimage_runtime "${TARGET_ARCH}")
 
     local OUT_APPIMAGE="${SOURCE_DIR}/VoidPulse-${APP_VERSION}-${TARGET_ARCH}.AppImage"
     log "Creating AppImage: $(basename "${OUT_APPIMAGE}")"
 
-    # The appimagetool ARCH env value differs from the file-name tag:
-    #   aarch64 → arm_aarch64 | armhf → arm | i686 → i686 | x86_64 → x86_64
-    # APPIMAGE_EXTRACT_AND_RUN=1: extracts to /tmp and runs without needing FUSE.
-    local ARCH_ENV
-    ARCH_ENV=$(_arch_to_appimage_env "${TARGET_ARCH}")
-    export ARCH="${ARCH_ENV}"
-    APPIMAGE_EXTRACT_AND_RUN=1 "${APPIMAGETOOL}" \
+    ARCH="${TARGET_ARCH}" APPIMAGE_EXTRACT_AND_RUN=1 "${APPIMAGETOOL}" \
         --no-appstream \
+        --runtime-file "${RUNTIME}" \
         "${APPDIR}" \
         "${OUT_APPIMAGE}" || \
         die "AppImage could not be created (${TARGET_ARCH}). Inspect the appimagetool output."
-    unset ARCH
 
     chmod +x "${OUT_APPIMAGE}"
     sign_appimage "${OUT_APPIMAGE}"
@@ -1479,6 +1807,9 @@ build_appimage() {
     local missing_tools=()
     command -v python3 &>/dev/null || missing_tools+=("python3")
     command -v curl    &>/dev/null || missing_tools+=("curl")
+    command -v ldd     &>/dev/null || missing_tools+=("ldd     (libc-bin)")
+    command -v pkg-config &>/dev/null || \
+        warn "pkg-config not found — falling back to guessing the GStreamer plugin path."
     command -v desktop-file-validate &>/dev/null || \
         warn "desktop-file-validate not found, validation will be skipped."
     [[ ${#missing_tools[@]} -gt 0 ]] && \
@@ -1508,14 +1839,19 @@ build_appimage() {
     echo -e "  ${BOLD}Dosya   :${NC} ${OUT_APPIMAGE}  (${AI_MB})"
     echo -e "  ${BOLD}Arch    :${NC} ${TARGET_ARCH}"
     echo -e "  ${BOLD}Run     :${NC} chmod +x $(basename "${OUT_APPIMAGE}") && ./$(basename "${OUT_APPIMAGE}")"
-    echo -e "  ${BOLD}Note    :${NC} Python3, PyQt6/5, mutagen, numpy and GStreamer must be installed on the target system."
-    echo -e "  ${BOLD}Hint    :${NC} Other architecture: APPIMAGE_TARGET_ARCH=aarch64 $0 appimage"
+    echo -e "  ${BOLD}Note    :${NC} Self-contained — Python, PyQt6 and GStreamer are bundled."
+    echo -e "  ${BOLD}Note    :${NC} glibc floor is set by this build host: $(getconf GNU_LIBC_VERSION 2>/dev/null || echo unknown)"
+    echo -e "  ${BOLD}Hint    :${NC} aarch64 must be built on an aarch64 machine (no cross-build)."
     sep
 }
 
 # =============================================================================
-#  build_appimage_multiarch — build AppImages for every ARM + x86 architecture
-#  Architectures: x86_64 · aarch64 · armhf · i686
+#  build_appimage_multiarch — build AppImages for the supported architectures
+#  Architectures: x86_64 · aarch64  (see the section banner for why not armhf/i686)
+#
+#  Each architecture must be built natively, so on a single machine this really
+#  only builds the host's. It stays as a menu entry for CI, where the matrix
+#  runs it once per native runner.
 # =============================================================================
 build_appimage_multiarch() {
     sep
@@ -1539,16 +1875,14 @@ build_appimage_multiarch() {
     else
         echo ""
         echo -e "  Which architectures should the AppImage be built for?"
-        echo -e "  ${BOLD}0)${NC} Hepsi (x86_64 aarch64 armhf i686)"
+        echo -e "  ${BOLD}0)${NC} Hepsi (x86_64 aarch64)"
         echo -e "  ${BOLD}1)${NC} x86_64   — Desktop / server"
         echo -e "  ${BOLD}2)${NC} aarch64  — ARM 64-bit (Raspberry Pi 4/5, Pine64, phones)"
-        echo -e "  ${BOLD}3)${NC} armhf    — ARM 32-bit hard-float (PinePhone Pro, Librem 5, older SBCs)"
-        echo -e "  ${BOLD}4)${NC} i686     — x86 32-bit (older PCs)"
         echo ""
         read -rp "  Selection [0-4], comma-separated (e.g. 2,3): " ai_choice
 
         if [[ "${ai_choice}" == "0" || "${ai_choice}" == "all" ]]; then
-            SELECTED_AI_ARCHES=(x86_64 aarch64 armhf i686)
+            SELECTED_AI_ARCHES=(x86_64 aarch64)
         else
             IFS=',' read -ra _tokens <<< "${ai_choice}"
             for t in "${_tokens[@]}"; do
@@ -1556,9 +1890,7 @@ build_appimage_multiarch() {
                 case "${t}" in
                     1) SELECTED_AI_ARCHES+=(x86_64)  ;;
                     2) SELECTED_AI_ARCHES+=(aarch64) ;;
-                    3) SELECTED_AI_ARCHES+=(armhf)   ;;
-                    4) SELECTED_AI_ARCHES+=(i686)    ;;
-                    x86_64|aarch64|armhf|i686) SELECTED_AI_ARCHES+=("${t}") ;;
+                    x86_64|aarch64) SELECTED_AI_ARCHES+=("${t}") ;;
                     *) warn "Skipped unknown architecture: ${t}" ;;
                 esac
             done
@@ -1570,17 +1902,36 @@ build_appimage_multiarch() {
 
     download_font
 
-    local BUILT_AIS=()
+    local HOST_AI_ARCH
+    HOST_AI_ARCH=$(_uname_to_appimage_arch "$(uname -m)")
+
+    local BUILT_AIS=() SKIPPED_AIS=()
     for TARGET_ARCH in "${SELECTED_AI_ARCHES[@]}"; do
         sep
+        # Each bundle is assembled with ldd against its own architecture, so a
+        # non-native target cannot be built here. Skip it and carry on rather
+        # than aborting the run — on one machine "all" simply means "the one
+        # this machine can produce"; CI gets the rest from its other runners.
+        if [[ "${TARGET_ARCH}" != "${HOST_AI_ARCH}" ]]; then
+            warn "Skipping ${TARGET_ARCH}: cannot be cross-built on ${HOST_AI_ARCH}."
+            SKIPPED_AIS+=("${TARGET_ARCH}")
+            continue
+        fi
         local OUT_AI
         OUT_AI=$(_build_single_appimage "${TARGET_ARCH}")
         BUILT_AIS+=("${OUT_AI}")
     done
 
+    if [[ ${#BUILT_AIS[@]} -eq 0 ]]; then
+        die "No AppImage could be built: none of the selected architectures (${SELECTED_AI_ARCHES[*]}) matches this host (${HOST_AI_ARCH})."
+    fi
+
     sep
     echo -e "${GREEN}${BOLD}  ✓ Multi-arch AppImages ready!${NC}"
     sep
+    if [[ ${#SKIPPED_AIS[@]} -gt 0 ]]; then
+        warn "Not built on this host: ${SKIPPED_AIS[*]} — build them on a matching machine."
+    fi
     for _ai in "${BUILT_AIS[@]}"; do
         local _sz
         _sz=$(du -sh "${_ai}" | cut -f1)
@@ -1610,7 +1961,7 @@ show_menu() {
     echo -e "  ${BOLD}4)${NC} rpm               — Fedora / openSUSE / RHEL / CentOS (ARM auto-detect)"
     echo -e "  ${BOLD}5)${NC} apk               — Alpine Linux"
     echo -e "  ${BOLD}6)${NC} appimage          — Portable single file (current architecture)"
-    echo -e "  ${BOLD}7)${NC} appimage-multiarch — AppImage: x86_64, aarch64, armhf, i686"
+    echo -e "  ${BOLD}7)${NC} appimage-multiarch — AppImage: x86_64, aarch64"
     echo -e "  ${BOLD}8)${NC} all               — Build everything"
     echo -e "  ${BOLD}q)${NC} Quit"
     echo ""

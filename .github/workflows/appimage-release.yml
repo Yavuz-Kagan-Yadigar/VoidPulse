@@ -1,0 +1,172 @@
+name: Build Self-Contained AppImages and Attach to Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    # TEMPORARY-CI-TEST: lets this branch exercise the workflow before it
+    # reaches main, where workflow_dispatch would become available. Remove this
+    # branches: block once the packaging is verified.
+    branches:
+      - update-installer-and-search
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (X.Y.Z), without the leading v'
+        required: true
+
+jobs:
+  build-appimage:
+    name: AppImage (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runner per architecture. The bundle is assembled with ldd
+          # against the target's own libraries, so cross-building is not an
+          # option — the script refuses it outright.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Branch push via the TEMPORARY-CI-TEST trigger: there is no tag to
+            # read a version from. Build a throwaway one — this path only ever
+            # produces artifacts, since the release step is gated on refs/tags.
+            VERSION="0.0.0"
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Version is not in X.Y.Z form: $VERSION"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Ubuntu 22.04 is chosen deliberately: it sets the glibc floor of the
+      # finished AppImage at 2.35, which covers Ubuntu 22.04+, Debian 12+
+      # (including Raspberry Pi OS bookworm) and Fedora 36+. Building on a
+      # newer image would raise that floor and drop those systems.
+      - name: Install GStreamer and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl file pkg-config \
+            libgstreamer1.0-0 \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-alsa \
+            gstreamer1.0-pulseaudio \
+            gstreamer1.0-pipewire \
+            gir1.2-gstreamer-1.0 \
+            gir1.2-gst-plugins-base-1.0 \
+            gir1.2-glib-2.0 \
+            libgirepository1.0-dev \
+            libcairo2-dev \
+            gcc
+
+      # FUSE is what lets appimagetool and the python-appimage base run.
+      # APPIMAGE_EXTRACT_AND_RUN (set by the script) avoids needing it, but
+      # libfuse2 keeps the fallback path available.
+      - name: Install libfuse2
+        run: sudo apt-get install -y libfuse2 || true
+
+      - name: Build AppImage
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          APPIMAGE_TARGET_ARCH: ${{ matrix.arch }}
+        run: bash ./voidpulse_build.sh appimage
+
+      - name: Verify the result
+        run: |
+          FILE="VoidPulse-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.AppImage"
+          test -f "$FILE" || { echo "::error::$FILE was not produced"; exit 1; }
+
+          echo "--- size ---"
+          ls -lh "$FILE"
+
+          # The old builder stamped every architecture with the x86_64 runtime.
+          # Fail loudly if that ever regresses.
+          echo "--- runtime architecture ---"
+          file -b "$FILE"
+          case "${{ matrix.arch }}" in
+            x86_64)  file -b "$FILE" | grep -q 'x86-64'  || { echo "::error::runtime is not x86-64"; exit 1; } ;;
+            aarch64) file -b "$FILE" | grep -q 'aarch64' || { echo "::error::runtime is not aarch64"; exit 1; } ;;
+          esac
+
+          # A self-contained bundle must carry Python, Qt and GStreamer. The
+          # old one was 500 KB precisely because it carried none of them.
+          echo "--- payload check ---"
+          ./"$FILE" --appimage-extract >/dev/null
+          for want in \
+              "squashfs-root/usr/bin/python3.12" \
+              "squashfs-root/usr/lib/python3.12/site-packages/PyQt6" \
+              "squashfs-root/usr/lib/gstreamer-1.0" \
+              "squashfs-root/usr/lib/girepository-1.0" \
+              "squashfs-root/usr/lib/voidpulse/voidpulse.py"; do
+            test -e "$want" || { echo "::error::missing from the bundle: $want"; exit 1; }
+          done
+          echo "bundled GStreamer plugins: $(ls squashfs-root/usr/lib/gstreamer-1.0 | wc -l)"
+          echo "bundled native libraries:  $(ls squashfs-root/usr/lib/*.so* 2>/dev/null | wc -l)"
+
+          # Nothing that must come from the host may be inside the bundle.
+          for bad in libc.so.6 libasound.so.2 libpulse.so.0 libGL.so.1; do
+            if [ -e "squashfs-root/usr/lib/$bad" ]; then
+              echo "::error::$bad must not be bundled"; exit 1
+            fi
+          done
+          rm -rf squashfs-root
+
+      # Proves the bundle actually starts: imports PyQt6 and initialises
+      # GStreamer with the bundled typelibs, headless, without touching any
+      # host Python. A packaging mistake shows up here rather than on a user's
+      # machine.
+      # Proves the bundle actually starts: the interpreter, Qt, GStreamer and
+      # the typelibs all have to resolve from inside the AppDir. See
+      # .github/scripts/appimage_smoke_test.py for what it asserts.
+      - name: Smoke test the bundled runtime
+        run: |
+          FILE="VoidPulse-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.AppImage"
+          ./"$FILE" --appimage-extract >/dev/null
+          QT_QPA_PLATFORM=offscreen \
+          GST_REGISTRY=/tmp/smoke-registry.bin \
+            ./squashfs-root/AppRun --python .github/scripts/appimage_smoke_test.py \
+            || { echo "::error::the bundled runtime failed to start"; exit 1; }
+          rm -rf squashfs-root
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoidPulse-${{ steps.ver.outputs.version }}-${{ matrix.arch }}
+          path: |
+            VoidPulse-*.AppImage
+            VoidPulse-*.AppImage.asc
+          if-no-files-found: error
+
+      - name: Attach AppImage to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            VoidPulse-*.AppImage
+            VoidPulse-*.AppImage.asc
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

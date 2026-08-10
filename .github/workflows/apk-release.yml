@@ -1,0 +1,115 @@
+name: Build Alpine/postmarketOS APK and Attach to Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    # TEMPORARY-CI-TEST: lets this branch exercise the workflow before it
+    # reaches main, where workflow_dispatch would become available. Remove this
+    # branches: block once the packaging is verified.
+    branches:
+      - update-installer-and-search
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (X.Y.Z), without the leading v'
+        required: true
+
+jobs:
+  build-apk:
+    name: Build APK (noarch — aarch64 / armv7 / x86_64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Branch push via the TEMPORARY-CI-TEST trigger: there is no tag to
+            # read a version from. Build a throwaway one — this path only ever
+            # produces artifacts, since the release step is gated on refs/tags.
+            VERSION="0.0.0"
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Version is not in X.Y.Z form: $VERSION"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+
+      # The build runs inside Alpine because abuild/apk only exist there.
+      # It is a `docker run` rather than a job-level `container:` on purpose:
+      # node-based actions (checkout, action-gh-release) need glibc and cannot
+      # run in a musl image, so only this one step goes into the container.
+      - name: Build APK inside Alpine
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          ABUILD_PRIVKEY: ${{ secrets.ABUILD_PRIVKEY }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            -e APP_VERSION \
+            -e ABUILD_PRIVKEY \
+            alpine:latest sh -euc '
+              apk add --no-cache alpine-sdk bash curl openssl
+
+              mkdir -p "$HOME/.abuild"
+              if [ -n "$ABUILD_PRIVKEY" ]; then
+                # Persistent key: users install the matching .rsa.pub once and
+                # every future release verifies against it.
+                printf "%s\n" "$ABUILD_PRIVKEY" > "$HOME/.abuild/voidpulse.rsa"
+                chmod 600 "$HOME/.abuild/voidpulse.rsa"
+                openssl rsa -in "$HOME/.abuild/voidpulse.rsa" \
+                            -pubout -out "$HOME/.abuild/voidpulse.rsa.pub"
+                echo "PACKAGER_PRIVKEY=$HOME/.abuild/voidpulse.rsa" \
+                     > "$HOME/.abuild/abuild.conf"
+                cp "$HOME/.abuild/voidpulse.rsa.pub" /etc/apk/keys/
+                echo "Signing with the persistent ABUILD_PRIVKEY key."
+              else
+                # No secret configured: build still succeeds, but the key is
+                # thrown away, so users need --allow-untrusted to install.
+                echo "::warning::ABUILD_PRIVKEY secret is not set — signing with an ephemeral key."
+                abuild-keygen -a -i -n
+              fi
+
+              # abuild -F (already used by the script) is what lets it run as root.
+              bash ./voidpulse_build.sh apk
+
+              # Publish the public key next to the package so users can trust it.
+              cp "$HOME"/.abuild/*.rsa.pub /src/ 2>/dev/null || true
+            '
+
+      - name: Show build output
+        run: ls -la *.apk *.rsa.pub 2>/dev/null || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voidpulse-apk-${{ steps.ver.outputs.version }}
+          path: |
+            *.apk
+            *.rsa.pub
+          if-no-files-found: error
+
+      - name: Attach APK to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            *.apk
+            *.rsa.pub
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

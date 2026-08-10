@@ -8,6 +8,13 @@ org.voidpulse.VoidPulse-build/
 org.voidpulse.VoidPulse-repo/
 apk-build/
 apk-out/
+rpm-build/
+AppDir-*/
+.appimage-extract-*/
+
+# Downloaded AppImage build inputs (python-appimage base, type2 runtimes).
+# Cached so a rebuild does not re-download ~30 MB per architecture.
+.appimage-cache/
 
 # Built packages: published as GitHub release assets, never tracked in git.
 # Also covers the downloaded appimagetool-*.AppImage helper.
@@ -17,6 +24,7 @@ apk-out/
 *.apk
 *.AppImage
 *.asc
+*.sig
 *.tar.gz
 
 # Local Claude Code preferences
