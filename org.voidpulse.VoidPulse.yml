@@ -37,91 +37,35 @@ modules:
   - name: voidpulse
     buildsystem: simple
     build-commands:
-      - install -Dm644 alsa.py /app/lib/voidpulse/alsa.py
-      - install -Dm644 blackout_overlay.py /app/lib/voidpulse/blackout_overlay.py
-      - install -Dm644 constants.py /app/lib/voidpulse/constants.py
-      - install -Dm644 controlbar.py /app/lib/voidpulse/controlbar.py
-      - install -Dm644 controlbar_widgets.py /app/lib/voidpulse/controlbar_widgets.py
-      - install -Dm644 cover_art.py /app/lib/voidpulse/cover_art.py
-      - install -Dm644 dialogs_edit.py /app/lib/voidpulse/dialogs_edit.py
-      - install -Dm644 eq_filters.py /app/lib/voidpulse/eq_filters.py
-      - install -Dm644 eq.py /app/lib/voidpulse/eq.py
-      - install -Dm644 fetch_popups.py /app/lib/voidpulse/fetch_popups.py
-      - install -Dm644 library.py /app/lib/voidpulse/library.py
-      - install -Dm644 lyrics.py /app/lib/voidpulse/lyrics.py
-      - install -Dm644 main_window.py /app/lib/voidpulse/main_window.py
-      - install -Dm644 metadata_online.py /app/lib/voidpulse/metadata_online.py
-      - install -Dm644 mpris.py /app/lib/voidpulse/mpris.py
-      - install -Dm644 player_dsp.py /app/lib/voidpulse/player_dsp.py
-      - install -Dm644 player.py /app/lib/voidpulse/player.py
-      - install -Dm644 resampler.py /app/lib/voidpulse/resampler.py
-      - install -Dm644 settings_popup.py /app/lib/voidpulse/settings_popup.py
-      - install -Dm644 sidebar.py /app/lib/voidpulse/sidebar.py
-      - install -Dm644 titlebar.py /app/lib/voidpulse/titlebar.py
-      - install -Dm644 views.py /app/lib/voidpulse/views.py
-      - install -Dm644 voidpulse.py /app/lib/voidpulse/voidpulse.py
-      - install -Dm644 widgets_base.py /app/lib/voidpulse/widgets_base.py
+      # Installed by glob rather than one line per module. The hand-written list
+      # this replaces is how auto-update.py, queue_panel.py, remote_io.py and
+      # remote.py ended up missing from the Flatpak for an entire release.
+      - install -Dm644 *.py -t /app/lib/voidpulse/
       - install -Dm755 voidpulse-launcher /app/bin/voidpulse
       - install -Dm644 org.voidpulse.VoidPulse.desktop /app/share/applications/org.voidpulse.VoidPulse.desktop
       - install -Dm644 org.voidpulse.VoidPulse.svg /app/share/icons/hicolor/scalable/apps/org.voidpulse.VoidPulse.svg
       - install -Dm644 appdata.xml /app/share/metainfo/org.voidpulse.VoidPulse.appdata.xml
       - install -Dm644 NotoMusic-Regular.ttf /app/share/fonts/truetype/NotoMusic/NotoMusic-Regular.ttf
+      # GPL-3.0 requires the licence text to travel with the binary.
+      - install -Dm644 LICENSE /app/share/licenses/voidpulse/LICENSE
     sources:
-      - type: file
-        path: alsa.py
-      - type: file
-        path: blackout_overlay.py
-      - type: file
-        path: constants.py
-      - type: file
-        path: controlbar.py
-      - type: file
-        path: controlbar_widgets.py
-      - type: file
-        path: cover_art.py
-      - type: file
-        path: dialogs_edit.py
-      - type: file
-        path: eq_filters.py
-      - type: file
-        path: eq.py
-      - type: file
-        path: fetch_popups.py
-      - type: file
-        path: library.py
-      - type: file
-        path: lyrics.py
-      - type: file
-        path: main_window.py
-      - type: file
-        path: metadata_online.py
-      - type: file
-        path: mpris.py
-      - type: file
-        path: player_dsp.py
-      - type: file
-        path: player.py
-      - type: file
-        path: resampler.py
-      - type: file
-        path: settings_popup.py
-      - type: file
-        path: sidebar.py
-      - type: file
-        path: titlebar.py
-      - type: file
-        path: views.py
-      - type: file
-        path: voidpulse.py
-      - type: file
-        path: widgets_base.py
-      - type: file
-        path: voidpulse-launcher
-      - type: file
-        path: org.voidpulse.VoidPulse.desktop
-      - type: file
-        path: org.voidpulse.VoidPulse.svg
-      - type: file
-        path: appdata.xml
-      - type: file
-        path: NotoMusic-Regular.ttf
+      # The whole directory, so a new file is picked up without touching this
+      # manifest. skip covers the build trees and outputs that would otherwise
+      # be copied into the build directory; a fresh CI checkout has none of them.
+      - type: dir
+        path: .
+        skip:
+          - .git
+          - .github
+          - .claude
+          - .flatpak-builder
+          - .ruff_cache
+          - .appimage-cache
+          - __pycache__
+          - apk-build
+          - apk-out
+          - rpm-build
+          - org.voidpulse.VoidPulse-build
+          - org.voidpulse.VoidPulse-repo
+          - org.voidpulse.VoidPulse.flatpak
+          - appimagetool-x86_64.AppImage

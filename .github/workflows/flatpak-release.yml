@@ -3,7 +3,8 @@ name: Build Flatpak and Create Release
 on:
   push:
     tags:
-      - 'v*'             # v1.0.0, v2.0.0 gibi etiketlerde tetiklenir
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-flatpak:
@@ -28,7 +29,7 @@ jobs:
           manifest-path: "org.voidpulse.VoidPulse.yml"
           cache-key: "flatpak-builder-${{ github.sha }}"
           run-tests: false
-          # Bu action otomatik olarak artifact oluşturur (upload-artifact true varsayılan)
+          # This action uploads an artifact automatically (upload-artifact defaults to true)
 
       - name: Create GitHub Release and Upload Flatpak
         uses: softprops/action-gh-release@v2
