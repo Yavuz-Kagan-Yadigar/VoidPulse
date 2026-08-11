@@ -61,7 +61,10 @@ jobs:
             -e APP_VERSION \
             -e ABUILD_PRIVKEY \
             alpine:latest sh -euc '
-              apk add --no-cache alpine-sdk bash curl openssl
+              # python3 is here because abuild invokes it while checking the
+              # packaged modules; -d skips installing depends=, so it would not
+              # arrive on its own.
+              apk add --no-cache alpine-sdk bash curl openssl python3
 
               # The script refuses to run as root (flatpak-builder --user
               # cannot) and abuild wants an unprivileged member of the abuild
