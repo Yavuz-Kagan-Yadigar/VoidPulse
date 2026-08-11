@@ -1,0 +1,118 @@
+name: Build DEB Packages and Attach to Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (X.Y.Z), without the leading v'
+        required: true
+
+jobs:
+  build-deb:
+    name: DEB (6 architectures)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Reached only if the workflow is somehow run off a tag — add a
+            # branches: trigger to test on a branch, for instance. There is no
+            # tag to read a version from, so build a throwaway one; this path
+            # only produces artifacts, as the release step is gated on refs/tags.
+            VERSION="0.0.0"
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Version is not in X.Y.Z form: $VERSION"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev fakeroot curl
+
+      # VoidPulse is pure Python, so one source tree serves every target and a
+      # single x86_64 runner can emit all six. Only the control file's
+      # Architecture field and the PyQt5 fallback in Depends differ per arch.
+      - name: Build DEB packages
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          DEB_ARCH_TARGETS: amd64,arm64,armhf,armel,riscv64,loong64
+        run: bash ./voidpulse_build.sh deb-multiarch
+
+      - name: Verify the packages
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          FAIL=0
+          for arch in amd64 arm64 armhf armel riscv64 loong64; do
+            FILE="voidpulse_${VERSION}_${arch}.deb"
+            if [ ! -f "$FILE" ]; then
+              echo "::error::$FILE was not produced"; FAIL=1; continue
+            fi
+
+            # The Architecture field is the whole point of shipping six files;
+            # if it does not match the filename the package installs on the
+            # wrong machine or on none at all.
+            GOT=$(dpkg-deb -f "$FILE" Architecture)
+            if [ "$GOT" != "$arch" ]; then
+              echo "::error::$FILE declares Architecture=$GOT, expected $arch"; FAIL=1
+            fi
+
+            # A control file without Depends means apt installs a package that
+            # cannot start, which is exactly how the apk target was broken.
+            DEPS=$(dpkg-deb -f "$FILE" Depends)
+            case "$DEPS" in
+              *python3*) ;;
+              *) echo "::error::$FILE has no python3 dependency: $DEPS"; FAIL=1 ;;
+            esac
+
+            echo "  $FILE  $(du -h "$FILE" | cut -f1)  arch=$GOT"
+
+            # Compared against the tree rather than a fixed floor: a hand-set
+            # threshold still passes when a new module is silently dropped,
+            # which is exactly how the Flatpak lost four of them.
+            WANT=$(ls -1 *.py | wc -l)
+            COUNT=$(dpkg-deb -c "$FILE" | grep -c '/usr/lib/voidpulse/.*\.py$' || true)
+            if [ "$COUNT" -ne "$WANT" ]; then
+              echo "::error::$FILE has $COUNT Python modules, the tree has $WANT"; FAIL=1
+            fi
+
+            # GPL-3.0 requires the licence text to ship with the binary.
+            dpkg-deb -c "$FILE" | grep -q 'usr/share/licenses/voidpulse/LICENSE' \
+              || { echo "::error::$FILE does not ship LICENSE"; FAIL=1; }
+          done
+          [ "$FAIL" -eq 0 ] || exit 1
+          echo "all six packages verified"
+
+      - name: Upload DEB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voidpulse-deb-${{ steps.ver.outputs.version }}
+          path: '*.deb'
+          if-no-files-found: error
+
+      - name: Attach DEB packages to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: '*.deb'
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
