@@ -38,6 +38,7 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm644 alsa.py /app/lib/voidpulse/alsa.py
+      - install -Dm644 auto-update.py /app/lib/voidpulse/auto-update.py
       - install -Dm644 blackout_overlay.py /app/lib/voidpulse/blackout_overlay.py
       - install -Dm644 constants.py /app/lib/voidpulse/constants.py
       - install -Dm644 controlbar.py /app/lib/voidpulse/controlbar.py
@@ -54,6 +55,9 @@ modules:
       - install -Dm644 mpris.py /app/lib/voidpulse/mpris.py
       - install -Dm644 player_dsp.py /app/lib/voidpulse/player_dsp.py
       - install -Dm644 player.py /app/lib/voidpulse/player.py
+      - install -Dm644 queue_panel.py /app/lib/voidpulse/queue_panel.py
+      - install -Dm644 remote_io.py /app/lib/voidpulse/remote_io.py
+      - install -Dm644 remote.py /app/lib/voidpulse/remote.py
       - install -Dm644 resampler.py /app/lib/voidpulse/resampler.py
       - install -Dm644 settings_popup.py /app/lib/voidpulse/settings_popup.py
       - install -Dm644 sidebar.py /app/lib/voidpulse/sidebar.py
@@ -69,6 +73,8 @@ modules:
     sources:
       - type: file
         path: alsa.py
+      - type: file
+        path: auto-update.py
       - type: file
         path: blackout_overlay.py
       - type: file
@@ -101,6 +107,12 @@ modules:
         path: player_dsp.py
       - type: file
         path: player.py
+      - type: file
+        path: queue_panel.py
+      - type: file
+        path: remote_io.py
+      - type: file
+        path: remote.py
       - type: file
         path: resampler.py
       - type: file
