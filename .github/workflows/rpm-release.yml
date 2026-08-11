@@ -1,0 +1,135 @@
+name: Build RPM Packages and Attach to Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (X.Y.Z), without the leading v'
+        required: true
+
+jobs:
+  build-rpm:
+    name: RPM (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The package is BuildArch: noarch, so one file installs on every CPU
+          # architecture. What genuinely differs is the distribution family:
+          # build_rpm writes Requires: python3-qt6 + gstreamer-plugins-good on
+          # openSUSE, and python3-PyQt6 + gstreamer1-plugins-good on Fedora.
+          # Building one RPM per family is the only way both sets are correct.
+          - label: fedora
+            image: fedora:latest
+            install: dnf install -y rpm-build tar gzip curl findutils shadow-utils python3
+          - label: opensuse
+            image: opensuse/tumbleweed
+            install: zypper --non-interactive install rpm-build tar gzip curl findutils shadow python3
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      # Fedora and openSUSE are glibc-based, so node-based actions run fine in
+      # the container — unlike the musl Alpine image the APK workflow needs.
+      - name: Install build tools
+        run: ${{ matrix.install }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Reached only if the workflow is somehow run off a tag — add a
+            # branches: trigger to test on a branch, for instance. There is no
+            # tag to read a version from, so build a throwaway one; this path
+            # only produces artifacts, as the release step is gated on refs/tags.
+            VERSION="0.0.0"
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Version is not in X.Y.Z form: $VERSION"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The script refuses to run as root (flatpak-builder --user cannot), and
+      # containers start as root. Rather than bypassing the guard, build as an
+      # unprivileged user — which is what rpmbuild wants anyway, since a spec
+      # that writes outside its buildroot can do real damage with root rights.
+      - name: Build RPM
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          useradd -m builder 2>/dev/null || true
+          chown -R builder "$PWD"
+          su builder -c "cd '$PWD' && env HOME=/home/builder APP_VERSION='${APP_VERSION}' bash ./voidpulse_build.sh rpm"
+
+      - name: Verify and tag the package
+        run: |
+          RPM=$(ls -1 voidpulse-*.rpm 2>/dev/null | head -1)
+          [ -n "$RPM" ] || { echo "::error::no RPM was produced"; exit 1; }
+          echo "built: $RPM"
+
+          echo "--- metadata ---"
+          rpm -qip "$RPM"
+
+          echo "--- requires ---"
+          rpm -qRp "$RPM"
+
+          # Guard the distro fork: a Fedora RPM asking for openSUSE's
+          # python3-qt6 (or the reverse) installs nothing on either.
+          case "${{ matrix.label }}" in
+            fedora)
+              rpm -qRp "$RPM" | grep -q 'python3-PyQt6' \
+                || { echo "::error::Fedora RPM does not require python3-PyQt6"; exit 1; } ;;
+            opensuse)
+              rpm -qRp "$RPM" | grep -q 'python3-qt6' \
+                || { echo "::error::openSUSE RPM does not require python3-qt6"; exit 1; } ;;
+          esac
+
+          echo "--- payload ---"
+          WANT=$(ls -1 *.py | wc -l)
+          COUNT=$(rpm -qlp "$RPM" | grep -c '/usr/lib/voidpulse/.*\.py$' || true)
+          echo "Python modules: $COUNT (tree has $WANT)"
+          [ "$COUNT" -eq "$WANT" ] \
+            || { echo "::error::payload has $COUNT Python modules, the tree has $WANT"; exit 1; }
+
+          # %license, so the text ships and --nodocs cannot strip it.
+          rpm -qLp "$RPM" | grep -q '/usr/share/licenses/voidpulse/LICENSE' \
+            || { echo "::error::LICENSE is not marked as a licence file"; exit 1; }
+
+          # Both jobs would otherwise upload an identically named noarch file
+          # and silently overwrite each other on the release.
+          TAGGED="voidpulse-${{ steps.ver.outputs.version }}-1.${{ matrix.label }}.noarch.rpm"
+          [ "$RPM" = "$TAGGED" ] || mv "$RPM" "$TAGGED"
+          echo "published as: $TAGGED"
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voidpulse-rpm-${{ matrix.label }}-${{ steps.ver.outputs.version }}
+          path: '*.rpm'
+          if-no-files-found: error
+
+      - name: Attach RPM to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: '*.rpm'
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
