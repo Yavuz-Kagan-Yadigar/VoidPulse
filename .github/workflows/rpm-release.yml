@@ -1,4 +1,4 @@
-name: Build RPM Packages and Attach to Release
+name: Build RPM Package and Attach to Release
 
 on:
   push:
@@ -11,35 +11,22 @@ on:
         required: true
 
 jobs:
+  # One noarch package for both RPM families. The payload never differed
+  # between them — only some dependency names did — and those are boolean
+  # dependencies now, so a single build serves Fedora and openSUSE alike.
+  # Fedora is the build host purely because it is the more common base; the
+  # output carries no disttag and nothing distro-specific.
   build-rpm:
-    name: RPM (${{ matrix.label }})
+    name: RPM
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The package is BuildArch: noarch, so one file installs on every CPU
-          # architecture. What genuinely differs is the distribution family:
-          # build_rpm writes Requires: python3-qt6 + gstreamer-plugins-good on
-          # openSUSE, and python3-PyQt6 + gstreamer1-plugins-good on Fedora.
-          # Building one RPM per family is the only way both sets are correct.
-          - label: fedora
-            image: fedora:latest
-            install: dnf install -y rpm-build tar gzip curl findutils shadow-utils python3
-          - label: opensuse
-            image: opensuse/tumbleweed
-            install: zypper --non-interactive install rpm-build tar gzip curl findutils shadow python3
-
     container:
-      image: ${{ matrix.image }}
+      image: fedora:latest
 
     steps:
-      # Fedora and openSUSE are glibc-based, so node-based actions run fine in
-      # the container — unlike the musl Alpine image the APK workflow needs.
+      # Fedora is glibc-based, so node-based actions run fine in the container
+      # — unlike the musl Alpine image the APK workflow needs.
       - name: Install build tools
-        run: ${{ matrix.install }}
+        run: dnf install -y rpm-build tar gzip curl findutils shadow-utils python3
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -76,7 +63,7 @@ jobs:
           chown -R builder "$PWD"
           su builder -c "cd '$PWD' && env HOME=/home/builder APP_VERSION='${APP_VERSION}' bash ./voidpulse_build.sh rpm"
 
-      - name: Verify and tag the package
+      - name: Verify the package
         run: |
           RPM=$(ls -1 voidpulse-*.rpm 2>/dev/null | head -1)
           [ -n "$RPM" ] || { echo "::error::no RPM was produced"; exit 1; }
@@ -88,15 +75,25 @@ jobs:
           echo "--- requires ---"
           rpm -qRp "$RPM"
 
-          # Guard the distro fork: a Fedora RPM asking for openSUSE's
-          # python3-qt6 (or the reverse) installs nothing on either.
-          case "${{ matrix.label }}" in
-            fedora)
-              rpm -qRp "$RPM" | grep -q 'python3-PyQt6' \
-                || { echo "::error::Fedora RPM does not require python3-PyQt6"; exit 1; } ;;
-            opensuse)
-              rpm -qRp "$RPM" | grep -q 'python3-qt6' \
-                || { echo "::error::openSUSE RPM does not require python3-qt6"; exit 1; } ;;
+          # Both halves of every boolean dependency must survive into the built
+          # package. rpm parses `(A or B)` at build time and silently drops the
+          # whole line if the syntax is wrong, which would produce a package
+          # that installs anywhere and works nowhere.
+          for pair in \
+            'python3-qt6:python3-PyQt6' \
+            'gstreamer-plugins-good:gstreamer1-plugins-good' \
+            'gstreamer-plugins-bad:gstreamer1-plugins-bad-free'; do
+            SUSE="${pair%%:*}"; FED="${pair##*:}"
+            rpm -qRp "$RPM" | grep -qF "($SUSE or $FED)" \
+              || { echo "::error::missing boolean dependency ($SUSE or $FED)"; exit 1; }
+          done
+          echo "boolean dependencies present"
+
+          # A disttag would claim the package belongs to whichever distribution
+          # built it, which is the split this replaced.
+          case "$RPM" in
+            *.fc[0-9]*.rpm|*.suse*.rpm|*.el[0-9]*.rpm)
+              echo "::error::$RPM carries a disttag; it must be distro-neutral"; exit 1 ;;
           esac
 
           echo "--- payload ---"
@@ -110,22 +107,71 @@ jobs:
           rpm -qLp "$RPM" | grep -q '/usr/share/licenses/voidpulse/LICENSE' \
             || { echo "::error::LICENSE is not marked as a licence file"; exit 1; }
 
-          # Both jobs would otherwise upload an identically named noarch file
-          # and silently overwrite each other on the release.
-          TAGGED="voidpulse-${{ steps.ver.outputs.version }}-1.${{ matrix.label }}.noarch.rpm"
-          [ "$RPM" = "$TAGGED" ] || mv "$RPM" "$TAGGED"
-          echo "published as: $TAGGED"
+          EXPECTED="voidpulse-${{ steps.ver.outputs.version }}-1.noarch.rpm"
+          [ "$RPM" = "$EXPECTED" ] \
+            || { echo "::error::expected $EXPECTED, got $RPM"; exit 1; }
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: voidpulse-rpm-${{ matrix.label }}-${{ steps.ver.outputs.version }}
+          name: voidpulse-rpm-${{ steps.ver.outputs.version }}
           path: '*.rpm'
           if-no-files-found: error
 
+  # The point of the merge is that one file resolves on both families, so that
+  # claim is tested rather than assumed. This is what the old two-job split
+  # bought — each family got names that existed on it — and dropping the split
+  # without replacing that check would be trading a guarantee for a hope.
+  resolve-check:
+    name: Resolve (${{ matrix.label }})
+    needs: build-rpm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: fedora
+            image: fedora:latest
+            # dnf has no honest --dry-run: --assumeno exits non-zero whether the
+            # transaction resolved or not. --downloadonly resolves for real and
+            # exits 0 only if every dependency was satisfiable.
+            command: dnf install -y --downloadonly --destdir=/tmp/dl ./pkg.rpm
+          - label: opensuse
+            image: opensuse/tumbleweed
+            command: zypper --non-interactive install --dry-run ./pkg.rpm
+
+    steps:
+      - name: Download the built RPM
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voidpulse-rpm-*
+          merge-multiple: true
+
+      - name: Resolve against ${{ matrix.label }}
+        run: |
+          cp voidpulse-*.rpm pkg.rpm
+          docker run --rm -v "$PWD/pkg.rpm:/pkg.rpm:ro" -w / ${{ matrix.image }} \
+            sh -c '${{ matrix.command }}'
+          echo "resolves on ${{ matrix.label }}"
+
+  # Nothing reaches the release until it has resolved on both families.
+  release:
+    name: Attach to release
+    needs: resolve-check
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the built RPM
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voidpulse-rpm-*
+          merge-multiple: true
+
       - name: Attach RPM to the GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: '*.rpm'
           name: ${{ github.ref_name }}

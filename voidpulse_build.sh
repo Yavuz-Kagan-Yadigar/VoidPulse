@@ -951,31 +951,39 @@ APPDATA
     local SPEC="${RPM_ROOT}/SPECS/${APP_NAME}.spec"
     log "Writing SPEC file: ${SPEC}"
 
-    # Package names per distro + architecture
-    # openSUSE: python3-qt6, gstreamer-plugins-good/bad
-    # Fedora  : python3-PyQt6, gstreamer1-plugins-good/bad-free
-    # A PyQt5 fallback is added on ARM distros (the PyQt6 package may be missing)
-    local PYQT_PKG PYQT_FALLBACK GST_GOOD GST_BAD MUTAGEN_PKG NUMPY_PKG SOXR_PKG
+    # One noarch package for both RPM families. The payload never differed
+    # between Fedora and openSUSE — only some dependency names did — so the few
+    # that genuinely differ are boolean (rich) dependencies rather than a reason
+    # to build the package twice.
+    #
+    # Only GStreamer actually needs that. openSUSE calls the plugin sets
+    # gstreamer-plugins-good/bad; Fedora calls them gstreamer1-plugins-good and
+    # gstreamer1-plugins-bad-free, and neither family provides the other's
+    # spelling — verified with `zypper what-provides` on Tumbleweed, where the
+    # gstreamer1-* names resolve to nothing at all.
+    #
+    # The Python dependencies need no such treatment despite openSUSE naming its
+    # packages python313-PyQt6, python313-mutagen and so on: its singlespec
+    # macros attach an unversioned `python3-<name>` provide to the primary
+    # flavour, so Fedora's plain names already resolve there. Writing the
+    # versioned names instead would have been the trap — they go stale on every
+    # Python bump.
+    #
+    # `(A or B)` needs RPM >= 4.13 (2016), so Fedora 25+, Leap 15+, Tumbleweed
+    # and RHEL 8+ all understand it; rpm records the requirement itself as
+    # rpmlib(RichDependencies), and dnf and zypper are both libsolv-based, so
+    # they resolve it at install time.
+    local PYQT_PKG GST_GOOD GST_BAD MUTAGEN_PKG NUMPY_PKG SOXR_PKG
     local PYTHON_REQ
-    if [[ "${IS_OPENSUSE}" -eq 1 ]]; then
-        PYQT_PKG="python3-qt6"
-        GST_GOOD="gstreamer-plugins-good"
-        GST_BAD="gstreamer-plugins-bad"
-        MUTAGEN_PKG="python3-mutagen"
-        NUMPY_PKG="python3-numpy"
-        # openSUSE packages soxr under the versioned python31x- prefix (same
-        # convention as its python313-numpy, unlike Fedora's plain python3-soxr).
-        SOXR_PKG="python313-soxr"
-        PYTHON_REQ="python3 >= 3.10"
-    else
-        PYQT_PKG="python3-PyQt6"
-        GST_GOOD="gstreamer1-plugins-good"
-        GST_BAD="gstreamer1-plugins-bad-free"
-        MUTAGEN_PKG="python3-mutagen"
-        NUMPY_PKG="python3-numpy"
-        SOXR_PKG="python3-soxr"
-        PYTHON_REQ="python3 >= 3.10"
-    fi
+    # Belt and braces: openSUSE's PyQt6 package provides both spellings today,
+    # but the `or` costs nothing and covers a release that only carries one.
+    PYQT_PKG="(python3-qt6 or python3-PyQt6)"
+    GST_GOOD="(gstreamer-plugins-good or gstreamer1-plugins-good)"
+    GST_BAD="(gstreamer-plugins-bad or gstreamer1-plugins-bad-free)"
+    MUTAGEN_PKG="python3-mutagen"
+    NUMPY_PKG="python3-numpy"
+    SOXR_PKG="python3-soxr"
+    PYTHON_REQ="python3 >= 3.10"
     # On ARM architectures, add python3-PyQt5 as a Suggests entry
     local ARM_SUGGESTS_LINE=""
     case "${RPM_CPU}" in
@@ -987,7 +995,11 @@ APPDATA
     cat > "${SPEC}" << SPEC
 Name:           ${APP_NAME}
 Version:        ${APP_VERSION}
-Release:        ${APP_RELEASE}%{?dist}
+# Deliberately no disttag here. The package is not built for one distribution
+# any more, so stamping it with whichever one happened to build it would be a
+# lie. (Spelling the macro out in this comment is not an option — rpm expands
+# macros inside spec comments and warns about it.)
+Release:        ${APP_RELEASE}
 Summary:        ${APP_DESC}
 License:        GPL-3.0-or-later
 URL:            ${APP_URL}
