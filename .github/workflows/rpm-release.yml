@@ -32,10 +32,10 @@ jobs:
           # Building one RPM per family is the only way both sets are correct.
           - label: fedora
             image: fedora:latest
-            install: dnf install -y rpm-build tar gzip curl findutils shadow-utils
+            install: dnf install -y rpm-build tar gzip curl findutils shadow-utils python3
           - label: opensuse
             image: opensuse/tumbleweed
-            install: zypper --non-interactive install rpm-build tar gzip curl findutils shadow
+            install: zypper --non-interactive install rpm-build tar gzip curl findutils shadow python3
 
     container:
       image: ${{ matrix.image }}

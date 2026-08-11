@@ -60,6 +60,12 @@ APP_DESC="Touch- and OLED-friendly advanced music player"
 APP_LICENSE="GPL-3.0-or-later"
 APP_URL="https://github.com/Yavuz-Kagan-Yadigar/VoidPulse"
 APP_MAINTAINER="Yavuz"
+# Kept separate from APP_MAINTAINER because AppStream's <developer_name>
+# wants a bare name while deb/apk/rpm want RFC822 "Name <email>" — abuild
+# fails the build outright on anything else. Override from the environment
+# to publish under a different address.
+APP_MAINTAINER_EMAIL="${APP_MAINTAINER_EMAIL:-136856526+Yavuz-Kagan-Yadigar@users.noreply.github.com}"
+APP_MAINTAINER_RFC822="${APP_MAINTAINER} <${APP_MAINTAINER_EMAIL}>"
 
 # ── Version: environment variable or interactive prompt ──────────────────────
 # APP_VERSION lets CI drive the script without a TTY. The :- default is what
@@ -508,7 +514,7 @@ LAUNCHER
 Package: ${APP_NAME}
 Version: ${APP_VERSION}
 Architecture: ${ARCH}
-Maintainer: ${APP_MAINTAINER}
+Maintainer: ${APP_MAINTAINER_RFC822}
 Description: ${APP_DESC}
  Touch- and OLED-friendly advanced music player.
  Wayland, GNOME/KDE integration, PipeWire, GStreamer
@@ -744,7 +750,7 @@ LAUNCHER
 Package: ${APP_NAME}
 Version: ${APP_VERSION}
 Architecture: ${TARGET_ARCH}
-Maintainer: ${APP_MAINTAINER}
+Maintainer: ${APP_MAINTAINER_RFC822}
 Description: ${APP_DESC}
  Touch- and OLED-friendly advanced music player.
  Wayland, GNOME/KDE integration, PipeWire, GStreamer
@@ -1037,7 +1043,7 @@ update-desktop-database /usr/share/applications/ 2>/dev/null || :
 /usr/share/fonts/NotoMusic/NotoMusic-Regular.ttf
 
 %changelog
-* $(date '+%a %b %d %Y') ${APP_MAINTAINER} - ${APP_VERSION}-${APP_RELEASE}
+* $(date '+%a %b %d %Y') ${APP_MAINTAINER_RFC822} - ${APP_VERSION}-${APP_RELEASE}
 - Initial package release; full ARM (aarch64/armv7hl) support added
 SPEC
 
@@ -1195,7 +1201,7 @@ APPDATA
     local APKBUILD="${APK_BUILD_DIR}/APKBUILD"
     log "Writing APKBUILD: ${APKBUILD}"
     cat > "${APKBUILD}" << APKBUILD
-# Maintainer: ${APP_MAINTAINER}
+# Maintainer: ${APP_MAINTAINER_RFC822}
 pkgname="${APP_NAME}"
 pkgver="${APP_VERSION}"
 pkgrel=0
