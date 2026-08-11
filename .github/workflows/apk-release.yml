@@ -105,6 +105,17 @@ jobs:
 
               # Publish the public key next to the package so users can trust it.
               cp $BH/.abuild/*.rsa.pub /src/ 2>/dev/null || true
+
+              # abuild built with -d, so nothing verified that depends= names
+              # real packages. Resolve them against the repositories without
+              # installing: this is the check that would have caught py3-pyqt6,
+              # which does not exist in Alpine (the binding is py3-qt6).
+              DEPS=$(sed -n "/^depends=\"/,/^\"$/p" /src/voidpulse_build.sh | sed "1d;\$d")
+              [ -n "$DEPS" ] || { echo "::error::could not read depends= from voidpulse_build.sh"; exit 1; }
+              echo "Resolving runtime dependencies:" $DEPS
+              apk add --simulate --no-cache $DEPS \
+                || { echo "::error::a runtime dependency does not resolve in Alpine"; exit 1; }
+              echo "all runtime dependencies resolve"
             '
 
       - name: Show build output

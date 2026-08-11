@@ -1291,7 +1291,14 @@ APKBUILD
 
     # abuild expects its sources relative to its own location;
     # sha512sums were already written by hand, so force with -F
-    REPODEST="${SOURCE_DIR}/apk-out" abuild -F -P "${SOURCE_DIR}/apk-out"
+    #
+    # -d skips the dependency check. abuild cannot tell build dependencies from
+    # runtime ones, so it tries to install everything in depends= before
+    # building — the whole Qt6 and GStreamer stack — even though build() is a
+    # no-op and package() only copies files. Nothing in depends= is needed to
+    # produce the package; those names are verified separately in CI with
+    # `apk add --simulate`, which is what actually catches a wrong package name.
+    REPODEST="${SOURCE_DIR}/apk-out" abuild -F -d -P "${SOURCE_DIR}/apk-out"
 
     # ── Locate the output ────────────────────────────────────────────────────
     local BUILT_APK
