@@ -32,10 +32,10 @@ jobs:
           # Building one RPM per family is the only way both sets are correct.
           - label: fedora
             image: fedora:latest
-            install: dnf install -y rpm-build tar gzip curl findutils
+            install: dnf install -y rpm-build tar gzip curl findutils shadow-utils
           - label: opensuse
             image: opensuse/tumbleweed
-            install: zypper --non-interactive install rpm-build tar gzip curl findutils
+            install: zypper --non-interactive install rpm-build tar gzip curl findutils shadow
 
     container:
       image: ${{ matrix.image }}
@@ -68,10 +68,17 @@ jobs:
           esac
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # The script refuses to run as root (flatpak-builder --user cannot), and
+      # containers start as root. Rather than bypassing the guard, build as an
+      # unprivileged user — which is what rpmbuild wants anyway, since a spec
+      # that writes outside its buildroot can do real damage with root rights.
       - name: Build RPM
         env:
           APP_VERSION: ${{ steps.ver.outputs.version }}
-        run: bash ./voidpulse_build.sh rpm
+        run: |
+          useradd -m builder 2>/dev/null || true
+          chown -R builder "$PWD"
+          su builder -c "cd '$PWD' && env HOME=/home/builder APP_VERSION='${APP_VERSION}' bash ./voidpulse_build.sh rpm"
 
       - name: Verify and tag the package
         run: |

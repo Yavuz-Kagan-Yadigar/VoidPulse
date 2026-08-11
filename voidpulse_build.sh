@@ -1644,6 +1644,23 @@ _build_single_appimage() {
     [[ -x "${PYBIN}" ]] || die "Bundled interpreter not found: ${PYBIN}"
     info "Python base ready: $("${PYBIN}" --version 2>&1) ✓"
 
+    # Find the real prefix instead of assuming it. python-appimage keeps the
+    # interpreter under opt/pythonX.Y and leaves usr/bin/pythonX.Y as a symlink,
+    # so pointing PYTHONHOME at usr/ makes the interpreter look for its standard
+    # library in a directory that has none — it then dies during startup with
+    # "No module named 'encodings'". Locate the directory that actually holds
+    # the stdlib and derive the prefix from it.
+    local PY_ENCODINGS PY_PREFIX_REL
+    PY_ENCODINGS=$(cd "${APPDIR}" && \
+        find . -maxdepth 5 -type d -path "*/lib/python${APPIMAGE_PY_VERSION}/encodings" \
+        | head -1)
+    [[ -n "${PY_ENCODINGS}" ]] || \
+        die "Could not locate the bundled standard library (no lib/python${APPIMAGE_PY_VERSION}/encodings in the AppDir)."
+    # ./opt/python3.12/lib/python3.12/encodings → opt/python3.12
+    PY_PREFIX_REL="${PY_ENCODINGS#./}"
+    PY_PREFIX_REL="${PY_PREFIX_REL%/lib/python${APPIMAGE_PY_VERSION}/encodings}"
+    info "Python prefix inside the AppDir: ${PY_PREFIX_REL}"
+
     # ── 2. Python dependencies from PyPI ──────────────────────────────────────
     log "Installing Python dependencies (PyQt6 ${APPIMAGE_PYQT_VERSION}, numpy, soxr, mutagen, PyGObject)..."
     # PyGObject is pinned below 3.50: later releases require girepository-2.0
@@ -1723,13 +1740,16 @@ APPDATA
 # VoidPulse AppImage entry point — self-contained (Python, PyQt6, GStreamer)
 HERE="\$(dirname "\$(readlink -f "\${0}")")"
 PYVER="${APPIMAGE_PY_VERSION}"
+PYHOME="\${HERE}/${PY_PREFIX_REL}"
 APPRUN
     cat >> "${APPDIR}/AppRun" << 'APPRUN'
 
 export APPDIR="${HERE}"
 
 # Use the bundled interpreter and its standard library, not the host's.
-export PYTHONHOME="${HERE}/usr"
+# PYHOME is the prefix detected at build time, not a guess — see the AppDir
+# layout note in _build_single_appimage.
+export PYTHONHOME="${PYHOME}"
 export PYTHONPATH="${HERE}/usr/lib/python${PYVER}/site-packages:${HERE}/usr/lib/voidpulse"
 export PYTHONDONTWRITEBYTECODE=1
 

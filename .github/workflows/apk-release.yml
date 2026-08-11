@@ -63,30 +63,48 @@ jobs:
             alpine:latest sh -euc '
               apk add --no-cache alpine-sdk bash curl openssl
 
-              mkdir -p "$HOME/.abuild"
-              if [ -n "$ABUILD_PRIVKEY" ]; then
-                # Persistent key: users install the matching .rsa.pub once and
-                # every future release verifies against it.
-                printf "%s\n" "$ABUILD_PRIVKEY" > "$HOME/.abuild/voidpulse.rsa"
-                chmod 600 "$HOME/.abuild/voidpulse.rsa"
-                openssl rsa -in "$HOME/.abuild/voidpulse.rsa" \
-                            -pubout -out "$HOME/.abuild/voidpulse.rsa.pub"
-                echo "PACKAGER_PRIVKEY=$HOME/.abuild/voidpulse.rsa" \
-                     > "$HOME/.abuild/abuild.conf"
-                cp "$HOME/.abuild/voidpulse.rsa.pub" /etc/apk/keys/
-                echo "Signing with the persistent ABUILD_PRIVKEY key."
-              else
-                # No secret configured: build still succeeds, but the key is
-                # thrown away, so users need --allow-untrusted to install.
-                echo "::warning::ABUILD_PRIVKEY secret is not set — signing with an ephemeral key."
-                abuild-keygen -a -i -n
-              fi
+              # The script refuses to run as root (flatpak-builder --user
+              # cannot) and abuild wants an unprivileged member of the abuild
+              # group, so build as one instead of forcing root through both.
+              adduser -D builder
+              addgroup builder abuild
+              chown -R builder /src
 
-              # abuild -F (already used by the script) is what lets it run as root.
-              bash ./voidpulse_build.sh apk
+              # Key material is handled here, as root, and never passed through
+              # su: a multi-line secret on a command line would be visible in ps
+              # and would need three levels of quoting to survive.
+              BH=/home/builder
+              mkdir -p $BH/.abuild
+              if [ -n "${ABUILD_PRIVKEY:-}" ]; then
+                # Persistent key: users install the matching .rsa.pub once and
+                # every later release verifies against it.
+                printf "%s\n" "$ABUILD_PRIVKEY" > $BH/.abuild/voidpulse.rsa
+                chmod 600 $BH/.abuild/voidpulse.rsa
+                openssl rsa -in $BH/.abuild/voidpulse.rsa \
+                            -pubout -out $BH/.abuild/voidpulse.rsa.pub
+                echo "PACKAGER_PRIVKEY=$BH/.abuild/voidpulse.rsa" > $BH/.abuild/abuild.conf
+                echo "Signing with the persistent ABUILD_PRIVKEY key."
+                NEED_KEYGEN=0
+              else
+                # No secret configured: the build still succeeds, but the key is
+                # thrown away, so users need --allow-untrusted to install.
+                echo "::warning::ABUILD_PRIVKEY secret is not set - signing with an ephemeral key."
+                NEED_KEYGEN=1
+              fi
+              chown -R builder $BH/.abuild
+
+              # APP_VERSION is safe to interpolate: the Derive version step has
+              # already rejected anything that is not X.Y.Z. No -i on keygen,
+              # which would try to install the key through doas.
+              su builder -c "
+                set -eu
+                cd /src
+                [ ${NEED_KEYGEN} -eq 0 ] || abuild-keygen -a -n
+                APP_VERSION=${APP_VERSION} bash ./voidpulse_build.sh apk
+              "
 
               # Publish the public key next to the package so users can trust it.
-              cp "$HOME"/.abuild/*.rsa.pub /src/ 2>/dev/null || true
+              cp $BH/.abuild/*.rsa.pub /src/ 2>/dev/null || true
             '
 
       - name: Show build output
