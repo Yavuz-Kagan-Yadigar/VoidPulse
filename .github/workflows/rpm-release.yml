@@ -4,11 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    # TEMPORARY-CI-TEST: lets this branch exercise the workflow before it
-    # reaches main, where workflow_dispatch would become available. Remove this
-    # branches: block once the packaging is verified.
-    branches:
-      - update-installer-and-search
   workflow_dispatch:
     inputs:
       version:
@@ -57,9 +52,10 @@ jobs:
           elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            # Branch push via the TEMPORARY-CI-TEST trigger: there is no tag to
-            # read a version from. Build a throwaway one — this path only ever
-            # produces artifacts, since the release step is gated on refs/tags.
+            # Reached only if the workflow is somehow run off a tag — add a
+            # branches: trigger to test on a branch, for instance. There is no
+            # tag to read a version from, so build a throwaway one; this path
+            # only produces artifacts, as the release step is gated on refs/tags.
             VERSION="0.0.0"
           fi
           case "$VERSION" in
