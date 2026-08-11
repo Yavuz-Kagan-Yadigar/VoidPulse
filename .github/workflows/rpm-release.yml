@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - 'v*'
+    # TEMPORARY-CI-TEST: exercise this branch before it reaches main. Remove
+    # with `git revert` once the packaging is verified.
+    branches:
+      - packaging-ci
   workflow_dispatch:
     inputs:
       version:
