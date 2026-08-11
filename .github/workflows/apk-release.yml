@@ -87,22 +87,25 @@ jobs:
                             -pubout -out $BH/.abuild/voidpulse.rsa.pub
                 echo "PACKAGER_PRIVKEY=$BH/.abuild/voidpulse.rsa" > $BH/.abuild/abuild.conf
                 echo "Signing with the persistent ABUILD_PRIVKEY key."
-                NEED_KEYGEN=0
               else
                 # No secret configured: the build still succeeds, but the key is
                 # thrown away, so users need --allow-untrusted to install.
                 echo "::warning::ABUILD_PRIVKEY secret is not set - signing with an ephemeral key."
-                NEED_KEYGEN=1
+                HOME=$BH abuild-keygen -a -n
               fi
+
+              # After building, abuild indexes the repository, and apk rejects a
+              # package signed by a key it does not trust ("UNTRUSTED signature").
+              # abuild-keygen -i would install the key itself, but it does so
+              # through doas, which the Alpine image does not ship.
+              cp $BH/.abuild/*.rsa.pub /etc/apk/keys/
               chown -R builder $BH/.abuild
 
               # APP_VERSION is safe to interpolate: the Derive version step has
-              # already rejected anything that is not X.Y.Z. No -i on keygen,
-              # which would try to install the key through doas.
+              # already rejected anything that is not X.Y.Z.
               su builder -c "
                 set -eu
                 cd /src
-                [ ${NEED_KEYGEN} -eq 0 ] || abuild-keygen -a -n
                 APP_VERSION=${APP_VERSION} bash ./voidpulse_build.sh apk
               "
 
