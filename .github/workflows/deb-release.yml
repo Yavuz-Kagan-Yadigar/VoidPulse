@@ -83,11 +83,18 @@ jobs:
 
             echo "  $FILE  $(du -h "$FILE" | cut -f1)  arch=$GOT"
 
-            # The payload must carry every module, not just voidpulse.py.
+            # Compared against the tree rather than a fixed floor: a hand-set
+            # threshold still passes when a new module is silently dropped,
+            # which is exactly how the Flatpak lost four of them.
+            WANT=$(ls -1 *.py | wc -l)
             COUNT=$(dpkg-deb -c "$FILE" | grep -c '/usr/lib/voidpulse/.*\.py$' || true)
-            if [ "$COUNT" -lt 20 ]; then
-              echo "::error::$FILE contains only $COUNT Python modules"; FAIL=1
+            if [ "$COUNT" -ne "$WANT" ]; then
+              echo "::error::$FILE has $COUNT Python modules, the tree has $WANT"; FAIL=1
             fi
+
+            # GPL-3.0 requires the licence text to ship with the binary.
+            dpkg-deb -c "$FILE" | grep -q 'usr/share/licenses/voidpulse/LICENSE' \
+              || { echo "::error::$FILE does not ship LICENSE"; FAIL=1; }
           done
           [ "$FAIL" -eq 0 ] || exit 1
           echo "all six packages verified"

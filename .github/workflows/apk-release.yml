@@ -123,6 +123,19 @@ jobs:
       - name: Show build output
         run: ls -la *.apk *.rsa.pub 2>/dev/null || true
 
+      - name: Verify the payload
+        run: |
+          APK=$(ls -1 voidpulse-*.apk | head -1)
+          # An .apk is a gzipped tar, so its listing needs no apk tooling.
+          WANT=$(ls -1 *.py | wc -l)
+          GOT=$(tar -tzf "$APK" 2>/dev/null | grep -c '^usr/lib/voidpulse/.*\.py$' || true)
+          echo "Python modules: $GOT (tree has $WANT)"
+          [ "$GOT" -eq "$WANT" ] \
+            || { echo "::error::$APK has $GOT Python modules, the tree has $WANT"; exit 1; }
+          tar -tzf "$APK" 2>/dev/null | grep -q '^usr/share/licenses/voidpulse/LICENSE$' \
+            || { echo "::error::$APK does not ship LICENSE"; exit 1; }
+          echo "payload verified"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

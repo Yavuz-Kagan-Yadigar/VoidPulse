@@ -104,11 +104,14 @@ MANIFEST="${SOURCE_DIR}/${APP_ID}.yml"
 
 FONT_URL="https://notofonts.github.io/music/fonts/NotoMusic/hinted/ttf/NotoMusic-Regular.ttf"
 FONT_FILE="${SOURCE_DIR}/NotoMusic-Regular.ttf"
+# GPL-3.0 requires the licence text to be distributed with the binary, so every
+# target installs it rather than only naming the licence in package metadata.
+LICENSE_FILE="${SOURCE_DIR}/LICENSE"
 
 # ── Helper: check source files ───────────────────────────────────────────────
 check_sources() {
     log "Checking source files..."
-    for f in voidpulse.py "${APP_ID}.desktop" "${APP_ID}.svg"; do
+    for f in voidpulse.py "${APP_ID}.desktop" "${APP_ID}.svg" LICENSE; do
         [[ -f "${SOURCE_DIR}/${f}" ]] || \
             die "Missing file: ${f}\n   Run the script from the project directory."
     done
@@ -478,6 +481,7 @@ build_deb() {
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.desktop"  "${PKG_DIR}/usr/share/applications/${APP_ID}.desktop"
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.svg"      "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
     install -Dm644 "${FONT_FILE}"                     "${PKG_DIR}/usr/share/fonts/truetype/NotoMusic/NotoMusic-Regular.ttf"
+    install -Dm644 "${LICENSE_FILE}"                  "${PKG_DIR}/usr/share/licenses/${APP_NAME}/LICENSE"
 
     # ── AppStream metainfo ────────────────────────────────────────────────────
     cat > "${PKG_DIR}/usr/share/metainfo/${APP_ID}.appdata.xml" << APPDATA
@@ -700,6 +704,7 @@ build_deb_multiarch() {
         install -Dm644 "${SOURCE_DIR}/${APP_ID}.desktop"  "${PKG_DIR}/usr/share/applications/${APP_ID}.desktop"
         install -Dm644 "${SOURCE_DIR}/${APP_ID}.svg"      "${PKG_DIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
         install -Dm644 "${FONT_FILE}"                     "${PKG_DIR}/usr/share/fonts/truetype/NotoMusic/NotoMusic-Regular.ttf"
+        install -Dm644 "${LICENSE_FILE}"                  "${PKG_DIR}/usr/share/licenses/${APP_NAME}/LICENSE"
 
         # ── AppStream metainfo ────────────────────────────────────────────────
         cat > "${PKG_DIR}/usr/share/metainfo/${APP_ID}.appdata.xml" << APPDATA
@@ -907,6 +912,7 @@ build_rpm() {
     cp "${SOURCE_DIR}/${APP_ID}.desktop" "${TAR_DIR}/"
     cp "${SOURCE_DIR}/${APP_ID}.svg"     "${TAR_DIR}/"
     cp "${FONT_FILE}"                    "${TAR_DIR}/"
+    cp "${LICENSE_FILE}"                 "${TAR_DIR}/"
     info "Python modules copied: ${#_py_modules[@]}"
 
     tar -czf "${RPM_ROOT}/SOURCES/${TAR_NAME}.tar.gz" \
@@ -1025,6 +1031,7 @@ install -Dm644 ${APP_ID}.desktop        %{buildroot}/usr/share/applications/${AP
 install -Dm644 ${APP_ID}.svg            %{buildroot}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg
 install -Dm644 %{SOURCE2}               %{buildroot}/usr/share/metainfo/${APP_ID}.appdata.xml
 install -Dm644 NotoMusic-Regular.ttf    %{buildroot}/usr/share/fonts/NotoMusic/NotoMusic-Regular.ttf
+install -Dm644 LICENSE                  %{buildroot}/usr/share/licenses/voidpulse/LICENSE
 
 %post
 fc-cache -f /usr/share/fonts/NotoMusic/ 2>/dev/null || :
@@ -1035,6 +1042,7 @@ fc-cache -f 2>/dev/null || :
 update-desktop-database /usr/share/applications/ 2>/dev/null || :
 
 %files
+%license /usr/share/licenses/voidpulse/LICENSE
 /usr/bin/voidpulse
 /usr/lib/voidpulse/*.py
 /usr/share/applications/${APP_ID}.desktop
@@ -1185,6 +1193,7 @@ APPDATA
     cp "${SOURCE_DIR}/${APP_ID}.desktop" "${APK_BUILD_DIR}/${APP_ID}.desktop"
     cp "${SOURCE_DIR}/${APP_ID}.svg"     "${APK_BUILD_DIR}/${APP_ID}.svg"
     cp "${FONT_FILE}"                    "${APK_BUILD_DIR}/NotoMusic-Regular.ttf"
+    cp "${LICENSE_FILE}"                 "${APK_BUILD_DIR}/LICENSE"
 
     # ── Compute SHA512 checksums ──────────────────────────────────────────────
     local SHA_TAR SHA_LAUNCHER SHA_META
@@ -1196,6 +1205,8 @@ APPDATA
     SHA_ICO=$(sha512sum "${APK_BUILD_DIR}/${APP_ID}.svg"    | cut -d' ' -f1)
     local SHA_FONT
     SHA_FONT=$(sha512sum "${APK_BUILD_DIR}/NotoMusic-Regular.ttf" | cut -d' ' -f1)
+    local SHA_LICENSE
+    SHA_LICENSE=$(sha512sum "${APK_BUILD_DIR}/LICENSE" | cut -d' ' -f1)
 
     # ── APKBUILD ──────────────────────────────────────────────────────────────
     local APKBUILD="${APK_BUILD_DIR}/APKBUILD"
@@ -1232,6 +1243,7 @@ source="
     ${APP_ID}.desktop
     ${APP_ID}.svg
     NotoMusic-Regular.ttf
+    LICENSE
 "
 sha512sums="
 ${SHA_TAR}  ${TAR_NAME}.tar.gz
@@ -1240,6 +1252,7 @@ ${SHA_META}  ${APP_ID}.appdata.xml
 ${SHA_DT}  ${APP_ID}.desktop
 ${SHA_ICO}  ${APP_ID}.svg
 ${SHA_FONT}  NotoMusic-Regular.ttf
+${SHA_LICENSE}  LICENSE
 "
 
 build() {
@@ -1281,6 +1294,10 @@ package() {
     # NotoMusic font
     install -Dm644 "\${srcdir}/NotoMusic-Regular.ttf" \
         "\${pkgdir}/usr/share/fonts/misc/NotoMusic-Regular.ttf"
+
+    # Licence text
+    install -Dm644 "\${srcdir}/LICENSE" \
+        "\${pkgdir}/usr/share/licenses/voidpulse/LICENSE"
 }
 
 APKBUILD
@@ -1721,6 +1738,7 @@ _build_single_appimage() {
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.desktop" "${APPDIR}/usr/share/applications/${APP_ID}.desktop"
     install -Dm644 "${SOURCE_DIR}/${APP_ID}.svg"     "${APPDIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
     install -Dm644 "${FONT_FILE}"                    "${APPDIR}/usr/share/fonts/NotoMusic/NotoMusic-Regular.ttf"
+    install -Dm644 "${LICENSE_FILE}"                 "${APPDIR}/usr/share/licenses/${APP_NAME}/LICENSE"
 
     cp "${SOURCE_DIR}/${APP_ID}.svg"     "${APPDIR}/${APP_ID}.svg"
     ln -sf "${APP_ID}.svg"               "${APPDIR}/.DirIcon"

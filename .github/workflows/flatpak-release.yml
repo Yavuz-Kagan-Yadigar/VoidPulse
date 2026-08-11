@@ -3,7 +3,8 @@ name: Build Flatpak and Create Release
 on:
   push:
     tags:
-      - 'v*'             # v1.0.0, v2.0.0 gibi etiketlerde tetiklenir
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-flatpak:

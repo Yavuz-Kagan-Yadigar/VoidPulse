@@ -117,6 +117,13 @@ jobs:
               "squashfs-root/usr/lib/voidpulse/voidpulse.py"; do
             test -e "$want" || { echo "::error::missing from the bundle: $want"; exit 1; }
           done
+          WANT=$(ls -1 *.py | wc -l)
+          GOT=$(ls -1 squashfs-root/usr/lib/voidpulse/*.py | wc -l)
+          [ "$GOT" -eq "$WANT" ] \
+            || { echo "::error::bundle has $GOT Python modules, the tree has $WANT"; exit 1; }
+          echo "Python modules: $GOT"
+          test -f squashfs-root/usr/share/licenses/voidpulse/LICENSE \
+            || { echo "::error::the bundle does not ship LICENSE"; exit 1; }
           echo "bundled GStreamer plugins: $(ls squashfs-root/usr/lib/gstreamer-1.0 | wc -l)"
           echo "bundled native libraries:  $(ls squashfs-root/usr/lib/*.so* 2>/dev/null | wc -l)"
 

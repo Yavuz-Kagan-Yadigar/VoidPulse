@@ -100,9 +100,15 @@ jobs:
           esac
 
           echo "--- payload ---"
+          WANT=$(ls -1 *.py | wc -l)
           COUNT=$(rpm -qlp "$RPM" | grep -c '/usr/lib/voidpulse/.*\.py$' || true)
-          echo "Python modules: $COUNT"
-          [ "$COUNT" -ge 20 ] || { echo "::error::only $COUNT Python modules in the payload"; exit 1; }
+          echo "Python modules: $COUNT (tree has $WANT)"
+          [ "$COUNT" -eq "$WANT" ] \
+            || { echo "::error::payload has $COUNT Python modules, the tree has $WANT"; exit 1; }
+
+          # %license, so the text ships and --nodocs cannot strip it.
+          rpm -qLp "$RPM" | grep -q '/usr/share/licenses/voidpulse/LICENSE' \
+            || { echo "::error::LICENSE is not marked as a licence file"; exit 1; }
 
           # Both jobs would otherwise upload an identically named noarch file
           # and silently overwrite each other on the release.
