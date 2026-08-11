@@ -14,11 +14,11 @@ from library import RenamePopup
 from fetch_popups import (LyricsFetchPopup, TagFetchPopup, GainFetchPopup,
                           CoverFetchPopup, _BaseFetchPopup)
 from widgets_base import _ModalOverlay, _SpinningOverlay
-from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
+from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_effective_dark, is_system_qt_theme_active
 from time import monotonic as _monotonic
 import numpy as _np
 import gc as _gc
-from eq import EqPopup, _fmt_ms
+from eq import EqPopup, _fmt_ms, _smooth_viz_corners
 from settings_popup import SettingsPopup
 from alsa import probe_alsa_devices
 from cover_art import (draw_default_cover,
@@ -85,6 +85,10 @@ class ControlBar(QFrame):
 
         # Paint buffers, rebuilt by _precompute_bars and reused every frame
         self._paint_bar_px      = _np.zeros(VIZ_BANDS, dtype=_np.int32)
+        # Scratch for _smooth_viz_corners, used by the fill/line/line+fill
+        # curves only -- bars mode reads _viz_display_buf straight.
+        self._viz_smooth_buf    = _np.zeros(VIZ_BANDS, dtype=_np.float32)
+        self._viz_smooth_tmp    = _np.zeros(VIZ_BANDS, dtype=_np.float32)
         # Pixel buffer for one drawImage per frame instead of 256+ fillRects
         self._px_buf:     object = None   # (ih, iw) uint32 numpy array
         self._px_qimg:    object = None   # QImage wrapping _px_buf
@@ -1222,7 +1226,10 @@ class ControlBar(QFrame):
         acc  = QColor(ACC)
         ah, as_, al, _ = acc.getHsvF()
 
-        if _DARK_MODE:
+        # Not _DARK_MODE: under the system Qt theme the visible palette can be
+        # light while that toggle still reads dark, and the ramp has to match
+        # the background the bars are drawn on.
+        if is_effective_dark():
             # Dim desaturated accent up to the vivid accent, never reaching black
             luma  = max(0.10, al * (0.15 + 0.85 * t))
             tint  = QColor()
@@ -1558,7 +1565,8 @@ class ControlBar(QFrame):
                 if self._viz_type == 'fill':
                     # ── FILL MODE ─────────────────────────────────────────────
                     bar_px_arr = self._paint_bar_px
-                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+                    bh_sm = _smooth_viz_corners(bh, self._viz_smooth_buf, self._viz_smooth_tmp)
+                    _np.multiply(bh_sm, ih, out=bar_px_arr, casting='unsafe')
 
                     col_has = self._col_has_bar
                     if len(col_has) != iw:
@@ -1594,7 +1602,8 @@ class ControlBar(QFrame):
                     # QPainter work. Steep slopes get a vertical span so the line
                     # stays connected.
                     bar_px_arr = self._paint_bar_px
-                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+                    bh_sm = _smooth_viz_corners(bh, self._viz_smooth_buf, self._viz_smooth_tmp)
+                    _np.multiply(bh_sm, ih, out=bar_px_arr, casting='unsafe')
 
                     if len(self._col_has_bar) != iw:
                         p.end()
@@ -1639,7 +1648,8 @@ class ControlBar(QFrame):
                 if self._viz_type == 'line+fill':
                     # ── LINE+FILL MODE — fill beneath the line + line on top ────
                     bar_px_arr = self._paint_bar_px
-                    _np.multiply(bh, ih, out=bar_px_arr, casting='unsafe')
+                    bh_sm = _smooth_viz_corners(bh, self._viz_smooth_buf, self._viz_smooth_tmp)
+                    _np.multiply(bh_sm, ih, out=bar_px_arr, casting='unsafe')
 
                     if len(self._col_has_bar) != iw:
                         p.end()

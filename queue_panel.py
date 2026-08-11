@@ -2,16 +2,17 @@
 VoidPulse — QueuePanel: the play-queue side panel, opened next to (or instead
 of) the lyrics panel.
 
-It holds an explicitly ordered list of tracks that playback follows. Tracks
-arrive by dragging rows out of any track table or through the "Add to Queue"
-context-menu entry; they are reordered by dragging inside the list or through
-the per-item ▲/▼ actions, and removed with ✕.
+It holds an explicitly ordered list of what plays *next* — never what is playing
+now, and never what already played. A track is taken off the list the moment it
+starts (MainWindow calls pop_next() / take_row()), so the panel always reads as
+"up next" and drains on its own instead of growing a history nobody asked for.
+Tracks arrive by dragging rows out of any track table or through the "Add to
+Queue" context-menu entry; they are reordered by dragging inside the list or
+through the per-item ▲/▼ actions, and removed with ✕.
 
-The panel deliberately exposes the same small surface as views.PlaylistPage —
-`tracks`, `label`, `playing_idx`, `set_tracks()`, `set_playing()` and a
-`play_track(page, row)` signal — so MainWindow's existing playback machinery
-(_play_from_page, _start_playback, _navigate_track, _advance) drives it without
-special cases.
+Because nothing here is ever "the playing row", there is no playing index to
+keep in step with edits: a reorder or a removal can only change what comes next,
+which is exactly what the user asked for by doing it.
 """
 from constants import *
 from constants import _apply_scroller_properties, _r
@@ -199,7 +200,7 @@ class _QueueList(QListWidget):
 
 
 class QueuePanel(QWidget):
-    """Side panel wrapper — the PlaylistPage-shaped object MainWindow talks to."""
+    """Side panel wrapper — the "up next" list MainWindow takes tracks off."""
     play_track    = pyqtSignal(object, int)   # (self, row) — matches PlaylistPage
     queue_changed = pyqtSignal()              # something to persist changed
     status_msg    = pyqtSignal(str)
@@ -207,7 +208,6 @@ class QueuePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tracks: list = []
-        self._playing_idx  = -1
         self._label        = '__queue__'
         # Set by MainWindow: filepath → Track, using the already-scanned library
         # so a drop does not re-read tags that are known.
@@ -228,7 +228,7 @@ class QueuePanel(QWidget):
         hdr = QWidget(); hdr.setFixedHeight(28)
         self._hdr_widget = hdr
         hl = QHBoxLayout(hdr); hl.setContentsMargins(12, 0, 6, 0); hl.setSpacing(6)
-        self._hdr_lbl = QLabel('Queue')
+        self._hdr_lbl = QLabel('Up Next')
         self._count_lbl = QLabel('')
         self._btn_clear = QPushButton('Clear')
         self._btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -275,7 +275,7 @@ class QueuePanel(QWidget):
         e.accept()
         self._on_paths_dropped(paths, -1)   # append: no row was aimed at
 
-    # ── PlaylistPage-shaped surface ─────────────────────────────────────────
+    # ── the surface MainWindow talks to ─────────────────────────────────────
 
     @property
     def tracks(self):      return self._tracks
@@ -283,23 +283,9 @@ class QueuePanel(QWidget):
     @property
     def label(self):       return self._label
 
-    @property
-    def playing_idx(self): return self._playing_idx
-
-    def set_tracks(self, tracks, playing_idx=-1):
+    def set_tracks(self, tracks):
         self._tracks = list(tracks)
-        self._playing_idx = playing_idx if 0 <= playing_idx < len(self._tracks) else -1
         self._rebuild()
-
-    def set_playing(self, idx):
-        self._playing_idx = idx if 0 <= idx < len(self._tracks) else -1
-        self._restyle_rows()
-        if self._playing_idx >= 0:
-            self._list.scrollToItem(self._list.item(self._playing_idx),
-                                    QAbstractItemView.ScrollHint.EnsureVisible)
-
-    def set_track_count(self, n: int):
-        """No-op: the count label follows _tracks directly (PlaylistPage parity)."""
 
     # ── queue editing ───────────────────────────────────────────────────────
 
@@ -307,38 +293,42 @@ class QueuePanel(QWidget):
         """fn(filepath) -> Track | None, used to turn dropped paths into tracks."""
         self._resolver = fn
 
-    def add_tracks(self, tracks, at: int = -1, quiet: bool = False):
+    def add_tracks(self, tracks, at: int = -1):
         """Insert tracks at `at` (-1 appends). Duplicates are allowed: queueing
-        the same track twice on purpose is a normal thing to want.
-
-        `quiet` suppresses the status-bar note, for inserts the user did not ask
-        for explicitly — playing a track drops it on top of the queue, and its
-        own "▶ artist — title" message is the one worth reading."""
+        the same track twice on purpose is a normal thing to want."""
         tracks = [t for t in tracks if t is not None]
         if not tracks:
             return
         if at < 0 or at > len(self._tracks):
             at = len(self._tracks)
-        # The playing row keeps its identity across an insert above it
-        if 0 <= self._playing_idx and at <= self._playing_idx:
-            self._playing_idx += len(tracks)
         self._tracks[at:at] = tracks
         self._rebuild()
         self.queue_changed.emit()
-        if not quiet:
-            n = len(tracks)
-            self.status_msg.emit(f'{n} track{"" if n == 1 else "s"} added to the queue')
+        n = len(tracks)
+        self.status_msg.emit(f'{n} track{"" if n == 1 else "s"} added to the queue')
+
+    def take_row(self, row: int):
+        """Remove `row` and hand the Track back — it is about to start playing.
+
+        The queue lists what is still to come, so a track leaves it as it starts
+        rather than lingering as history. Rows above `row` are left alone: the
+        user picked one entry to jump to, not to throw the rest away.
+        """
+        if not (0 <= row < len(self._tracks)):
+            return None
+        t = self._tracks.pop(row)
+        self._rebuild()
+        self.queue_changed.emit()
+        return t
+
+    def pop_next(self):
+        """Take the head of the queue — what plays when the current track ends."""
+        return self.take_row(0)
 
     def remove_row(self, row: int):
         if not (0 <= row < len(self._tracks)):
             return
         self._tracks.pop(row)
-        if row == self._playing_idx:
-            # The queue entry being played is gone; nothing is highlighted, but
-            # playback continues — MainWindow re-syncs on the next transition.
-            self._playing_idx = -1
-        elif 0 <= self._playing_idx and row < self._playing_idx:
-            self._playing_idx -= 1
         self._rebuild()
         self.queue_changed.emit()
 
@@ -347,8 +337,6 @@ class QueuePanel(QWidget):
         if not (0 <= row < len(self._tracks)) or not (0 <= new < len(self._tracks)):
             return
         self._tracks[row], self._tracks[new] = self._tracks[new], self._tracks[row]
-        if   self._playing_idx == row: self._playing_idx = new
-        elif self._playing_idx == new: self._playing_idx = row
         self._rebuild()
         self._list.setCurrentRow(new)
         self.queue_changed.emit()
@@ -357,7 +345,6 @@ class QueuePanel(QWidget):
         if not self._tracks:
             return
         self._tracks = []
-        self._playing_idx = -1
         self._rebuild()
         self.queue_changed.emit()
         self.status_msg.emit('Queue cleared')
@@ -371,8 +358,6 @@ class QueuePanel(QWidget):
         than tracked during the drag, so it stays correct however Qt chose to
         implement the move.
         """
-        playing_fp = (self._tracks[self._playing_idx].filepath
-                      if 0 <= self._playing_idx < len(self._tracks) else None)
         by_fp = {}
         for t in self._tracks:
             by_fp.setdefault(t.filepath, []).append(t)
@@ -388,9 +373,6 @@ class QueuePanel(QWidget):
             self._rebuild()
             return
         self._tracks = new_tracks
-        if playing_fp is not None:
-            self._playing_idx = next(
-                (i for i, t in enumerate(self._tracks) if t.filepath == playing_fp), -1)
         self._rebuild()
         self.queue_changed.emit()
 
@@ -424,11 +406,9 @@ class QueuePanel(QWidget):
         self._btn_clear.setEnabled(n > 0)
 
     def _restyle_rows(self):
+        """Re-apply the palette to every row — they are all equally 'up next'."""
         for r in range(self._list.count()):
-            item = self._list.item(r)
-            playing = (r == self._playing_idx)
-            item.setForeground(QColor(_c.ACC if playing else _c.FG))
-            f = item.font(); f.setBold(playing); item.setFont(f)
+            self._list.item(r).setForeground(QColor(_c.FG))
 
     def _show_item_menu(self, row: int, gpos: QPoint):
         if not (0 <= row < len(self._tracks)):
@@ -460,13 +440,8 @@ class QueuePanel(QWidget):
     def _move_to(self, row: int, dest: int):
         if not (0 <= row < len(self._tracks)) or row == dest:
             return
-        playing_fp = (self._tracks[self._playing_idx].filepath
-                      if 0 <= self._playing_idx < len(self._tracks) else None)
         t = self._tracks.pop(row)
         self._tracks.insert(dest, t)
-        if playing_fp is not None:
-            self._playing_idx = next(
-                (i for i, x in enumerate(self._tracks) if x.filepath == playing_fp), -1)
         self._rebuild()
         self._list.setCurrentRow(dest)
         self.queue_changed.emit()

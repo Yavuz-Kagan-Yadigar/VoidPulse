@@ -986,6 +986,44 @@ class EqPopup(QFrame):
         self.raise_()
 
 
+def _smooth_viz_corners(bh, out, tmp):
+    """Light 3-tap blend of each band toward its neighbour average.
+
+    Used by the fill/line/line+fill viz curves (docked bar and OLED overlay
+    alike) to round off single-band spikes into gentle peaks, instead of the
+    sharp needles a plain point-to-point line draws through noisy bins. Bars
+    mode skips this -- its rectangles have no corners to round.
+
+    Written into `out` (same length as `bh`); `tmp` is scratch owned by the
+    caller. Both must already be sized like `bh`. The two end bands are left
+    untouched (no neighbour on one side), which is fine -- edge bins are not
+    where the spikes this exists to soften show up. Allocation-free so it is
+    cheap to call every frame.
+
+    At VIZ_BANDS-ish sizes the cost here is almost entirely per-call ufunc
+    dispatch, not element throughput, so the op count -- and *how* each op is
+    issued -- matters more than usual. Benchmarked against the more obvious
+    "one np.xxx(out=...) per arithmetic step" version: mixing two explicit
+    calls (which each fold an array-array op straight into `out=`) with two
+    in-place operators (cheaper than a keyword-argument ufunc call for a
+    same-array scale/accumulate) measured ~30% faster than issuing every step
+    through np.xxx(out=...), and a whole-array copyto for the two endpoints
+    measured no better than plain scalar writes.
+    """
+    n = len(bh)
+    if n < 3:
+        _np.copyto(out, bh)
+        return out
+    out[0]  = bh[0]
+    out[-1] = bh[-1]
+    nbr, mid = tmp[1:-1], out[1:-1]
+    _np.add(bh[:-2], bh[2:], out=nbr)       # nbr = left + right
+    nbr *= 0.1                              # nbr *= 0.1
+    _np.multiply(bh[1:-1], 0.8, out=mid)    # mid = center * 0.8
+    mid += nbr                              # mid += nbr
+    return out
+
+
 def _np_to_qpolygonf(xs, ys) -> QPolygonF:
     """Convert two equal-length numpy arrays to a QPolygonF efficiently.
     Interleaves x/y into a contiguous float64 buffer then builds QPointF list

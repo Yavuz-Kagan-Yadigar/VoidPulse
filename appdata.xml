@@ -10,7 +10,7 @@
   </description>
   <launchable type="desktop-id">org.voidpulse.VoidPulse.desktop</launchable>
   <releases>
-    <release version="2.0.0" date="2026-08-09"/>
+    <release version="2.0.0" date="2026-08-10"/>
   </releases>
   <url type="homepage">https://github.com/Yavuz-Kagan-Yadigar/VoidPulse</url>
   <developer_name>Yavuz</developer_name>
