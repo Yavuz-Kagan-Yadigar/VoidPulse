@@ -2,12 +2,15 @@
 """
 VoidPulse — constants, palette, theme helpers, and global stylesheet.
 """
+# Every other VoidPulse module does `from constants import *`, so the stdlib
+# names below are deliberate re-exports: they are what `math`, `Path`, `Gst`
+# etc. resolve to in those modules. A linter will report most of them as
+# unused here — do not "fix" that, it breaks all 26 importers. Only
+# underscore-prefixed aliases are private (star-import skips them).
 import sys, os, re, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
 from collections import OrderedDict
-import concurrent.futures as _cf
 import urllib.request as _urlreq
 
-import numpy as _np
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List
@@ -560,6 +563,20 @@ def is_system_qt_theme_active() -> bool:
     return _USE_SYSTEM_QT_THEME
 
 
+def is_effective_dark() -> bool:
+    """True when the palette actually on screen is a dark one.
+
+    _DARK_MODE only records VoidPulse's own dark/light toggle, which the system
+    Qt theme override ignores — under it a light desktop scheme can be showing
+    while the toggle still says dark. Anything that has to pick a light- or
+    dark-appropriate treatment (the visualiser's brightness ramp) must ask the
+    background it will actually be drawn on, which is what this reports.
+    """
+    if _USE_SYSTEM_QT_THEME:
+        return QColor(BG).value() < 128
+    return _DARK_MODE
+
+
 def is_applying_own_palette() -> bool:
     """True only while _apply_app_palette() is inside its app.setPalette() call.
 
@@ -662,6 +679,16 @@ MIN_DB        = -70.0
 # There is no slider for it: config.json is where it gets changed, and this value
 # only applies to a config that has no key yet. See Player.set_viz_gamma.
 VIZ_GAMMA     = 0.7
+# Defaults for config.json's "show_artist_on_gallery", "show_albums_on_gallery"
+# and "show_file_info_on_gallery" — which of the three lines under a gallery
+# card's title are drawn. Like viz_gamma these have no switch in the UI, so the
+# config file is the only place they change, and these values apply only to a
+# config that has no key yet. GalleryView reads them through the constants
+# module (not a star-imported copy) so a value loaded after import is seen.
+# Turning one off reclaims its height: the remaining lines stay centred.
+SHOW_ARTIST_ON_GALLERY    = True
+SHOW_ALBUMS_ON_GALLERY    = True
+SHOW_FILE_INFO_ON_GALLERY = True
 RAD_PCT       = 60   # corner radius: 0 is square, 100 a pill or circle
 
 def _r(full_px: int) -> int:

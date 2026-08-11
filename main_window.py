@@ -79,12 +79,12 @@ class MainWindow(QMainWindow):
         # Share of the right dock's height the lyrics panel gets when both it
         # and the queue are open. Halves until the user drags the divider.
         self._dock_ratio    = 0.5
-        # The queue head this window inserted on the user's last "play from a
-        # page"; identity-compared, so a hand-queued row is never mistaken for it.
-        self._auto_queued:  Optional[Track] = None
-        # (page, track) playback came from before it entered the queue, so it can
-        # carry on down that page once the queue is played out.
-        self._queue_src = None
+        # The track playback took off the queue, held for as long as it plays.
+        # It is already gone from the queue by then, so this is the only handle
+        # on it — and the flag that says _cur_page/_cur_idx describe the page
+        # position waiting underneath rather than what is coming out of the
+        # speakers. None means playback is on the page, the ordinary case.
+        self._queued_track: Optional[Track] = None
         self._blackout = BlackoutOverlay()
         self._config_loader = None   # ref to ConfigPlaylistLoader while running
         self._splash_ref = splash    # held so _close_splash can always reach it
@@ -687,11 +687,14 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_queue_changed(self):
-        """Queue edited — keep the play/queue indices consistent and persist."""
-        if self._cur_page is self._queue:
-            pi = self._queue.playing_idx
-            self._cur_idx = pi
-        self._save_config()
+        """The queue's contents changed — persist them.
+
+        There is no index to fix up: the queue only ever holds what is still to
+        come, so an edit (or the pop that happens on every transition) can only
+        change what plays next. Debounced, because that pop fires this on every
+        single track change and a config write per track is pure waste.
+        """
+        self._settings_save_timer.start()
 
     def _add_to_queue(self, tracks: list):
         """Append to the queue, opening the panel so the result is visible."""
@@ -1315,95 +1318,65 @@ class MainWindow(QMainWindow):
 
     # --- Playback ---
     def _play_from_page(self, page, row):
-        """Start `row` of `page`.
+        """Start `row` of `page`, exactly where it sits.
 
-        Playing anything out of a browser page routes it through the queue: the
-        track is inserted at the top and playback runs from there, so the queue
-        always describes what is on now and what follows it. Rows activated in
-        the queue itself are played where they sit.
+        Nothing is injected anywhere. A page row moves the playback position
+        onto that page and plays from there; whatever is queued stays queued and
+        still goes next. A queue row is taken off the queue and played on the
+        spot — it is starting, so it stops being "up next" — while _cur_page and
+        _cur_idx keep pointing at the page position underneath, which is where
+        playback lands once the queue runs dry.
         """
-        if page is self._queue or self._queue is None:
-            self._cur_page = page; self._cur_idx = row; self._alsa_play()
+        if page is None or not (0 <= row < len(page.tracks)):
             return
-        if not (0 <= row < len(page.tracks)):
-            return
-        self._remember_queue_source(page, row)
-        self._queue_on_top(page.tracks[row])
-        self._cur_page = self._queue
-        self._cur_idx  = 0
+        if page is self._queue:
+            self._queued_track = self._queue.take_row(row)
+        else:
+            self._queued_track = None
+            self._cur_page = page
+            self._cur_idx  = row
         self._alsa_play()
 
-    def _queue_on_top(self, track):
-        """Put `track` at the head of the queue, ready to be played from row 0.
+    def _queue_ready(self) -> bool:
+        """Does the queue have something to hand over at the next transition?
 
-        The previous head is dropped when it is one of ours and still the row
-        the queue is parked on: a double-click means "instead of this", and an
-        injected track that has already had its turn is spent either way, so
-        leaving it there would only make it play again later. A head the user
-        queued by hand is never touched.
-        """
-        prev = self._auto_queued
-        self._auto_queued = None
-        if (prev is not None and self._queue.tracks
-                and self._queue.tracks[0] is prev and self._queue.playing_idx == 0):
-            self._queue.remove_row(0)
-        self._queue.add_tracks([track], 0, quiet=True)
-        self._auto_queued = self._queue.tracks[0] if self._queue.tracks else None
-
-    def _queue_pending(self) -> bool:
-        """Is there a queue row playback has not reached yet?
-
-        The index to look past is where playback stands in the queue: _cur_idx
-        while playing out of it, the last row it played otherwise. A queue whose
-        rows have all been played is done, not "non-empty" — it keeps its
-        history on screen, and must not pull playback back in.
+        A closed panel never does: with the queue switched off, playback follows
+        the page it is on and the queue sits inert until it is opened again.
         """
         q = self._queue
-        if q is None or not q.tracks:
-            return False
-        at = self._cur_idx if self._cur_page is q else q.playing_idx
-        return at < len(q.tracks) - 1
+        return q is not None and bool(q.tracks) and self._panel_open(q)
 
-    def _remember_queue_source(self, page, row: int):
-        """Note the page row playback is leaving, to return to it later."""
-        if (page is None or page is self._queue
-                or not (0 <= row < len(getattr(page, 'tracks', ())))):
-            return
-        self._queue_src = (page, page.tracks[row])
+    def _playing_track(self) -> Optional[Track]:
+        """The Track playback should be on: a queued one outranks the page row.
 
-    def _resume_from_source(self, offset: int = 0) -> bool:
-        """Point playback back at the page the queue's tracks came from.
-
-        Lands on the source row + `offset`; _advance then takes its own step
-        forward from there, while _prev_track passes -1 and plays what it lands
-        on. Falls back to the library only when the queue is empty, which is the
-        one case where staying put would dead-end on nothing at all.
+        Everything that loads audio goes through here, so a track pulled off the
+        queue survives a repeat, a device switch or an ALSA re-probe — none of
+        which can find it on a page, because it is not on one.
         """
-        page, track = self._queue_src or (None, None)
-        if page is not None and track is not None and getattr(page, 'tracks', None):
-            # Located by filepath: the page may have been re-sorted since.
-            idx = next((i for i, t in enumerate(page.tracks)
-                        if t.filepath == track.filepath), -1)
-            if idx >= 0 and 0 <= idx + offset < len(page.tracks):
-                self._cur_page = page
-                self._cur_idx  = idx + offset
-                return True
-        if self._queue is not None and not self._queue.tracks and self._lib_page:
-            self._cur_page = self._lib_page
-            self._cur_idx  = self._lib_page.playing_idx
-            return True
-        return False
+        if self._queued_track is not None:
+            return self._queued_track
+        if not self._cur_page:
+            return None
+        tracks = self._cur_page.tracks
+        if not (0 <= self._cur_idx < len(tracks)):
+            return None
+        return tracks[self._cur_idx]
 
-    def _highlight_playing_pages(self, track):
-        """Mark `track` as the playing row on the browser pages that hold it.
+    def _mark_playing(self, track):
+        """Show `track` as the playing row everywhere it appears.
 
-        Playback runs out of the queue, so without this the library or playlist
-        the user is looking at would lose its highlight the moment a
-        double-click handed the track over.
+        The page playback is on gets the exact row it started, since a page can
+        hold the same file twice and only one of those rows was double-clicked.
+        Everywhere else — and on every page at all while a queued track plays,
+        because that track has no row of ours — the match is by filepath, or no
+        highlight when the file is not on that page.
         """
+        exact = self._cur_page if self._queued_track is None else None
+        if exact is not None:
+            exact.set_playing(self._cur_idx)
         fp = track.filepath if track is not None else None
         for page in (self._lib_page, *self._playlists):
-            if page is None or page is self._cur_page:
+            if page is None or page is exact:
                 continue
             idx = next((i for i, t in enumerate(page.tracks) if t.filepath == fp), -1)
             page.set_playing(idx)
@@ -1433,10 +1406,8 @@ class MainWindow(QMainWindow):
         self._start_playback()
 
     def _start_playback(self):
-        if not self._cur_page: return
-        tracks = self._cur_page.tracks
-        if not tracks or not (0 <= self._cur_idx < len(tracks)): return
-        t = tracks[self._cur_idx]
+        t = self._playing_track()
+        if t is None: return
         # No-op unless a crossfade is configured, possible and something is
         # already playing — in which case load() keeps the outgoing pipeline
         # alive as a fading ghost instead of cutting it off.
@@ -1451,8 +1422,7 @@ class MainWindow(QMainWindow):
         if self._lyrics_panel.isVisible():
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
             self._lyrics_panel.set_track(t, deferred=deferred)
-        self._cur_page.set_playing(self._cur_idx)
-        self._highlight_playing_pages(t)
+        self._mark_playing(t)
         self.setWindowTitle(f'{t.title}  —  VoidPulse')
         self._status.showMessage(f'▶  {t.artist}  —  {t.title}', 0)
         self._mpris.notify_track(t); self._mpris.notify_status()
@@ -1465,10 +1435,8 @@ class MainWindow(QMainWindow):
         If play=False → loads, then immediately pauses so the user sees
                         the new track info but audio does not start.
         """
-        if not self._cur_page: return
-        tracks = self._cur_page.tracks
-        if not tracks or not (0 <= self._cur_idx < len(tracks)): return
-        t = tracks[self._cur_idx]
+        t = self._playing_track()
+        if t is None: return
         if play:
             self._player.arm_crossfade()
         self._player.load(t.filepath, track=t)
@@ -1482,8 +1450,7 @@ class MainWindow(QMainWindow):
         if self._lyrics_panel.isVisible():
             deferred = not self.isActiveWindow() or self._blackout.isVisible()
             self._lyrics_panel.set_track(t, deferred=deferred)
-        self._cur_page.set_playing(self._cur_idx)
-        self._highlight_playing_pages(t)
+        self._mark_playing(t)
         self.setWindowTitle(f'{t.title}  —  VoidPulse')
         self._status.showMessage(f'▶  {t.artist}  —  {t.title}', 0)
         self._mpris.notify_track(t); self._mpris.notify_status()
@@ -1854,22 +1821,17 @@ class MainWindow(QMainWindow):
             GLib.idle_add(self._mpris._emit, ['LoopStatus'])
 
     def _pick_initial_source(self):
-        """Choose what the play button starts when nothing has played yet.
+        """Choose which page the play button starts from when nothing has played.
 
         _cur_page is seeded with the library at construction, so a fresh launch
         used to answer the first play press with the library's first track even
-        when a queue had just been restored or a playlist tab was open. Order of
-        preference: the queue (saying what plays next is its whole job), then
-        the tab being looked at, then the library it already points to.
+        when a playlist tab was open. Prefer the tab being looked at, then the
+        library it already points to.
 
         _cur_idx >= 0 means a track was picked earlier this session — after a
         stop, or an explicit double-click — so that choice is left alone.
         """
         if self._cur_idx >= 0:
-            return
-        if self._queue is not None and self._queue.tracks:
-            self._cur_page = self._queue
-            self._cur_idx  = max(0, self._queue.playing_idx)
             return
         page = self._tabs.currentWidget()
         if isinstance(page, PlaylistPage) and page.tracks:
@@ -1877,7 +1839,17 @@ class MainWindow(QMainWindow):
 
     def _play_pause(self):
         if not self._player.has_pipe:
+            cold = self._cur_idx < 0
             self._pick_initial_source()
+            # Cold start with something queued: saying what plays next is the
+            # queue's whole job, so it goes first. _pick_initial_source still
+            # ran, and left _cur_idx at -1 — the page it chose is where playback
+            # lands once the queue drains, one step on from -1, i.e. its top.
+            if cold and self._queue_ready():
+                self._queued_track = self._queue.pop_next()
+                self._alsa_play()
+                self._ctrlbar._reset_idle_timer()
+                return
             if self._cur_page and self._cur_page.tracks:
                 if self._cur_idx < 0: self._cur_idx = 0
                 self._alsa_play()
@@ -1891,16 +1863,19 @@ class MainWindow(QMainWindow):
         self._ctrlbar._reset_idle_timer()
 
     def _prev_track(self):
-        self._sync_cur_idx()
-        if self._cur_page is self._queue and self._cur_idx <= 0:
-            # Row 0 is where a double-click lands, so "previous" there means the
-            # track before it on the page it came from, not a dead button.
-            if not self._resume_from_source(offset=-1):
+        if self._queued_track is not None:
+            # A queued track has nothing before it in the queue — it was never
+            # in a list. "Previous" backs out of it to the page track it
+            # interrupted, which is exactly where _cur_idx has been waiting.
+            # The track is not put back: the user skipped past it on purpose.
+            self._queued_track = None
+            if not (self._cur_page and 0 <= self._cur_idx < len(self._cur_page.tracks)):
                 return
-        elif self._cur_page and self._cur_idx > 0:
-            self._cur_idx -= 1
         else:
-            return
+            self._sync_cur_idx()
+            if not (self._cur_page and self._cur_idx > 0):
+                return
+            self._cur_idx -= 1
         self._navigate_track(self._player.ui_playing)
 
     def _next_track(self): self._advance(forced=True)
@@ -1913,31 +1888,40 @@ class MainWindow(QMainWindow):
             self._cur_idx = pi
 
     def _advance(self, forced=False, from_xfade=False):
-        repeat  = self._ctrlbar.btn_rep.current_mode()
-        resumed = False
-        # A queue with a row still ahead of playback takes over at the next
-        # transition, wherever playback started — that is what makes it a queue
-        # rather than another playlist. The track already playing is left alone;
-        # only what comes after changes. Once the queue is played out, playback
-        # goes back to the page it was pulled off, so a double-click (which now
-        # drops its track on the queue) still carries on down that page.
-        if self._queue is not None:
-            if self._queue_pending() and self._cur_page is not self._queue:
-                self._remember_queue_source(self._cur_page, self._cur_idx)
-                self._cur_page = self._queue
-                self._cur_idx  = self._queue.playing_idx  # -1 → the step below lands on 0
-            elif self._cur_page is self._queue and repeat == RepeatMode.NONE \
-                    and not self._queue_pending():
-                resumed = self._resume_from_source()
+        repeat = self._ctrlbar.btn_rep.current_mode()
+        # An open queue with anything in it is the next thing to play, wherever
+        # playback currently is — that is what makes it a queue rather than
+        # another playlist. The track already playing is never cut short; only
+        # what comes after it changes, so queueing something mid-track means
+        # "after this one". Taking the track off the queue as it starts is what
+        # lets Clear, a closed panel and a drained queue all end in the same
+        # place: back on the page, whose position never moved meanwhile.
+        #
+        # This runs ahead of both repeat and shuffle. Queueing a track is an
+        # explicit instruction about what comes next, and it has to outrank a
+        # standing mode: under Repeat One the queue would otherwise never get a
+        # turn at all, so the user's click would do nothing, forever.
+        if self._queue_ready():
+            self._queued_track = self._queue.pop_next()
+            if forced:
+                self._navigate_track(self._player.ui_playing)
+            else:
+                self._alsa_play()
+            return
+        # Nothing queued, so Repeat One means what it always did: hold whatever
+        # is playing — including a track that came off the queue, which is why
+        # this reloads through _playing_track() rather than a page row.
+        if not forced and repeat == RepeatMode.ONE and self._playing_track() is not None:
+            self._alsa_play(); return
+        was_queued = self._queued_track is not None
+        self._queued_track = None
         if not self._cur_page: return
-        if not resumed:
-            # Always use the post-sort index — except right after a resume, whose
-            # index is the source row, while the page highlights the queue track
-            # that was playing a moment ago.
+        if not was_queued:
+            # Always use the post-sort index — except when coming off a queued
+            # track, which is what the page highlights, not our place on it.
             self._sync_cur_idx()
         n = len(self._cur_page.tracks)
         if n == 0: return
-        if not forced and repeat == RepeatMode.ONE: self._alsa_play(); return
         if self._shuffle:
             if n > 1:
                 cur = self._cur_idx
@@ -2168,6 +2152,12 @@ class MainWindow(QMainWindow):
                 # only place it can be changed. Written back on every save so it
                 # is always present to edit, even on a config that predates it.
                 'viz_gamma':                     self._player._viz_gamma,
+                # Same story as viz_gamma: no switch in the UI, so they are
+                # written back on every save to stay hand-editable even on a
+                # config that predates them.
+                'show_artist_on_gallery':        _const_mod.SHOW_ARTIST_ON_GALLERY,
+                'show_albums_on_gallery':        _const_mod.SHOW_ALBUMS_ON_GALLERY,
+                'show_file_info_on_gallery':     _const_mod.SHOW_FILE_INFO_ON_GALLERY,
                 'lyrics_panel_open':             self._panel_open(self._lyrics_panel),
                 'queue_panel_open':              self._panel_open(self._queue),
                 'queue':                         [t.filepath for t in self._queue.tracks],
@@ -2323,6 +2313,13 @@ class MainWindow(QMainWindow):
             self._cover_locked_paths = set(data.get('cover_locked_paths', []))
             _cover_locked_set.update(self._cover_locked_paths)
             _const_mod._lastfm_api_key = data.get('lastfm_api_key', '')
+            # Which lines a gallery card draws under its title. Set before the
+            # first gallery paint, so no repaint is needed to apply them.
+            for _key, _attr in (('show_artist_on_gallery',    'SHOW_ARTIST_ON_GALLERY'),
+                                ('show_albums_on_gallery',    'SHOW_ALBUMS_ON_GALLERY'),
+                                ('show_file_info_on_gallery', 'SHOW_FILE_INFO_ON_GALLERY')):
+                setattr(_const_mod, _attr,
+                        bool(data.get(_key, getattr(_const_mod, _attr))))
             # Must run before init_from_config() applies dark/light theme, so
             # apply_theme() picks system-derived colors when this is enabled.
             self._use_system_qt_theme = data.get('use_system_qt_theme', False)

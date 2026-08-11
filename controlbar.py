@@ -14,7 +14,7 @@ from library import RenamePopup
 from fetch_popups import (LyricsFetchPopup, TagFetchPopup, GainFetchPopup,
                           CoverFetchPopup, _BaseFetchPopup)
 from widgets_base import _ModalOverlay, _SpinningOverlay
-from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_system_qt_theme_active
+from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_effective_dark, is_system_qt_theme_active
 from time import monotonic as _monotonic
 import numpy as _np
 import gc as _gc
@@ -1226,7 +1226,10 @@ class ControlBar(QFrame):
         acc  = QColor(ACC)
         ah, as_, al, _ = acc.getHsvF()
 
-        if _DARK_MODE:
+        # Not _DARK_MODE: under the system Qt theme the visible palette can be
+        # light while that toggle still reads dark, and the ramp has to match
+        # the background the bars are drawn on.
+        if is_effective_dark():
             # Dim desaturated accent up to the vivid accent, never reaching black
             luma  = max(0.10, al * (0.15 + 0.85 * t))
             tint  = QColor()

@@ -10,6 +10,7 @@ from constants import (ACC, BG, CONFIG_PATH, _DARK_MODE,
                        _sanitize_filename_part, _open_audio)
 import re as _re
 import numpy as _np
+from dataclasses import field as _dc_field
 
 @dataclass
 class Track:
@@ -24,6 +25,31 @@ class Track:
     # ReplayGain track gain in dB. 0.0 means absent, which is also a no-op gain,
     # so callers need not tell untagged from an explicit 0 dB.
     rg_track_gain_db: float = 0.0
+    # Cached lowercase search haystack, plus the field values it was built from.
+    # Excluded from __eq__/__repr__ so Track compares exactly as before.
+    _search_sig: tuple = _dc_field(default=(), repr=False, compare=False)
+    _search_key: str   = _dc_field(default='', repr=False, compare=False)
+
+    def search_key(self) -> str:
+        """Lowercased title/artist/album/filename haystack for substring search.
+
+        The search box filters the whole library on every keystroke, across both
+        the table and the gallery, so this is cached instead of rebuilt per
+        track per key. Comparing the signature is much cheaper than three
+        .lower() calls plus a basename split, and it self-invalidates when a tag
+        edit or a rename changes one of the source fields — no explicit
+        cache-busting call sites to keep in sync.
+
+        Fields are joined with '\n', which the single-line search QLineEdit
+        cannot produce, so a query can never match across a field boundary.
+        """
+        sig = (self.title, self.artist, self.album, self.filepath)
+        if sig != self._search_sig:
+            self._search_sig = sig
+            self._search_key = '\n'.join((
+                self.title.lower(), self.artist.lower(), self.album.lower(),
+                os.path.basename(self.filepath).lower()))
+        return self._search_key
 
     def dur_str(self):
         t = int(self.duration); h, r = divmod(t, 3600); m, s = divmod(r, 60)

@@ -10,6 +10,7 @@ The playlist sidebar lives in sidebar.py.
 """
 from constants import *
 from constants import ACC, ACCH, B2, BG, BG2, BG3, BG4, BORD, FG, FG2, SEL, _r, _apply_scroller_properties
+import constants as _c   # for the config-only gallery flags, read live at paint time
 from time import monotonic as _monotonic
 from cover_art import get_cover_pixmap, draw_default_cover, _draw_cover_rounded, _ensure_async_cover_loader
 
@@ -987,8 +988,7 @@ class TrackTable(QTableWidget):
         for r in range(self.rowCount()):
             if r >= len(tracks): self.setRowHidden(r, True); continue
             t = tracks[r]
-            ok = (not q or q in t.title.lower() or q in t.artist.lower()
-                  or q in t.album.lower() or q in Path(t.filepath).name.lower())
+            ok = not q or q in t.search_key()
             self.setRowHidden(r, not ok)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1282,11 +1282,8 @@ class GalleryView(QWidget):
     def _apply_filter_and_layout(self):
         q = self._filter_query
         if q:
-            self._vis_idx = [
-                i for i, t in enumerate(self._tracks)
-                if (q in t.title.lower() or q in t.artist.lower()
-                    or q in t.album.lower()
-                    or q in Path(t.filepath).name.lower())]
+            self._vis_idx = [i for i, t in enumerate(self._tracks)
+                             if q in t.search_key()]
         else:
             self._vis_idx = list(range(len(self._tracks)))
         # Both lazy position maps belong to the old layout
@@ -1346,6 +1343,12 @@ class GalleryView(QWidget):
         fm_title  = QFontMetrics(f_title)
         fm_artist = QFontMetrics(f_artist)
 
+        # Read once per paint, not once per card: these are config-file flags
+        # that cannot change while a paint is in flight.
+        want_art = _c.SHOW_ARTIST_ON_GALLERY
+        want_alb = _c.SHOW_ALBUMS_ON_GALLERY
+        want_fmt = _c.SHOW_FILE_INFO_ON_GALLERY
+
         cover_pad = 4          # padding around cover image inside card
         cover_sz  = self._cover_sz_cached   # canonical (8px-snapped); set by _recompute_layout
         # Both radii scale with the element, so RAD_PCT=100 reaches a true pill
@@ -1404,13 +1407,24 @@ class GalleryView(QWidget):
                     self._str_cache[ti] = (
                         t.title or Path(t.filepath).stem,
                         t.artist or '',
+                        t.album or '',
                         '  '.join(q2 for q2 in parts if q2))
-                title_s, artist_s, fmt_s = self._str_cache[ti]
+                title_s, artist_s, album_s, fmt_s = self._str_cache[ti]
 
                 text_w  = max(10, x + self._card_w_act - text_x - 8)
-                show_fmt = h >= 60 and bool(fmt_s)
-                block_h  = title_sz + 4 + artist_sz + (4 + info_sz if show_fmt else 0)
+                show_art = want_art
+                show_alb = want_alb and h >= 72 and bool(album_s)
+                show_fmt = want_fmt and h >= 60 and bool(fmt_s)
+                block_h  = (title_sz
+                            + (4 + artist_sz if show_art else 0)
+                            + (4 + artist_sz if show_alb else 0)
+                            + (4 + info_sz   if show_fmt else 0))
                 ty       = y + (h - block_h) // 2
+
+                # The playing card fills with SEL, which several system Qt
+                # palettes place close enough to FG2 that the lines under the
+                # title all but vanish. They follow the title's colour there.
+                col_sub = col_acc if playing else col_fg2
 
                 p.setFont(f_title)
                 p.setPen(col_acc if playing else col_fg)
@@ -1418,17 +1432,25 @@ class GalleryView(QWidget):
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                            fm_title.elidedText(title_s, Qt.TextElideMode.ElideRight, text_w))
 
-                p.setFont(f_artist)
-                p.setPen(col_fg2)
-                p.drawText(QRect(int(text_x), ty + title_sz + 4, text_w, artist_sz + 2),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                           fm_artist.elidedText(artist_s, Qt.TextElideMode.ElideRight, text_w))
+                p.setPen(col_sub)
+                if show_art:
+                    ty += title_sz + 4
+                    p.setFont(f_artist)
+                    p.drawText(QRect(int(text_x), ty, text_w, artist_sz + 2),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               fm_artist.elidedText(artist_s, Qt.TextElideMode.ElideRight, text_w))
+
+                if show_alb:
+                    ty += (artist_sz if show_art else title_sz) + 4
+                    p.setFont(f_artist)
+                    p.drawText(QRect(int(text_x), ty, text_w, artist_sz + 2),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               fm_artist.elidedText(album_s, Qt.TextElideMode.ElideRight, text_w))
 
                 if show_fmt:
+                    ty += (artist_sz if (show_art or show_alb) else title_sz) + 4
                     p.setFont(f_info)
-                    p.drawText(QRect(int(text_x),
-                                     ty + title_sz + 4 + artist_sz + 4,
-                                     text_w, info_sz + 2),
+                    p.drawText(QRect(int(text_x), ty, text_w, info_sz + 2),
                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                                fmt_s)
 
