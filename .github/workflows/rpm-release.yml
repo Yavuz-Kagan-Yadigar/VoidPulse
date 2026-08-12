@@ -134,8 +134,11 @@ jobs:
             image: fedora:latest
             # dnf has no honest --dry-run: --assumeno exits non-zero whether the
             # transaction resolved or not. --downloadonly resolves for real and
-            # exits 0 only if every dependency was satisfiable.
-            command: dnf install -y --downloadonly --destdir=/tmp/dl ./pkg.rpm
+            # exits 0 only if every dependency was satisfiable. No --destdir:
+            # dnf5 (fedora:latest since F41) accepts it only on download,
+            # reposync and upgrade, and errors out on install. The container is
+            # thrown away, so the cache it downloads into does not matter.
+            command: dnf install -y --downloadonly ./pkg.rpm
           - label: opensuse
             image: opensuse/tumbleweed
             command: zypper --non-interactive install --dry-run ./pkg.rpm
