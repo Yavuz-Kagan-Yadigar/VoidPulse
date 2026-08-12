@@ -42,6 +42,20 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
 
+      # The persistent key is the whole point of dropping the .rsa.pub from the
+      # release: if a release build silently fell back to the ephemeral key it
+      # would ship a package nobody can verify, with no published key to verify
+      # it against. Only tag builds are held to this — forks and dispatch runs
+      # keep the throwaway path so they still build.
+      - name: Require the signing key for releases
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          ABUILD_PRIVKEY: ${{ secrets.ABUILD_PRIVKEY }}
+        run: |
+          [ -n "$ABUILD_PRIVKEY" ] \
+            || { echo "::error::ABUILD_PRIVKEY is not set; a release APK must carry the persistent signature"; exit 1; }
+          echo "signing key is present"
+
       # The build runs inside Alpine because abuild/apk only exist there.
       # It is a `docker run` rather than a job-level `container:` on purpose:
       # node-based actions (checkout, action-gh-release) need glibc and cannot
@@ -105,7 +119,10 @@ jobs:
                 APP_VERSION=${APP_VERSION} bash ./voidpulse_build.sh apk
               "
 
-              # Publish the public key next to the package so users can trust it.
+              # Kept for the workflow artifact only, not the release: the key
+              # is persistent now, so it is the same file every time and does
+              # not belong on each release page. Anyone who needs it takes it
+              # from the artifact once and drops it in /etc/apk/keys/.
               cp $BH/.abuild/*.rsa.pub /src/ 2>/dev/null || true
 
               # abuild built with -d, so nothing verified that depends= names
@@ -149,9 +166,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: |
-            *.apk
-            *.rsa.pub
+          files: '*.apk'
           name: ${{ github.ref_name }}
           draft: false
           prerelease: false
