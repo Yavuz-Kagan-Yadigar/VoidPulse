@@ -366,8 +366,19 @@ class DoubleTapTracker:
 
     A tap only counts when the pointer stayed put between press and release, so
     a flick that happens to end on a card never starts playback.
+
+    The pair window is deliberately wider than QApplication.doubleClickInterval()
+    (~400 ms, tuned for a mouse): a finger tap-tap on glass is slower, and if the
+    two taps fall outside the window nothing plays *and* the second tap, no
+    longer seen as a pair, can age into a long-press — a drag ghost plus a
+    context menu instead of playback.
     """
     DRIFT_PX = 10
+    PAIR_MS  = 600
+
+    @classmethod
+    def pair_window(cls) -> int:
+        return max(cls.PAIR_MS, QApplication.doubleClickInterval())
 
     def __init__(self):
         self._item  = -1          # item id of the pending first tap
@@ -391,11 +402,22 @@ class DoubleTapTracker:
             self._item = -1
             return False
         now = QDateTime.currentMSecsSinceEpoch()
-        if item == self._item and (now - self._ms) < QApplication.doubleClickInterval():
+        if item == self._item and (now - self._ms) < self.pair_window():
             self._item = -1
             return True
         self._item, self._ms = item, now
         return False
+
+    def pending(self, item: int) -> bool:
+        """True when a press on `item` right now would complete a tap pair.
+
+        The caller arms a long-press / pick-up timer on every press; the second
+        press of a double-tap must not start one, or a finger that lingers a
+        beat too long turns the activation into a context menu.
+        """
+        if self._item < 0 or item != self._item:
+            return False
+        return (QDateTime.currentMSecsSinceEpoch() - self._ms) < self.pair_window()
 
 
 class LongPressFilter(QObject):
@@ -433,6 +455,10 @@ class LongPressFilter(QObject):
         self._touch_mouse = False     # last mouse event came from a finger
         self._t_start_g   = QPoint()  # global position the contact started at
         self._t_row       = -1        # row under the finger
+        # Wayland delivers only TouchBegin here; the finger lifting arrives as a
+        # synthesized mouse release. True from TouchBegin until whichever end
+        # signal lands first resolves the tap — see GalleryView._end_touch_gesture.
+        self._t_press_live = False
         self._lift = QTimer(self); self._lift.setSingleShot(True)
         self._lift.setInterval(self.DELAY_MS); self._lift.timeout.connect(self._on_lift)
 
@@ -456,12 +482,22 @@ class LongPressFilter(QObject):
         if t in self._MOUSE_TYPES:
             if is_touch_pointer(event):
                 self._touch_mouse = True
-                return False          # the touch branches already handled it
+                # TouchBegin armed the gesture; the rest of it reaches us only
+                # as this synthesized stream, so the release/drift live here.
+                if t == QEvent.Type.MouseButtonRelease \
+                        and event.button() == Qt.MouseButton.LeftButton:
+                    self._end_touch(event.pos())
+                elif t == QEvent.Type.MouseMove and self._lift.isActive() \
+                        and self._t_moved(event.globalPosition().toPoint()):
+                    self._lift.stop(); self._t_row = -1
+                return False
             self._touch_mouse = False
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             item = self._table.itemAt(event.pos())
             self._row = item.row() if item else -1
             self._taps.press(event.pos())
+            if self._taps.pending(self._row):
+                self._row = -1   # second tap of a pair: activation, not a long press
             if self._row >= 0:
                 self._start = QPoint(event.pos())
                 self._gpos  = self._table.viewport().mapToGlobal(event.pos())
@@ -484,8 +520,11 @@ class LongPressFilter(QObject):
                 vp_pos = pts[0].position().toPoint()
                 self._taps.press(vp_pos)
                 self._t_start_g = pts[0].globalPosition().toPoint()
+                self._t_press_live = True
                 item = self._table.itemAt(vp_pos)
                 self._t_row = item.row() if item else -1
+                if self._taps.pending(self._t_row):
+                    self._t_row = -1   # second tap of a pair completes it, no pick-up
                 if self._t_row >= 0:
                     self._lift.start()
         elif t == QEvent.Type.TouchUpdate:
@@ -495,14 +534,23 @@ class LongPressFilter(QObject):
                 # Travelled before the row was picked up → it's a scroll
                 self._lift.stop(); self._t_row = -1
         elif t == QEvent.Type.TouchEnd:
-            self._lift.stop()
             pts = event.points()
-            self._t_row = -1
-            if pts and self._tdrag is None:
-                self._on_tap_release(pts[0].position().toPoint())
+            self._end_touch(pts[0].position().toPoint() if pts else QPoint())
         elif t == QEvent.Type.TouchCancel:
+            self._t_press_live = False
             self._lift.stop(); self._taps.cancel(); self._t_row = -1
         return False
+
+    def _end_touch(self, vp_pos: QPoint):
+        """Resolve a touch tap from whichever end signal arrives first — the real
+        TouchEnd, or the mouse release Qt synthesizes from the finger lifting."""
+        if not self._t_press_live:
+            return
+        self._t_press_live = False
+        self._lift.stop()
+        self._t_row = -1
+        if self._tdrag is None:
+            self._on_tap_release(vp_pos)
 
     def _on_tap_release(self, pos: QPoint):
         """Second clean tap on a row starts it, the way a double-click would."""
@@ -533,13 +581,17 @@ class LongPressFilter(QObject):
         row = self._t_row
         if row < 0 or self._tdrag is not None:
             return
+        vp = self._table.viewport()
+        if QScroller.scroller(vp).state() in (
+                QScroller.State.Dragging, QScroller.State.Scrolling):
+            return                   # a flick is underway — a scroll, not a pick-up
         item = self._table.item(row, C_TIT)
         fp   = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not fp:
             return
+        self._t_press_live = False   # the gesture is now a drag, not a tap
         self._taps.cancel()          # a pick-up is not half of a tap pair
         self._timer.stop()           # …nor a mouse long press
-        vp = self._table.viewport()
         QScroller.scroller(vp).stop()
         self._tdrag = TouchDrag(
             vp, tracks_mime_data([fp]), self._row_pixmap(row), self._t_start_g,
@@ -778,7 +830,7 @@ class TrackTable(QTableWidget):
         if row < 0:
             return
         now = QDateTime.currentMSecsSinceEpoch()
-        if row == self._last_act_row and (now - self._last_act_ms) < QApplication.doubleClickInterval():
+        if row == self._last_act_row and (now - self._last_act_ms) < DoubleTapTracker.pair_window():
             return
         self._last_act_row, self._last_act_ms = row, now
         self.row_activated.emit(row)
@@ -1118,6 +1170,11 @@ class GalleryView(QWidget):
         self._tdrag     = None       # TouchDrag in progress, if any
         self._t_start_g = QPoint()   # global position of the touch that started it
         self._t_vis_pos = -1         # visual position of the card under the finger
+        # Under Wayland the viewport filter gets only TouchBegin — the rest of a
+        # tap arrives as a synthesized mouse stream on the canvas. True from
+        # TouchBegin until whichever end signal (real TouchEnd or the synthesized
+        # mouse release) resolves the gesture first; the other one then no-ops.
+        self._t_press_live = False
         self._t_lift_timer = QTimer(self)
         self._t_lift_timer.setSingleShot(True)
         self._t_lift_timer.setInterval(LongPressFilter.DELAY_MS)
@@ -1488,7 +1545,7 @@ class GalleryView(QWidget):
         if ti < 0:
             return
         now = QDateTime.currentMSecsSinceEpoch()
-        if ti == self._last_act_ti and (now - self._last_act_ms) < QApplication.doubleClickInterval():
+        if ti == self._last_act_ti and (now - self._last_act_ms) < DoubleTapTracker.pair_window():
             return
         self._last_act_ti, self._last_act_ms = ti, now
         self.row_activated.emit(ti)
@@ -1517,7 +1574,10 @@ class GalleryView(QWidget):
                     cpos = self._to_canvas(pts[0].position().toPoint())
                     self._taps.press(cpos)
                     self._t_start_g = pts[0].globalPosition().toPoint()
+                    self._t_press_live = True
                     self._t_vis_pos = self._pos_at(cpos)
+                    if self._taps.pending(self._track_idx_at(cpos)):
+                        self._t_vis_pos = -1   # 2nd tap of a pair: play, don't lift
                     if self._t_vis_pos >= 0:
                         self._t_lift_timer.start()
             elif t == QEvent.Type.TouchUpdate:
@@ -1528,18 +1588,29 @@ class GalleryView(QWidget):
                     self._t_lift_timer.stop()
                     self._t_vis_pos = -1
             elif t == QEvent.Type.TouchEnd:
-                self._t_lift_timer.stop()
                 pts = event.points()
-                self._t_vis_pos = -1
-                if pts and self._tdrag is None:
-                    pos = self._to_canvas(pts[0].position().toPoint())
-                    if self._taps.release(pos, self._track_idx_at(pos)):
-                        self.activate_track(self._track_idx_at(pos))
+                pos = self._to_canvas(pts[0].position().toPoint()) if pts else QPoint()
+                self._end_touch_gesture(pos)
             elif t == QEvent.Type.TouchCancel:
+                self._t_press_live = False
                 self._t_lift_timer.stop()
                 self._taps.cancel()
                 self._t_vis_pos = -1
         return super().eventFilter(obj, event)
+
+    def _end_touch_gesture(self, cpos: QPoint):
+        """Resolve a touch tap — called by whichever end signal arrives first,
+        the real TouchEnd or the mouse release Qt synthesizes from the finger
+        lifting. The second one to arrive finds the gesture already closed."""
+        if not self._t_press_live:
+            return
+        self._t_press_live = False
+        self._t_lift_timer.stop()
+        self._t_vis_pos = -1
+        if self._tdrag is None:
+            ti = self._track_idx_at(cpos)
+            if self._taps.release(cpos, ti):
+                self.activate_track(ti)
 
     def _t_moved(self, gpos: QPoint) -> bool:
         return (gpos - self._t_start_g).manhattanLength() >= QApplication.startDragDistance()
@@ -1549,6 +1620,10 @@ class GalleryView(QWidget):
         pos = self._t_vis_pos
         if not (0 <= pos < len(self._vis_idx)) or self._tdrag is not None:
             return
+        if QScroller.scroller(self._scroll.viewport()).state() in (
+                QScroller.State.Dragging, QScroller.State.Scrolling):
+            return                   # a flick is underway — this is a scroll, not a pick-up
+        self._t_press_live = False   # the gesture is now a drag, not a tap
         self._taps.cancel()          # a pick-up is not half of a tap pair
         QScroller.scroller(self._scroll.viewport()).stop()
         ti = self._vis_idx[pos]
@@ -1573,8 +1648,8 @@ class GalleryView(QWidget):
         return self._canvas.mapFrom(self._scroll.viewport(), vp_pos)
 
     def _canvas_mouse_press(self, e: QMouseEvent):
-        # Touch is driven entirely from eventFilter's touch branch; the mouse
-        # events Qt synthesizes from it are a duplicate stream and would start a
+        # Touch is driven from the eventFilter's TouchBegin plus the synthesized
+        # release below; the synthesized press is a duplicate and would start a
         # second long press and a QDrag that cannot follow the finger.
         if is_touch_pointer(e):
             return
@@ -1583,6 +1658,8 @@ class GalleryView(QWidget):
             self._press_pos      = e.pos()
             self._press_vis_pos  = self._pos_at(e.pos())
             self._taps.press(e.pos())
+            if self._taps.pending(self._track_idx_at(e.pos())):
+                self._press_vis_pos = -1   # 2nd click of a pair: play, don't drag/menu
             if self._press_vis_pos >= 0:
                 self._long_press_timer.start()
         elif e.button() == Qt.MouseButton.RightButton:
@@ -1592,6 +1669,10 @@ class GalleryView(QWidget):
 
     def _canvas_mouse_release(self, e: QMouseEvent):
         if is_touch_pointer(e):
+            # Wayland: the finger lifting reaches us only as this synthesized
+            # release, not as a TouchEnd. Resolve the tap here.
+            if e.button() == Qt.MouseButton.LeftButton:
+                self._end_touch_gesture(e.pos())
             return
         self._long_press_timer.stop()
         self._press_vis_pos = -1
@@ -1601,14 +1682,21 @@ class GalleryView(QWidget):
                 self.activate_track(ti)
 
     def _canvas_dblclick(self, e: QMouseEvent):
-        if is_touch_pointer(e):
-            return
         if e.button() == Qt.MouseButton.LeftButton:
+            # Touch or mouse: activate_track() debounces, so this is harmless
+            # even when the tap pair already fired for the same gesture.
             self._taps.cancel()   # this event already stands for the pair
+            self._t_press_live = False
             self.activate_track(self._track_idx_at(e.pos()))
 
     def _canvas_mouse_move(self, e: QMouseEvent):
         if is_touch_pointer(e):
+            # Only travel signal for a finger under Wayland: past the drag
+            # threshold the contact is scrolling, so it is not a pick-up.
+            if self._t_lift_timer.isActive() \
+                    and self._t_moved(e.globalPosition().toPoint()):
+                self._t_lift_timer.stop()
+                self._t_vis_pos = -1
             return
         if (e.pos() - self._press_pos).manhattanLength() > 8:
             self._long_press_timer.stop()

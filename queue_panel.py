@@ -95,6 +95,8 @@ class _QueueList(QListWidget):
             pos = event.pos()
             self._taps.press(pos)
             self._lp_row = self._row_at(pos)
+            if self._taps.pending(self._lp_row):
+                self._lp_row = -1   # second tap of a pair: activation, not a long press
             if self._lp_row >= 0:
                 self._lp_start = QPoint(pos)
                 self._lp_gpos  = self.viewport().mapToGlobal(pos)
