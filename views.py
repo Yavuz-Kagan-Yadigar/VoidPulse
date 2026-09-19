@@ -1385,6 +1385,7 @@ class GalleryView(QWidget):
                 cover_x = x + cover_pad + 2
                 cover_y = y + (h - cover_sz) // 2
                 text_x  = x + 10
+                text_pad_r = 8
                 if self._cover_on:
                     pm = get_cover_pixmap(t.filepath, cover_sz)
                     if pm is None:
@@ -1392,6 +1393,14 @@ class GalleryView(QWidget):
                     if pm is not None:
                         _draw_cover_rounded(p, pm, cover_x, cover_y, cover_sz, cover_r)
                     text_x = cover_x + cover_sz + 8
+                else:
+                    # No cover: at high RAD_PCT the card is a pill whose rounded
+                    # corners bite into the top and bottom text lines. Inset the
+                    # text on both sides by a share of the corner radius so every
+                    # line clears the curve.
+                    text_inset = card_r // 2
+                    text_x    += text_inset
+                    text_pad_r += text_inset
 
                 # Border last, over the cover
                 p.setPen(pen)
@@ -1411,7 +1420,7 @@ class GalleryView(QWidget):
                         '  '.join(q2 for q2 in parts if q2))
                 title_s, artist_s, album_s, fmt_s = self._str_cache[ti]
 
-                text_w  = max(10, x + self._card_w_act - text_x - 8)
+                text_w  = max(10, x + self._card_w_act - text_x - text_pad_r)
                 show_art = want_art
                 show_alb = want_alb and h >= 72 and bool(album_s)
                 show_fmt = want_fmt and h >= 60 and bool(fmt_s)
