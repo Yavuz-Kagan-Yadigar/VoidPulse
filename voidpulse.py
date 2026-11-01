@@ -7,6 +7,7 @@ from constants import SS, _apply_app_palette, _capture_system_palette
 import shutil
 import gc as _gc
 import importlib.util as _ilu
+import traceback
 from widgets_base import _SpinningOverlay
 from main_window import MainWindow
 from cover_art import _purge_orphan_disk_covers
@@ -34,6 +35,56 @@ def _load_auto_update():
 # ══════════════════════════════════════════════════════════════════════════════
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
+def _install_excepthook() -> None:
+    """Log uncaught exceptions instead of letting Qt abort silently.
+
+    PyQt6 calls abort() on an exception that escapes a slot, which kills
+    the player with no message at all. Replacing sys.excepthook lets the
+    error reach a log file and one dialog while the app keeps running.
+    Repeated identical failures are only logged once per session so a
+    broken timer cannot spawn a dialog storm.
+    """
+    log_path = CONFIG_PATH.parent / 'voidpulse.log'
+    seen = set()
+
+    def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        text = ''.join(traceback.format_exception(exc_type, exc, tb))
+        print(text, file=sys.stderr)
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, 'a', encoding='utf-8') as fh:
+                fh.write(text)
+                fh.write('\n')
+        except Exception:
+            pass
+        sig = (exc_type, str(exc))
+        if sig in seen:
+            return
+        seen.add(sig)
+        try:
+            # Non-modal on purpose: QMessageBox.critical() spins a nested
+            # event loop, and doing that from inside the exception handler can
+            # deadlock or re-enter the slot that just failed.
+            box = QMessageBox(QMessageBox.Icon.Critical,
+                'VoidPulse — unexpected error',
+                f'{exc_type.__name__}: {exc}\n\n'
+                'The error was written to voidpulse.log. The player will keep '
+                'running, but something may not work until it is restarted.',
+                QMessageBox.StandardButton.Ok)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            box.show()
+            # Qt owns the widget; hold a reference so it is not collected.
+            _hook._boxes = getattr(_hook, '_boxes', [])[-2:] + [box]
+        except Exception:
+            pass # no GUI yet, or it is already being torn down
+
+    sys.excepthook = _hook
+
+
 def main():
     os.environ.setdefault('QT_QPA_PLATFORM', 'wayland;xcb')
     os.environ.setdefault('QT_WAYLAND_DISABLE_WINDOWDECORATION', '1')
@@ -59,6 +110,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName('VoidPulse')
     _capture_system_palette()   # the real theme palette, before it is overridden
+    _install_excepthook()
     app.setStyleSheet(SS)
     _apply_app_palette(app)
 

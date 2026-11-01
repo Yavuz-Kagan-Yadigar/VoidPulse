@@ -175,6 +175,7 @@ class RemoteMounter(QObject):
     mounted = pyqtSignal(str, str)   # (uri, local FUSE path)
     failed  = pyqtSignal(str, str)   # (uri, human-readable reason)
     started = pyqtSignal(str)        # (uri)
+    question = pyqtSignal(str, str, object) # (uri, message, choices)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -239,9 +240,37 @@ class RemoteMounter(QObject):
         op.reply(Gio.MountOperationResult.HANDLED)
 
     def _on_ask_question(self, op, message, choices, uri):
-        """Answer the backend's yes/no prompts with their first (affirmative)
-        choice — in practice SFTP's unknown-host-key confirmation."""
-        op.set_choice(0)
+        """Forward the backend's yes/no prompts to the UI instead of guessing.
+
+        GVfs raises ask-question for interactive confirmations; on SFTP the
+        one that matters is the unknown-host-key check. Answering it
+        automatically accepts *any* host key, which is exactly the
+        man-in-the-middle hole this closes, so the question is surfaced and
+        the mount stays pending until the user replies through
+        `answer_question`.
+        """
+        ctx = self._pending.get(uri)
+        if ctx is None:
+            op.reply(Gio.MountOperationResult.ABORTED)
+            return
+        ctx['question_op'] = op
+        self.question.emit(uri, message or '', list(choices or []))
+
+    def answer_question(self, uri: str, choice) -> None:
+        """Reply to a forwarded ask-question with the user's choice.
+
+        `choice` is the index the user picked; ``None`` or a negative
+        value aborts the mount, which then surfaces through `failed`.
+        """
+        ctx = self._pending.get(uri)
+        op = (ctx or {}).get('question_op')
+        if op is None:
+            return
+        ctx.pop('question_op', None)
+        if choice is None or choice < 0:
+            op.reply(Gio.MountOperationResult.ABORTED)
+            return
+        op.set_choice(int(choice))
         op.reply(Gio.MountOperationResult.HANDLED)
 
     def _on_mount_done(self, gfile, result, uri):

@@ -390,11 +390,7 @@ class TagEditDialog(QDialog):
             if synced or plain:
                 # Embed result into the audio file so the player panel picks it
                 # up on the next track load without another network round-trip.
-                threading.Thread(
-                    target=embed_lyrics,
-                    args=(track.filepath, synced, plain or ''),
-                    daemon=True,
-                ).start()
+                run_io_task(embed_lyrics, track.filepath, synced, plain or '')
                 kind = 'synced' if synced else 'plain'
                 self._btn_lyrics_fetch.setText(f'Saved ({kind})')
                 QTimer.singleShot(2500,

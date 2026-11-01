@@ -8,6 +8,7 @@ VoidPulse — constants, palette, theme helpers, and global stylesheet.
 # unused here — do not "fix" that, it breaks all 26 importers. Only
 # underscore-prefixed aliases are private (star-import skips them).
 import sys, os, re, json, threading, enum, random, math, hashlib, bisect, base64, tempfile, subprocess
+import concurrent.futures as _futures
 from collections import OrderedDict
 import urllib.request as _urlreq
 
@@ -472,7 +473,8 @@ def _system_palette_colors() -> dict:
     )
 
 
-_VP_MODULE_CACHE = None  # filled in on the first _broadcast_palette()
+_VP_MODULE_CACHE = None # filled in on the first _broadcast_palette()
+_VP_MODULE_COUNT = -1 # len(sys.modules) when the cache was built
 
 
 _PALETTE_NAMES = (
@@ -493,11 +495,16 @@ def _broadcast_palette() -> None:
     Modules are found by location — any loaded module whose file sits in this
     directory — so new files participate automatically. The list is cached
     because this runs on every step of a colour-picker drag.
+
+    The cache is rebuilt whenever `sys.modules` grows, so a module
+    imported after the first broadcast (auto-update.py is loaded
+    lazily) still receives the current palette instead of keeping the
+    colours it captured at import time.
     """
-    global _VP_MODULE_CACHE
+    global _VP_MODULE_CACHE, _VP_MODULE_COUNT
     _current = {n: globals()[n] for n in _PALETTE_NAMES}
-    if _VP_MODULE_CACHE is None:
-        import sys as _sys
+    import sys as _sys
+    if _VP_MODULE_CACHE is None or len(_sys.modules) != _VP_MODULE_COUNT:
         _here = os.path.dirname(os.path.abspath(__file__))
         _cache = []
         for _mod in list(_sys.modules.values()):
@@ -505,6 +512,7 @@ def _broadcast_palette() -> None:
             if _f and os.path.dirname(os.path.abspath(_f)) == _here:
                 _cache.append(_mod)
         _VP_MODULE_CACHE = _cache
+        _VP_MODULE_COUNT = len(_sys.modules)
     for _mod in _VP_MODULE_CACHE:
         _d = getattr(_mod, '__dict__', None)
         if _d is None:
@@ -668,6 +676,63 @@ SUPPORTED_EXT = frozenset({
     '.wav', '.wave', '.aiff', '.aif',
 })
 CONFIG_PATH   = Path.home() / '.config' / 'voidpulse' / 'config.json'
+
+
+def log_error(where: str, exc: BaseException = None) -> None:
+    """Report a swallowed failure to stderr.
+
+    Most `except Exception` blocks here guard genuinely optional work --
+    mutagen tags, missing GStreamer elements -- but a few sat directly
+    on the library path and made real corruption invisible. Call this
+    from those so the failure at least leaves a trace.
+    """
+    try:
+        msg = f'{where}: {exc!r}' if exc is not None else where
+        print(f'[VoidPulse] {msg}', file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _atomic_write_json(path, obj) -> None:
+    """Write `obj` as JSON to `path` without ever truncating the old file.
+
+    config.json holds every playlist, known folder and setting, so a crash
+    or power loss between open() and the final flush used to leave a
+    zero-length or half-written file and lose all of it. Writing a sibling
+    temp file and renaming it over the original is atomic on POSIX: readers
+    see either the old file or the new one, never a partial one.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp')
+    data = json.dumps(obj, indent=2, ensure_ascii=False)
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+# Batch fetchers used to start one raw thread per track to embed a cover
+# or write tags. A 10k-track run would create 10k threads; this pool
+# keeps at most four such writes in flight and reuses the workers.
+_io_pool = _futures.ThreadPoolExecutor(max_workers=4,
+ thread_name_prefix='voidpulse-io')
+
+
+def run_io_task(fn, *args) -> None:
+    """Run a short blocking write (tag/cover/lyrics) off the GUI thread.
+
+    Replaces the once-per-track `threading.Thread(...).start()` calls.
+    Exceptions are swallowed on purpose: these are fire-and-forget and the
+    writers already log their own failures.
+    """
+    try:
+        _io_pool.submit(fn, *args)
+    except RuntimeError:
+        pass # pool already shut down during interpreter exit
+
+
 VIZ_BANDS     = 256
 GST_BANDS     = 2048  # FFT bands, well above VIZ_BANDS for a cleaner mapping
 OV_VIZ_H      = 60    # overlay viz height, px
@@ -710,10 +775,11 @@ EQ_Q_MAX      = 10.0
 EQ_GAIN_MAX_GRAPH = EQ_GAIN_MAX   # graph range, matching the slider maximum
 
 # Output ceiling the limiter brick-walls at; Player._make_sink_bin converts it to
-# audiodynamic's linear threshold. The automatic EQ headroom stage deliberately
-# aims for 0 dBFS instead: staging to this ceiling would cost every track another
-# dB even with a flat EQ, and letting the brick wall trim a peak that was already
-# at full scale is inaudible.
+# audiodynamic's linear threshold. When the limiter is enabled, the automatic EQ
+# headroom stage pads its pull-down by |this value| so the boosted chain's peak
+# lands on the ceiling rather than on 0 dBFS, leaving the brick wall as a
+# last-resort safety net instead of routine peak flattener. The pad is inside
+# the headroom>0 branch, so a flat or cut-only EQ never pays it.
 LIMITER_CEILING_DBFS = -1.0
 
 # ── EQ filter types ───────────────────────────────────────────────────────────
@@ -987,18 +1053,26 @@ _lastfm_api_key  = ''    # from the config file or a fetch popup
 _HTTP_UA = 'Mozilla/5.0 (X11; Linux x86_64) VoidPulse/2.0'
 
 
+_MAX_HTTP_BYTES = 32 * 1024 * 1024 # 32 MiB; covers art and JSON
+
+
 def _get_bytes(url, timeout=8, headers=None):
     """Fetch a URL and return the raw body bytes.
 
-    Used for images. Decoding those as text would corrupt them, so text and
-    binary fetches are kept apart.
+    Used for images. Decoding those as text would corrupt them, so text
+    and binary fetches are kept apart. The body is capped: a hostile or
+    broken endpoint must not be able to exhaust memory.
     """
     h = {'User-Agent': _HTTP_UA}
     if headers:
         h.update(headers)
     req = _urlreq.Request(url, headers=h)
     with _urlreq.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        data = r.read(_MAX_HTTP_BYTES + 1)
+        if len(data) > _MAX_HTTP_BYTES:
+            raise ValueError(f'response from {url} is larger than '
+                f'{_MAX_HTTP_BYTES // (1024 * 1024)} MiB')
+        return data
 
 
 def _get(url, timeout=8, headers=None):

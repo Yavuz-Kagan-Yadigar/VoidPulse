@@ -6,7 +6,7 @@ cover/theme reload, tag editing orchestration, "Open With" support.
 from constants import *
 
 from time import monotonic as _monotonic
-from constants import ACC, ACCH, BG3, BG4, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r
+from constants import ACC, ACCH, BG3, BG4, CONFIG_PATH, FG, FG2, SUPPORTED_EXT, _open_audio, _r, _atomic_write_json
 import constants as _const_mod
 from constants import is_system_qt_theme_active, resync_system_qt_theme, is_applying_own_palette, start_qt6ct_live_reload
 from metadata_online import embed_cover_bytes
@@ -15,7 +15,7 @@ from cover_art import (
     _ensure_async_cover_loader, _trim_cover_cache,
     _square_pixmap, _COVER_MASTER_SIZE, _cover_disk_key,
     _COVER_JPEG_QUALITY, _cover_disk_write_mtime, _COVER_DISK_DIR,
-    _cover_cache, _cover_locked_set,
+    _cover_cache, _cover_cache_lock, _cover_locked_set,
 )
 from player import Player, RepeatMode
 from resampler import (invalidate_pipewire_rate_cache, invalidate_pipewire_sink_rate_cache,
@@ -321,6 +321,7 @@ class MainWindow(QMainWindow):
         self._mounter.started.connect(self._on_share_mount_started)
         self._mounter.mounted.connect(self._on_share_mounted)
         self._mounter.failed.connect(self._on_share_failed)
+        self._mounter.question.connect(self._on_share_question)
 
         # Sleep timer: one-shot stop, plus a 1 Hz tick that keeps the countdown
         # shown in the settings popup honest.
@@ -740,8 +741,13 @@ class MainWindow(QMainWindow):
         with its sidecar and re-extracted on next access.
         """
         # Every cached size, including the gallery's dynamic cover_sz
-        for key in [k for k in _cover_cache if k[0] == fp]:
-            _cover_cache.pop(key, None)
+        # Under the shared RLock: the cover worker and rename thread mutate this
+        # OrderedDict concurrently, and iterating it during such a mutation
+        # raises RuntimeError (dict changed size during iteration) on the GUI
+        # thread. _trim_cover_cache and the loader already take the same lock.
+        with _cover_cache_lock:
+            for key in [k for k in list(_cover_cache.keys()) if k[0] == fp]:
+                _cover_cache.pop(key, None)
         # The exact disk key, never a stem glob: the key includes a path hash
         # because filename stems are not unique across a library, and a stem glob
         # would delete every same-named track's cover too.
@@ -1113,6 +1119,36 @@ class MainWindow(QMainWindow):
         if self._share_dialog is not None:
             self._share_dialog.set_status(msg)
 
+    def _on_share_question(self, uri: str, message: str, choices):
+        """Surface GVfs' ask-question (SFTP host-key check) to the user.
+
+        The mount stays pending until a choice is made, so an unknown or
+        changed host key is never accepted silently. Cancelling the dialog
+        aborts the mount.
+        """
+        labels = [str(c) for c in (choices or [])]
+        if not labels:
+            self._mounter.answer_question(uri, None)
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('Verify server identity')
+        box.setText(message or f'{uri} is asking for confirmation.')
+        box.setInformativeText(
+            f'Only continue if you trust {uri}.\n\n'
+            'A changed host key can mean the server was reinstalled — or that '
+            'someone is intercepting the connection.')
+        btns = [box.addButton(lbl, QMessageBox.ButtonRole.AcceptRole)
+            for lbl in labels]
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel or clicked not in btns:
+            self._mounter.answer_question(uri, None)
+            return
+        self._mounter.answer_question(uri, btns.index(clicked))
+
     def _on_share_failed(self, uri: str, reason: str):
         self._pending_share_meta.pop(uri, None)
         msg = f'Could not connect to {uri}: {reason}' if uri else reason
@@ -1194,6 +1230,11 @@ class MainWindow(QMainWindow):
         t.done.connect(lambda tracks, label, r=refresh, p=path:
                        self._on_scan_done(tracks, label, r, p))
         t.progress.connect(lambda m: self._status.showMessage(m))
+        # Finished scan threads used to accumulate for the whole session.
+        # Keep only the ones still running (loop name distinct from `t`
+        # below, which is the thread being started), then start the new one.
+        self._scan_threads = [old for old in self._scan_threads
+            if old.isRunning()]
         self._scan_threads.append(t); t.start()
 
     def _on_scan_done(self, tracks, label, refresh=False, path=''):
@@ -1268,6 +1309,20 @@ class MainWindow(QMainWindow):
             self._lib_page.table.restore_col_widths(saved)
         self._update_count()
 
+    def _tab_index_for(self, page) -> int:
+        """Index of `page` in the tab bar, or -1 if it has no tab.
+
+        The hidden `__open_with__` playlist lives in _playlists so the
+        library rebuild sees it, but it never gets a tab. The old
+        `idx + 1` arithmetic pointed at the wrong tab as soon as one was
+        open, so renaming or moving a playlist hit a different page.
+        """
+        for i in range(self._tabs.count()):
+            if self._tabs.widget(i) is page:
+                return i
+        return -1
+
+
     def _remove_playlist(self, idx):
         if not (0 <= idx < len(self._playlists)): return
         page = self._playlists.pop(idx)
@@ -1283,8 +1338,8 @@ class MainWindow(QMainWindow):
         if not (0 <= idx < len(self._playlists)): return
         page = self._playlists[idx]
         page.set_label(new_label)
-        tab_idx = idx + 1   # tab 0 is the library page
-        if 0 < tab_idx < self._tabs.count():
+        tab_idx = self._tab_index_for(page)
+        if tab_idx >= 0:
             self._tabs.setTabText(tab_idx, f' {new_label} ')
         # Sidebar._prompt_rename already relabelled the row
         self._save_config()
@@ -1292,29 +1347,36 @@ class MainWindow(QMainWindow):
     def _move_playlist(self, from_idx: int, to_idx: int):
         n = len(self._playlists)
         if not (0 <= from_idx < n and 0 <= to_idx < n): return
-        self._playlists[from_idx], self._playlists[to_idx] = (
-            self._playlists[to_idx], self._playlists[from_idx])
-        # Tab 0 is the library, playlists start at 1
-        t_from = from_idx + 1
-        t_to   = to_idx   + 1
-        # QTabWidget cannot swap, so remove the higher index first and reinsert
-        hi = max(t_from, t_to); lo = min(t_from, t_to)
-        hi_widget = self._tabs.widget(hi)
-        hi_label  = self._tabs.tabText(hi)
-        lo_widget = self._tabs.widget(lo)
-        lo_label  = self._tabs.tabText(lo)
-        self._tabs.removeTab(hi)
-        self._tabs.removeTab(lo)
-        self._tabs.insertTab(lo, hi_widget, hi_label)
-        self._tabs.insertTab(hi, lo_widget, lo_label)
+        pa = self._playlists[from_idx]
+        pb = self._playlists[to_idx]
+        self._playlists[from_idx], self._playlists[to_idx] = pb, pa
+        # Resolve the real tab positions from the pages themselves; index
+        # arithmetic breaks once the hidden Open-With page is present.
+        ta = self._tab_index_for(pa)
+        tb = self._tab_index_for(pb)
+        if ta >= 0 and tb >= 0:
+            la = self._tabs.tabText(ta)
+            lb = self._tabs.tabText(tb)
+            hi, lo = max(ta, tb), min(ta, tb)
+            hi_page, hi_label = (pb, lb) if ta > tb else (pa, la)
+            lo_page, lo_label = (pa, la) if ta > tb else (pb, lb)
+            self._tabs.removeTab(hi)
+            self._tabs.removeTab(lo)
+            self._tabs.insertTab(lo, hi_page, hi_label)
+            self._tabs.insertTab(hi, lo_page, lo_label)
         self._sidebar.move_playlist_row(from_idx, to_idx)
         self._save_config()
 
     def _select_source(self, idx):
-        if idx == -1: self._tabs.setCurrentIndex(0)
-        else:
-            ti = idx+1
-            if ti < self._tabs.count(): self._tabs.setCurrentIndex(ti)
+        # idx is a sidebar row, which excludes the hidden Open-With page,
+        # so it cannot be turned into a tab index by arithmetic.
+        if idx == -1:
+            self._tabs.setCurrentIndex(0)
+            return
+        if 0 <= idx < len(self._playlists):
+            ti = self._tab_index_for(self._playlists[idx])
+            if ti >= 0:
+                self._tabs.setCurrentIndex(ti)
 
     # --- Playback ---
     def _play_from_page(self, page, row):
@@ -1691,9 +1753,14 @@ class MainWindow(QMainWindow):
                 _tok = self._player._gate_mute()
                 self._player.seek(_probe_pos_ms)
                 def _after_seek(_tok=_tok):
+                    # Release unconditionally. If the pipe is gone, or a new
+                    # track loaded in the meantime, _gate_reset has already
+                    # invalidated the token, so the call is a no-op — but
+                    # returning early here leaked the mute hold onto whatever
+                    # track came next, leaving it silent.
+                    self._player._gate_release(_tok)
                     if not self._player.has_pipe:
                         return
-                    self._player._gate_release(_tok)
                     if not _probe_was_playing and self._player.playing:
                         self._player.play_pause()
                     self._ctrlbar.set_play_icon(self._player.ui_playing)
@@ -1748,7 +1815,7 @@ class MainWindow(QMainWindow):
                     self._player.load(self._cur_track_mw.filepath,
                                       track=self._cur_track_mw)
                     self._ctrlbar.set_track(self._cur_track_mw)
-                QTimer.singleShot(800, lambda: _check(idx, device))
+                    QTimer.singleShot(800, lambda: _check(idx, device, 0))
 
             if delay > 0:
                 self._status.showMessage(
@@ -1757,16 +1824,34 @@ class MainWindow(QMainWindow):
             else:
                 _run()
 
-        def _check(idx: int, device: str):
+        # A busy or unopenable ALSA device reports its error on the bus well
+        # after load() returns, so one look at 800 ms could "confirm" a device
+        # that fails a moment later. Instead, require the pipeline to stay
+        # alive for six consecutive 250 ms samples (~1.5 s), and abandon the
+        # device if it never gets there.
+        _PROBE_HEALTHY_TICKS = 6
+        _PROBE_MAX_TICKS = 24 # ~6 s hard ceiling per device
+
+        def _check(idx: int, device: str, healthy: int = 0, ticks: int = 0):
             if self._alsa_probe_gen != gen:
                 return
-            if not self._alsa_probe_error:
-                _confirm(device)
-            else:
+            if self._alsa_probe_error:
                 print(f'[AudioSwitch] attempt {idx + 1} failed ({self._alsa_probe_error!r}), trying next')
                 _attempt(idx + 1)
-
-        _attempt(0)
+                return
+            # A probe started while paused never produces audio, so an idle
+            # pipeline is acceptable there; a real device error still arrives
+            # through _on_player_error and is caught above.
+            alive = self._player.has_pipe and (not _probe_was_playing or self._player.playing)
+            healthy = healthy + 1 if alive else 0
+            if healthy >= _PROBE_HEALTHY_TICKS:
+                _confirm(device)
+                return
+            if ticks >= _PROBE_MAX_TICKS:
+                print(f'[AudioSwitch] attempt {idx + 1} never became healthy, trying next')
+                _attempt(idx + 1)
+                return
+            QTimer.singleShot(250, lambda: _check(idx, device, healthy, ticks + 1))
 
     def _on_player_error(self, err: str) -> None:
         """Record ALSA probe errors; PipeWire errors fall through to status bar."""
@@ -1947,7 +2032,9 @@ class MainWindow(QMainWindow):
                         # track play out to its real end, where EOS stops it.
                         self._cur_idx = n - 1
                         return
-                    self._player.stop(); self._ctrlbar.set_play_icon(False)
+                    # The end of the playlist is a stop like any other: fade out
+                    # rather than cutting the last track dead.
+                    self._player.fade_stop(); self._ctrlbar.set_play_icon(False)
                     self._mpris.notify_status(); return
         if forced:
             # Manual skip keeps the current playing/paused state — the one the
@@ -2197,7 +2284,7 @@ class MainWindow(QMainWindow):
             # Persist vertical splitter (content area / control bar)
             if hasattr(self, '_vsplit'):
                 cfg['vsplit_sizes'] = self._vsplit.sizes()
-            CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            _atomic_write_json(CONFIG_PATH, cfg)
             # Write M3U8 for user-created playlists (those with _m3u_path attribute)
             for pl in self._playlists:
                 if hasattr(pl, '_m3u_path'):
@@ -2209,9 +2296,13 @@ class MainWindow(QMainWindow):
                         with open(pl._m3u_path, 'w', encoding='utf-8') as f:
                             f.writelines(lines)
                     except Exception as e2:
-                        print(f'M3U8 save error for {pl.label}: {e2}')
+                        log_error(f'm3u8 save ({pl.label})', e2)
         except Exception as e:
-            print(f'Config save error: {e}')
+            log_error('config save', e)
+            # The user must know: every playlist and folder just failed
+            # to persist.
+            self._status.showMessage(
+                '⚠ Could not save settings — see the terminal', 6000)
 
     def _close_splash(self):
         """Close startup splash if one was provided — safe to call multiple times."""

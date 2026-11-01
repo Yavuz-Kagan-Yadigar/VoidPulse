@@ -349,6 +349,7 @@ class ControlBar(QFrame):
             pop.fade_changed.connect(self._player.set_fade_ms)
             pop.output_device_changed.connect(self._player.set_output_device)
             pop.output_device_changed.connect(lambda _: self._refresh_audio_info())
+            pop.output_device_changed.connect(self._invalidate_rate_plan)
             # Crossfading needs a mixing sink, so the slider follows the device
             pop.output_device_changed.connect(
                 lambda _: pop.set_crossfade_available(self._player.crossfade_supported()))
@@ -387,6 +388,11 @@ class ControlBar(QFrame):
             pop._theme_sw.toggled.connect(lambda *_: self.settings_changed.emit())
             self._settings_popup = pop
         return self._settings_popup
+
+    def _invalidate_rate_plan(self, *_):
+        """Forget the cached output-rate plan; the next refresh re-probes."""
+        self._rate_plan_cache = None
+
 
     def _refresh_audio_info(self):
         """Update the AUDIO INFO labels in SettingsPopup from current player state.
@@ -445,7 +451,11 @@ class ControlBar(QFrame):
             idx = pop._out_dev_combo.findData(dev)
             label = pop._out_dev_combo.itemText(idx) if idx >= 0 else dev
         # Cheap after the first call — the rate probes are cached in-process
-        mode, target_rate = self._player._resolve_rate_plan()
+        plan = getattr(self, '_rate_plan_cache', None)
+        if plan is None:
+            plan = self._player._resolve_rate_plan()
+            self._rate_plan_cache = plan
+        mode, target_rate = plan
         if mode == 'resample' and target_rate:
             # HAVE_SOXR only says the package imported, not that this particular
             # bin built; a per-instance fallback prints to the console instead.

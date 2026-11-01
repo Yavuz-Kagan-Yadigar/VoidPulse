@@ -292,6 +292,12 @@ class _BaseFetchPopup(QDialog):
         worker.track_done.connect(self._on_track_done)
         worker.finished.connect(self._on_finished)
         worker.finished.connect(thread.quit)
+        # Destroy each object on the thread that owns it. deleteLater() is
+        # queued to the worker thread; the QThread frees itself once it has
+        # really stopped. Without this, PyQt can collect a live QObject from
+        # the GUI thread while run() is still executing.
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         if self._worker_id is None:
@@ -359,7 +365,8 @@ class _BaseFetchPopup(QDialog):
         result_msg = self._finished_msg(found, total)
         self._result_lbl.setText(result_msg)
         self._bg_result = result_msg
-        # The thread already quit via worker.finished
+        # Worker and thread delete themselves (see _start); only drop the
+        # Python references so a reopened popup starts a fresh run.
         self._thread = None
         self._worker = None
         self._emit_status_clear()
@@ -505,7 +512,7 @@ class CoverFetchPopup(_BaseFetchPopup):
         for size in (28, 64):
             _cover_cache[(fp, size)] = _square_pixmap(master_pm, size)
         _trim_cover_cache()
-        threading.Thread(target=embed_cover_bytes, args=(fp, data), daemon=True).start()
+        run_io_task(embed_cover_bytes, fp, data)
         for page in self._pages:
             tracks = page.tracks if hasattr(page, 'tracks') else []
             for r, t in enumerate(tracks):
@@ -603,7 +610,7 @@ class TagFetchPopup(_BaseFetchPopup):
             return
         filled = ', '.join(f'{k}={v}' for k, v in tags.items())
         self._log_add(f'OK    {name}  [{filled}]', True)
-        threading.Thread(target=write_tags_to_file, args=(fp, tags), daemon=True).start()
+        run_io_task(write_tags_to_file, fp, tags)
         self.tags_updated.emit(fp, tags)
 
 

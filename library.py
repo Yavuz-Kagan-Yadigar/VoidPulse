@@ -3,8 +3,9 @@ VoidPulse — library management: filename sanitising, rename worker/popup,
 scan_folder(), parse_m3u(), ScanThread, ConfigPlaylistLoader.
 """
 from constants import *
-from cover_art import (Track, _COVER_DISK_DIR, _cover_cache, _cover_disk_key,
-                       read_metadata)
+from cover_art import (Track, _COVER_DISK_DIR, _cover_cache,
+ _cover_cache_lock, _cover_disk_key,
+ read_metadata)
 from constants import (ACC, B2, BG, BG3, FG, FG2, SUPPORTED_EXT,
                        _apply_scroller_properties, _sanitize_filename_part)
 import re as _re
@@ -142,7 +143,7 @@ class LibraryRenameWorker(QObject):
         _DEDUP_RESERVE = 12   # enough for "_(999).ext" worst case
         # One pass over the cache keys, so each rename below is a dict lookup
         _fp_to_sizes: dict = {}
-        for (fp_key, sz_key) in _cover_cache.keys():
+        for (fp_key, sz_key) in list(_cover_cache.keys()):
             _fp_to_sizes.setdefault(fp_key, []).append(sz_key)
         for i, t in enumerate(self._tracks):
             if self._cancelled:
@@ -211,10 +212,11 @@ class LibraryRenameWorker(QObject):
                                 old_mtime.replace(new_mtime)
                         except Exception:
                             pass
-                    for sz_key in _fp_to_sizes.pop(old_fp_str, ()):
-                        pm = _cover_cache.pop((old_fp_str, sz_key), None)
-                        if pm is not None:
-                            _cover_cache[(new_fp_str, sz_key)] = pm
+                    with _cover_cache_lock:
+                        for sz_key in _fp_to_sizes.pop(old_fp_str, ()):
+                            pm = _cover_cache.pop((old_fp_str, sz_key), None)
+                            if pm is not None:
+                                _cover_cache[(new_fp_str, sz_key)] = pm
                 except Exception:
                     pass
                 self.track_done.emit(str(old_path), str(candidate), True)
@@ -494,6 +496,8 @@ class RenamePopup(QDialog):
         self._thread = thread
         self._worker = worker
         RenamePopup._active_worker = (self, worker, thread)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.start()
         self._emit_status_update_rename()
 
@@ -595,7 +599,7 @@ def parse_m3u(path: str) -> List[Track]:
                 if os.path.isfile(fp) and Path(fp).suffix.lower() in SUPPORTED_EXT:
                     fps.append(fp)
     except Exception as e:
-        print(f'M3U error: {e}')
+        log_error(f'parse_m3u({path})', e)
     if not fps:
         return []
     with _cf.ThreadPoolExecutor(max_workers=4) as pool:

@@ -205,8 +205,13 @@ class MprisServer(QObject):
             return None
         ext    = self._art_ext(raw)
         digest = hashlib.md5(raw).hexdigest()[:12]
-        tmp_path = os.path.join(tempfile.gettempdir(),
-                                f'voidpulse_cover_{digest}.{ext}')
+        # A private 0700 directory rather than shared /tmp: the name is
+        # derived from the artwork, so a predictable path in a world-writable
+        # directory is a symlink target.
+        art_dir = os.path.join(tempfile.gettempdir(),
+            f'voidpulse-mpris-{os.getuid()}')
+        os.makedirs(art_dir, mode=0o700, exist_ok=True)
+        tmp_path = os.path.join(art_dir, f'cover_{digest}.{ext}')
         # Drop the previous track's file whenever this track needs a different
         # one, whether or not the new path happens to be on disk already. Tying
         # the cleanup to "had to write it" instead leaked one file per cover

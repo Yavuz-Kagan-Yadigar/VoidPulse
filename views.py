@@ -1035,6 +1035,29 @@ class TrackTable(QTableWidget):
                 item.setForeground(color)
                 f = item.font(); f.setBold(pl); item.setFont(f)
 
+    def refresh_theme(self):
+        """Re-apply the row colours after a dark/light switch.
+
+        set_playing_row() stores explicit FG/ACC brushes on the cells it
+        touches, so a repaint alone keeps the old palette on those rows.
+        Rewrite them: the playing row gets the new accent, the rest the
+        new foreground.
+        """
+        prow = getattr(self, '_playing_row', -1)
+        fg_c, acc_c = QColor(FG), QColor(ACC)
+        for r in range(self.rowCount()):
+            pl = (r == prow)
+            color = acc_c if pl else fg_c
+            for c in range(self.columnCount()):
+                item = self.item(r, c)
+                if item is None:
+                    continue
+                item.setForeground(color)
+                f = item.font()
+                f.setBold(pl)
+                item.setFont(f)
+
+
     def filter(self, query, tracks):
         q = query.lower().strip()
         for r in range(self.rowCount()):
@@ -1921,10 +1944,16 @@ class PlaylistPage(QWidget):
     def set_list_scale(self, row_h: int):
         """Set classic-view row height and scale cover icons proportionally."""
         self.table._row_h = row_h
+        # setDefaultSectionSize already resizes every row that has no explicit
+        # height. The old loop called setRowHeight() once per track, which is
+        # O(n) per slider tick and froze the UI on a large library.
         self.table.verticalHeader().setDefaultSectionSize(row_h)
-        for r in range(self.table.rowCount()):
-            self.table.setRowHeight(r, row_h)
-        # The delegate derives the cover size from _row_h on every paint
+        # resizeSections() is a protected C++ method, and PyQt6 refuses to call
+        # protected members on an object it did not subclass — the vertical
+        # header here is Qt-internal, so the call raised RuntimeError on every
+        # slider tick and every scan. It was never needed: no row is ever given
+        # an explicit height (see the note above), so setDefaultSectionSize
+        # alone re-lays the whole column.
         self.table.viewport().update()
 
     def set_gallery_scale(self, card_h: int):
@@ -1934,9 +1963,9 @@ class PlaylistPage(QWidget):
     def refresh_theme(self):
         """Propagate theme refresh to child views."""
         self.gallery.refresh_theme()
-        # The delegate re-reads get_cover_pixmap() on every paint, so one repaint
-        # carries any accent or theme change into the list view.
-        self.table.viewport().update()
+        # Cell foregrounds are explicit brushes, so they have to be rewritten;
+        # a bare repaint leaves the old palette on the playing rows.
+        self.table.refresh_theme()
 
     def set_label(self, new_label: str):
         """Update the playlist's display label (used by rename)."""

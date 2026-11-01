@@ -492,8 +492,12 @@ class LyricsPanel(QWidget):
         if thread is not None:
             try:
                 if thread.isRunning():
+                    # quit() asks the event loop to stop without blocking. wait(300)
+                    # used to freeze the GUI thread for up to 300 ms per track change
+                    # and still left the QObject to be collected from the wrong
+                    # thread. The fetcher now deletes itself on its own thread, and a
+                    # stale result is harmless because _done() drops old fetch ids.
                     thread.quit()
-                    thread.wait(300)
             except RuntimeError:
                 pass  # C++ object already deleted
 
@@ -508,6 +512,10 @@ class LyricsPanel(QWidget):
         fetcher.finished.connect(thread.quit)
         fetcher.status.connect(self.status_msg)   # forward to status bar
         thread.finished.connect(thread.deleteLater)
+        # Free the fetcher on its own thread, mirroring thread.deleteLater
+        # below. _abort() no longer waits for it, so without this the
+        # QObject would be collected by Python on the GUI thread.
+        fetcher.finished.connect(fetcher.deleteLater)
         self._thread  = thread
         self._fetcher = fetcher
         thread.start()
@@ -539,9 +547,7 @@ class LyricsPanel(QWidget):
         # A network result is written back into the file
         if fetcher and fetcher.was_online and self._track:
             fp = self._track.filepath
-            threading.Thread(
-                target=embed_lyrics, args=(fp, synced, plain or ''),
-                daemon=True).start()
+            run_io_task(embed_lyrics, fp, synced, plain or '')
 
     def _clear(self):
         while self._cl.count():

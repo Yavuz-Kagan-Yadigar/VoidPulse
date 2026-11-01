@@ -12,6 +12,8 @@ from constants import *
 import re as _re
 import time as _time
 import numpy as _np
+import atexit as _atexit
+import weakref as _weakref
 
 try:
     import soxr as _soxr
@@ -20,6 +22,12 @@ except Exception as _e:
     _soxr = None
     HAVE_SOXR = False
     print(f'[resampler] soxr package unavailable ({_e}) — falling back to audioresample')
+
+
+# Live SoxrResamplerBin instances, so their soxr streams can be dropped
+# before the interpreter finalises the extension module. atexit runs at
+# exactly that point; without it nanobind prints "leaked 2 instances".
+_LIVE_BINS = _weakref.WeakSet()
 
 
 class SoxrResamplerBin(Gst.Bin):
@@ -102,6 +110,18 @@ class SoxrResamplerBin(Gst.Bin):
 
         self.add_pad(Gst.GhostPad.new('sink', conv_in.get_static_pad('sink')))
         self.add_pad(Gst.GhostPad.new('src',  conv_out.get_static_pad('src')))
+        _LIVE_BINS.add(self)
+
+    def release(self):
+        """Drop the soxr stream so its nanobind CSoxr can be freed.
+
+        The stream is the only nanobind-owned object this bin creates, and
+        the bin itself is kept alive by GStreamer plus its own pad probes
+        (probe -> bound method -> self). Without this the stream outlives the
+        interpreter and nanobind reports it as leaked at shutdown. Idempotent.
+        """
+        self._stream = None
+        self._channels = 0
 
     def _ensure_stream(self, channels: int):
         if self._stream is None or self._channels != channels:
@@ -120,7 +140,14 @@ class SoxrResamplerBin(Gst.Bin):
         if buf is None:
             return Gst.PadProbeReturn.DROP
         caps = pad.get_current_caps()
-        channels = caps.get_structure(0).get_int('channels')[1] if caps else 0
+        channels = 0
+        if caps is not None:
+            try:
+                val = caps.get_structure(0).get_int('channels')
+                # PyGObject returns int; some bindings return (ok, value).
+                channels = val[1] if isinstance(val, tuple) else val
+            except Exception:
+                channels = 0
         if channels <= 0:
             return Gst.PadProbeReturn.DROP
         ok, rmap = buf.map(Gst.MapFlags.READ)
@@ -254,6 +281,19 @@ class SoxrResamplerBin(Gst.Bin):
         # FLUSHING is normal while a seek's flush is in flight
         if ret not in (Gst.FlowReturn.OK, Gst.FlowReturn.FLUSHING):
             print(f'[resampler] push -> {ret}')
+
+
+def _release_all_streams():
+    """Drop every live soxr stream. Registered with atexit."""
+    for _bin in list(_LIVE_BINS):
+        try:
+            _bin.release()
+        except Exception:
+            pass
+    _LIVE_BINS.clear()
+
+
+_atexit.register(_release_all_streams)
 
 
 def build_resampler_stage(in_rate: int, out_rate: int):

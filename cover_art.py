@@ -21,6 +21,7 @@ class Track:
     duration:    float = 0.0
     sample_rate: int   = 0
     bit_depth:   int   = 0
+    channels:    int   = 0
     file_type:   str   = ''
     # ReplayGain track gain in dB. 0.0 means absent, which is also a no-op gain,
     # so callers need not tell untagged from an explicit 0 dB.
@@ -107,6 +108,7 @@ def read_metadata(fp: str) -> Track:
         i = af.info
         tr.duration    = getattr(i, 'length', 0.0)
         tr.sample_rate = getattr(i, 'sample_rate', 0)
+        tr.channels    = getattr(i, 'channels', 0)
         for a in ('bits_per_sample', 'bits_per_raw_sample'):
             v = getattr(i, a, 0)
             if v: tr.bit_depth = v; break
@@ -153,12 +155,16 @@ def read_metadata(fp: str) -> Track:
             g = _parse_gain_db(_tag(tg, 'replaygain_track_gain', 'REPLAYGAIN_TRACK_GAIN'))
             if g is not None:
                 tr.rg_track_gain_db = g
-    except Exception:
-        pass
+    except Exception as e:
+        log_error(f'read_metadata({tr.filepath})', e)
     return tr
 
 # ── Cover art ─────────────────────────────────────────────────────────────────
-_cover_cache: OrderedDict = OrderedDict()  # (fp, size) → QPixmap, LRU-ordered
+# The GUI thread reads this on every repaint while the cover worker and
+# the rename worker mutate it. An OrderedDict mutated during iteration
+# raises RuntimeError, so every access goes through this RLock.
+_cover_cache_lock = threading.RLock()
+_cover_cache: OrderedDict = OrderedDict() # (fp, size) → QPixmap, LRU-ordered
 _COVER_SENTINEL = object()  # distinguishes cache miss from cached None
 
 # One master per track on disk; every smaller size is downscaled from it in
@@ -174,11 +180,13 @@ def _trim_cover_cache() -> None:
     The dict is LRU-ordered, so the oldest entries go first — close enough to
     "no longer on screen" for a cover cache.
     """
-    overflow = len(_cover_cache) - _COVER_CACHE_MAX
-    if overflow > 0:
-        trim = overflow + _COVER_CACHE_MAX // 4   # extra headroom, to avoid thrashing
-        for key in list(_cover_cache.keys())[:trim]:
-            _cover_cache.pop(key, None)
+    with _cover_cache_lock:
+        overflow = len(_cover_cache) - _COVER_CACHE_MAX
+        if overflow > 0:
+            trim = overflow + _COVER_CACHE_MAX // 4 # headroom, to avoid thrashing
+            for key in list(_cover_cache.keys())[:trim]:
+                _cover_cache.pop(key, None)
+
 
 def _purge_orphan_disk_covers() -> None:
     """Delete disk covers that are not the 220px master.
@@ -491,6 +499,13 @@ def _recolor_pixmap(pm: QPixmap) -> QPixmap:
     return QPixmap.fromImage(img_out)
 
 def get_cover_pixmap(fp: str, size: int = 48) -> Optional[QPixmap]:
+    # Same contract, serialised against the worker threads that fill the
+    # cache. Reentrant because the helpers below take it again.
+    with _cover_cache_lock:
+        return _get_cover_pixmap_locked(fp, size)
+
+
+def _get_cover_pixmap_locked(fp: str, size: int = 48) -> Optional[QPixmap]:
     """Return a cached square pixmap, or None. Memory only, never blocks.
 
     Corners stay square; callers round them at draw time with

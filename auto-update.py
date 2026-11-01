@@ -27,6 +27,7 @@ from constants import (ACC, ACCH, BG, BG2, BG3, BORD, FG, FG2, _r,
 
 import re
 import shutil
+import hashlib
 import platform
 import urllib.request
 import urllib.error
@@ -396,6 +397,54 @@ def available_choices(release: dict) -> list:
     return [(label, a) for _, label, a in found]
 
 
+def _sha256_file(path: Path) -> str:
+    """Hex SHA-256 of a file, read in chunks so a big AppImage is not
+    loaded into memory whole."""
+    h = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _expected_sha256(asset: dict) -> str:
+    """The hex digest GitHub publishes for an asset (`sha256:<hex>`),
+    or an empty string when the API returned none."""
+    digest = (asset or {}).get('digest') or ''
+    algo, _, hexval = digest.partition(':')
+    if algo.strip().lower() != 'sha256':
+        return ''
+    return hexval.strip().lower()
+
+
+def verify_download(path, asset: dict) -> tuple:
+    """(ok, message) — does the downloaded file match the release digest?
+
+    GitHub computes a SHA-256 for every uploaded asset and returns it in
+    the releases API, so the bytes are checked against the same source
+    that named the file. A mismatch means the download was corrupted or
+    substituted and must never reach a package manager. A missing digest
+    is not a pass either: without one there is nothing to check against.
+
+    `VOIDPULSE_UPDATE_ALLOW_UNVERIFIED=1` downgrades a missing digest to a
+    warning for releases published before GitHub started attaching them;
+    it never weakens an actual mismatch.
+    """
+    want = _expected_sha256(asset)
+    if not want:
+        if os.environ.get('VOIDPULSE_UPDATE_ALLOW_UNVERIFIED') == '1':
+            return True, 'No published checksum — proceeding unverified (override).'
+        return False, ('This release publishes no SHA-256 for the file, so it '
+            'cannot be verified. Download it from the release page and '
+            'check it by hand, or set VOIDPULSE_UPDATE_ALLOW_UNVERIFIED=1 '
+            'to skip the check.')
+    got = _sha256_file(Path(path))
+    if got != want:
+        return False, (f'Checksum mismatch: expected {want}, got {got}. '
+            'The file was deleted and nothing was installed.')
+    return True, f'SHA-256 verified ({want[:12]}…).'
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Download
 # ══════════════════════════════════════════════════════════════════════════════
@@ -427,10 +476,11 @@ class _Downloader(QThread):
 
     _CHUNK = 256 * 1024
 
-    def __init__(self, url: str, dest: Path, parent=None):
+    def __init__(self, url: str, dest: Path, parent=None, asset: dict = None):
         super().__init__(parent)
-        self._url  = url
+        self._url = url
         self._dest = Path(dest)
+        self._asset = asset or {}
         self._stop = threading.Event()
 
     def cancel(self):
@@ -454,6 +504,11 @@ class _Downloader(QThread):
                         fh.write(buf)
                         got += len(buf)
                         self.progress.emit(got, total)
+            ok, why = verify_download(part, self._asset)
+            if not ok:
+                part.unlink(missing_ok=True)
+                self.failed.emit(f'Download rejected: {why}')
+                return
             os.replace(part, self._dest)
             self.finished_ok.emit(str(self._dest))
         except InterruptedError:
@@ -602,27 +657,27 @@ def native_tool(pkg_type: str) -> tuple:
 
     if pkg_type == 'rpm':
         if have('dnf') and ('fedora' in ids or 'rhel' in ids or not have('zypper')):
-            return (['dnf', 'install', '-y', '--nogpgcheck'], 'dnf')
+            return (['dnf', 'install', '-y'], 'dnf')
         if have('zypper'):
             return (['zypper', '--non-interactive', 'install',
-                     '--allow-unsigned-rpm'], 'zypper')
+                     ], 'zypper')
         if have('dnf'):
-            return (['dnf', 'install', '-y', '--nogpgcheck'], 'dnf')
-        return (['rpm', '-Uvh', '--force', '--nosignature'], 'rpm')
+            return (['dnf', 'install', '-y'], 'dnf')
+        return (['rpm', '-Uvh'], 'rpm')
 
     if pkg_type == 'deb':
         if have('apt-get'):
             # A path argument is what tells apt-get to install a local file
             # rather than look the name up in the repositories.
             return (['apt-get', 'install', '-y', '--allow-downgrades',
-                     '--allow-unauthenticated'], 'apt-get')
+                     ], 'apt-get')
         return (['dpkg', '-i', '--force-confnew'], 'dpkg')
 
     if pkg_type == 'pacman':
         return (['pacman', '-U', '--noconfirm'], 'pacman')
 
     if pkg_type == 'apk':
-        return (['apk', 'add', '--allow-untrusted'], 'apk')
+        return (['apk', 'add'], 'apk')
 
     return ([], '')
 
@@ -1151,7 +1206,7 @@ class UpdatePopup(QFrame):
             return
         dest = _download_dir(self._pkg) / asset['name']
         self._busy(True, 'Connecting…')
-        self._worker = _Downloader(url, dest, self)
+        self._worker = _Downloader(url, dest, self, asset)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_downloaded)
         self._worker.failed.connect(self._fail)
