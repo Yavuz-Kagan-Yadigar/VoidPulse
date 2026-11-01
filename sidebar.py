@@ -51,6 +51,15 @@ class _PlaylistRowWidget(QWidget):
         self._lp_start  = QPoint()
         self._lp_gpos   = QPoint()
         self._lp_active = False
+        # Right-click opens the same menu a long press does
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+
+    def _on_context_menu(self, pos):
+        # A right-press must not also arm the long-press timer
+        self._lp_timer.stop()
+        self._lp_active = False
+        self.long_pressed.emit(self.mapToGlobal(pos))
 
     def _on_long_press_fire(self):
         self._lp_active = True
@@ -62,6 +71,8 @@ class _PlaylistRowWidget(QWidget):
         self._lbl.setStyleSheet(f'color:{c}; font-size:13px; font-weight:{"bold" if on else "normal"}; background:transparent;')
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             # Long-press only on the label, not the delete button
             if self.childAt(e.position().toPoint()) is not self._del_btn:
@@ -79,6 +90,8 @@ class _PlaylistRowWidget(QWidget):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             self._lp_timer.stop()
             if not self._lp_active:
@@ -201,6 +214,22 @@ class Sidebar(QWidget):
         self._sidebar_bdiv = bdiv
         root.addWidget(bdiv)
 
+        # Library-management actions live in a popup so the playlist list
+        # keeps the whole sidebar height.
+        self._lib_mgmt_btn = QPushButton('≡  Library\nManagement')
+        self._lib_mgmt_btn.setObjectName('lib_mgmt_btn')
+        self._lib_mgmt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._lib_mgmt_btn.setSizePolicy(QSizePolicy.Policy.Expanding,
+          QSizePolicy.Policy.Fixed)
+        self._lib_mgmt_btn.setMinimumHeight(44)
+        self._lib_mgmt_btn.setMaximumHeight(48)
+        self._lib_mgmt_btn.setStyleSheet(self._lib_mgmt_btn_ss())
+        self._lib_mgmt_btn.setToolTip('Add folders, import or export playlists,'
+          ' refresh the library')
+        self._lib_mgmt_btn.clicked.connect(self._on_lib_mgmt_click)
+        root.addWidget(self._lib_mgmt_btn)
+        self._lib_popup = None
+
         bf = QWidget(); bf.setStyleSheet(f'background:{BG};')
         self._bf = bf
         bfl = QVBoxLayout(bf); bfl.setContentsMargins(10,6,10,8); bfl.setSpacing(3)
@@ -232,7 +261,40 @@ class Sidebar(QWidget):
         self._action_btn_h = None
         self._apply_action_btn_height(36)
         bf.resizeEvent = self._on_action_btns_resize
-        root.addWidget(bf)
+        # Never shown inline: these actions live in LibraryPopup
+        bf.setParent(self)
+        bf.hide()
+
+    def _lib_mgmt_btn_ss(self) -> str:
+        # Pill like the action pills inside the popup: radius scaled by
+        # RAD_PCT and capped at half the height (Qt un-rounds past that).
+        h = 46
+        r = min(_r(18), h // 2)
+        return (
+            f'QPushButton {{ background:{BG3}; color:{FG}; border:1px solid {B2};'
+            f' border-radius:{r}px; text-align:center; padding:2px 8px;'
+            f' font-size:11px; font-weight:bold; letter-spacing:1px;'
+            # Restated: the global QPushButton rule min-height:36px would
+            # otherwise beat setMinimumHeight()/setMaximumHeight().
+            f' min-height:{h}px; max-height:{h}px; }}'
+            f'QPushButton:hover {{ border-color:{ACC}; color:{ACC}; }}'
+            f'QPushButton:pressed {{ background:{BG4}; }}')
+
+    def _ensure_lib_popup(self):
+        if self._lib_popup is None:
+            from library_popup import LibraryPopup
+            pop = LibraryPopup(self.window())
+            pop.add_folder_req.connect(self.add_folder_req)
+            pop.add_m3u_req.connect(self.add_m3u_req)
+            pop.network_share_req.connect(self.network_share_req)
+            pop.new_playlist_req.connect(self.new_playlist_req)
+            pop.refresh_req.connect(self.refresh_req)
+            pop.export_m3u_req.connect(self.export_m3u_req)
+            self._lib_popup = pop
+        return self._lib_popup
+
+    def _on_lib_mgmt_click(self):
+        self._ensure_lib_popup().toggle_above(self._lib_mgmt_btn)
 
     def _action_btn_ss(self, height: int) -> str:
         # Capped at half the real height: above that Qt drops the rounding
@@ -421,6 +483,7 @@ class Sidebar(QWidget):
             f' border-radius:{_r(20)}px; padding:3px 10px; font-size:12px; }}'
             f'QLineEdit:focus {{ border-color:{ACC}; }}')
         logo = self.findChild(QLabel, 'logo_lbl')
+        self._lib_mgmt_btn.setStyleSheet(self._lib_mgmt_btn_ss())
         if logo:
             logo.setStyleSheet(
                 f'color:{ACC}; font-size:15px; font-weight:900;'
@@ -432,6 +495,9 @@ class Sidebar(QWidget):
         """Re-apply all palette globals after a dark/light switch."""
         self._sf.setStyleSheet(f'background:{BG};')
         self._bf.setStyleSheet(f'background:{BG};')
+        self._lib_mgmt_btn.setStyleSheet(self._lib_mgmt_btn_ss())
+        if self._lib_popup is not None:
+            self._lib_popup.refresh_theme()
         # Carries no accent colour, so it sits here rather than in update_accent.
         self._ver_lbl.setStyleSheet(f'color:{FG2}; font-size:9px; letter-spacing:1px;'
                                     f' padding:0 0 9px 0; background:{BG};')
