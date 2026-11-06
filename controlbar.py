@@ -339,11 +339,6 @@ class ControlBar(QFrame):
             pop.overlay_clock_toggled.connect(
                 lambda on: getattr(self, '_blackout_ref', None) and
                            self._blackout_ref.set_overlay_clock(on))
-            pop.cover_fetch_toggled.connect(self._on_cover_fetch_btn)
-            pop.lyric_fetch_action.connect(self._on_lyric_fetch_btn)
-            pop.tag_fetch_toggled.connect(self._on_tag_fetch_btn)
-            pop.gain_fetch_action.connect(self._on_gain_fetch_btn)
-            pop.rename_toggled.connect(self._on_rename_btn)
             pop.radius_changed.connect(self._on_radius_change)
             pop.crossfade_changed.connect(self._player.set_crossfade_ms)
             pop.fade_changed.connect(self._player.set_fade_ms)
@@ -545,7 +540,7 @@ class ControlBar(QFrame):
             overlay._ctrlbar_ref = self
 
     def _on_cover_fetch_btn(self):
-        """Open the CoverFetchPopup — triggered by the Settings button."""
+        """Open the CoverFetchPopup — from the Library Management menu."""
         win = self.window()
         pages = []
         if hasattr(win, '_lib_page') and win._lib_page:
@@ -554,8 +549,6 @@ class ControlBar(QFrame):
         if not all_tracks:
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
-        if self._settings_popup: self._settings_popup.hide()
-        
         # Reuse the dialog if this fetch is already running in the background
         workers_list = _BaseFetchPopup._active_workers.get('CoverFetchPopup', [])
         if workers_list:
@@ -570,7 +563,7 @@ class ControlBar(QFrame):
         dlg.show()
 
     def _on_lyric_fetch_btn(self):
-        """Open the LyricsFetchPopup — triggered by the Settings button."""
+        """Open the LyricsFetchPopup — from the Library Management menu."""
         win = self.window()
         all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
         if not all_tracks:
@@ -619,8 +612,6 @@ class ControlBar(QFrame):
         if not all_tracks:
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
-        if self._settings_popup: self._settings_popup.hide()
-
         # Reuse the dialog if this fetch is already running in the background
         workers_list = _BaseFetchPopup._active_workers.get('GainFetchPopup', [])
         if workers_list:
@@ -635,7 +626,7 @@ class ControlBar(QFrame):
         dlg.show()
 
     def _on_rename_btn(self):
-        """Open the RenamePopup — triggered by the Settings 'Rename…' button.
+        """Open the RenamePopup — from the Library Management menu.
 
         After the dialog closes (finished OR cancelled) we:
           1. Update M3U8 files that reference any renamed path
@@ -710,9 +701,6 @@ class ControlBar(QFrame):
         if not all_tracks:
             QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
             return
-        if self._settings_popup:
-            self._settings_popup.hide()
-        
         # Reuse the dialog if a rename is already running in the background
         existing = RenamePopup._active_worker
         if existing:

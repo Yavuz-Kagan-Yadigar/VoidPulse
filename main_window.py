@@ -316,6 +316,15 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_req.connect(self._refresh_library)
         self._sidebar.export_m3u_req.connect(self._export_m3u_dialog)
         self._sidebar.network_share_req.connect(self._network_share_dialog)
+        # The batch fetches moved out of the settings popup into the sidebar's
+        # Library Management menu; the handlers stayed in ControlBar, where the
+        # fetch dialogs and their worker bookkeeping live.
+        self._sidebar.fetch_covers_req.connect(self._ctrlbar._on_cover_fetch_btn)
+        self._sidebar.fetch_lyrics_req.connect(self._ctrlbar._on_lyric_fetch_btn)
+        self._sidebar.fetch_tags_req.connect(self._ctrlbar._on_tag_fetch_btn)
+        self._sidebar.fetch_gain_req.connect(self._ctrlbar._on_gain_fetch_btn)
+        self._sidebar.rename_batch_req.connect(self._ctrlbar._on_rename_btn)
+
 
         self._mounter = RemoteMounter(self)
         self._mounter.started.connect(self._on_share_mount_started)

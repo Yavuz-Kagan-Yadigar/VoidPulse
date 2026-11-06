@@ -27,11 +27,6 @@ class SettingsPopup(QFrame):
     overlay_auto_open_toggled = pyqtSignal(bool)   # auto-open on idle
     overlay_timeout_changed   = pyqtSignal(int)    # idle seconds (10..300)
     overlay_clock_toggled     = pyqtSignal(bool)   # show/hide clock in overlay
-    cover_fetch_toggled = pyqtSignal()   # emitted when user clicks "Fetch Covers" button
-    lyric_fetch_action  = pyqtSignal()   # emitted when user clicks "Fetch Lyrics" button
-    tag_fetch_toggled    = pyqtSignal()   # emitted when user clicks "Fetch Tags" button
-    rename_toggled       = pyqtSignal()   # emitted when user clicks "Rename…" button
-    gain_fetch_action    = pyqtSignal()   # emitted when user clicks "Fetch Gain" button
     view_mode_changed    = pyqtSignal(str)   # 'classic' | 'gallery_z' | 'gallery_s'
     list_scale_changed   = pyqtSignal(int)   # row height px
     gallery_scale_changed = pyqtSignal(int)  # card size px
@@ -351,35 +346,10 @@ class SettingsPopup(QFrame):
         fetch_sw_row.addWidget(self._lyrics_fetch_sw)
         right.addLayout(fetch_sw_row)
 
-        action_row = QHBoxLayout(); action_row.setSpacing(4)
-        self._btn_fetch_covers = QPushButton('Covers')
-        self._btn_fetch_lyrics = QPushButton('Lyrics')
-        self._btn_fetch_tags   = QPushButton('Tags')
-        self._btn_fetch_gain   = QPushButton('Gain')
-        self._btn_rename       = QPushButton('Rename')
-        for b in (self._btn_fetch_covers, self._btn_fetch_lyrics,
-                  self._btn_fetch_tags, self._btn_fetch_gain, self._btn_rename):
-            b.setMinimumHeight(22); b.setMaximumHeight(26)
-            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            # The global QPushButton rule sets min-height:36px, which beats
-            # setMinimumHeight()/setMaximumHeight() unless a per-instance
-            # stylesheet restates the size — so restate it. The radius is
-            # computed from this button's own 26px height rather than
-            # inheriting r_btn, which is calibrated for 36px buttons.
-            b.setStyleSheet(
-                f'font-size:10px; padding:1px 3px; min-height:22px; max-height:26px;'
-                f' border-radius:{_r(13)}px;')
-        self._btn_fetch_covers.clicked.connect(self.cover_fetch_toggled)
-        self._btn_fetch_lyrics.clicked.connect(self.lyric_fetch_action)
-        self._btn_fetch_tags.clicked.connect(self.tag_fetch_toggled)
-        self._btn_fetch_gain.clicked.connect(self.gain_fetch_action)
-        self._btn_rename.clicked.connect(self.rename_toggled)
-        action_row.addWidget(self._btn_fetch_covers)
-        action_row.addWidget(self._btn_fetch_lyrics)
-        action_row.addWidget(self._btn_fetch_tags)
-        action_row.addWidget(self._btn_fetch_gain)
-        action_row.addWidget(self._btn_rename)
-        right.addLayout(action_row)
+        # The Covers / Lyrics / Tags / Gain / Rename buttons used to sit here.
+        # They are library actions rather than settings, so they moved to the
+        # sidebar's Library Management menu (library_popup.py); only the
+        # AUTO LYRICS switch above is a setting and stayed.
 
         # ── PLAYBACK section ─────────────────────────────────────────────────
         right.addWidget(_hdivider())

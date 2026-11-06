@@ -132,6 +132,14 @@ class Sidebar(QWidget):
     search_changed    = pyqtSignal(str)
     export_m3u_req    = pyqtSignal()
     network_share_req = pyqtSignal()
+    # Batch library jobs, relayed from LibraryPopup. The handlers live in
+    # ControlBar, which owns the fetch dialogs (see main_window).
+    fetch_covers_req  = pyqtSignal()
+    fetch_lyrics_req  = pyqtSignal()
+    fetch_tags_req    = pyqtSignal()
+    fetch_gain_req    = pyqtSignal()
+    rename_batch_req  = pyqtSignal()
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -290,6 +298,12 @@ class Sidebar(QWidget):
             pop.new_playlist_req.connect(self.new_playlist_req)
             pop.refresh_req.connect(self.refresh_req)
             pop.export_m3u_req.connect(self.export_m3u_req)
+            pop.fetch_covers_req.connect(self.fetch_covers_req)
+            pop.fetch_lyrics_req.connect(self.fetch_lyrics_req)
+            pop.fetch_tags_req.connect(self.fetch_tags_req)
+            pop.fetch_gain_req.connect(self.fetch_gain_req)
+            pop.rename_batch_req.connect(self.rename_batch_req)
+
             self._lib_popup = pop
         return self._lib_popup
 
