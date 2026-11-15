@@ -914,6 +914,11 @@ class TrackTable(QTableWidget):
             self.viewport().update(self.visualRect(self.indexFromItem(item)))
 
     def _on_section_resized(self, _logical, _old, _new):
+        # Hiding or showing a column also fires sectionResized (size <-> 0). That
+        # is not a drag: committing it would read the not-yet-laid-out default
+        # widths back as ratios and overwrite the saved ones with equal shares.
+        if _old == 0 or _new == 0:
+            return
         # Flags the drag so resizeEvent does not restore stored ratios over it
         self._user_dragging = True
         self._col_resize_timer.start()
@@ -931,6 +936,10 @@ class TrackTable(QTableWidget):
             ratios[c] = self.columnWidth(c) / total * osum
         self._col_ratios = ratios
         self._user_dragging = False   # drag finished, ratios committed
+        # Re-fit to the viewport: shrinking a column (the last one especially)
+        # would otherwise leave the columns short of the right edge, and the row
+        # separators, which are per-cell, stop there.
+        self._apply_ratios()
         self.col_widths_changed.emit(ratios)
 
     def _apply_ratios(self):
