@@ -1,7 +1,7 @@
 """
 VoidPulse — LibraryPopup: the library-management actions (add folder,
 import M3U, network share, new playlist, refresh, export, and the batch fetch
-jobs that used to sit in the settings popup) as a compact popup
+and export jobs that used to sit in the settings popup) as a compact popup
 styled after the playlist context menu: BG3 fill, 2px accent border, radius
 off the global corner-radius percentage, and menu-like text rows.
 """
@@ -21,6 +21,7 @@ class LibraryPopup(QFrame):
     # stayed in ControlBar, where the fetch dialogs live.
     fetch_covers_req  = pyqtSignal()
     fetch_lyrics_req  = pyqtSignal()
+    export_lyrics_req = pyqtSignal()
     fetch_tags_req    = pyqtSignal()
     fetch_gain_req    = pyqtSignal()
     rename_batch_req  = pyqtSignal()
@@ -98,11 +99,13 @@ class LibraryPopup(QFrame):
              'fetch_tags_req'),
             ('⇩  Fetch Gain', 'Measure ReplayGain for every track in the library',
              'fetch_gain_req'),
+            ('⇧  Export Lyrics', 'Write each track’s lyrics to a same-named .lrc'
+             ' file', 'export_lyrics_req'),
             ('✎  Rename…', 'Batch-rename the library files from a pattern',
              'rename_batch_req'),
         ]
         for pos, (text, tip, sig) in enumerate(specs):
-            if pos in (3, 6, 10):   # add | playlist ops | fetches | rename
+            if pos in (3, 6, 10, 11):   # add | playlist ops | fetches | export | rename
                 sep = QFrame(); sep.setFixedHeight(1)
                 sep.setStyleSheet(f'background:{_c.B2}; margin:3px 8px;')
                 self._seps.append(sep)

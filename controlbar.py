@@ -11,8 +11,8 @@ from constants import *
 from controlbar_widgets import (_ctrl, RepeatButton, _FullscreenBtn,
                                 SpinningPlayButton, _RoundedCoverLabel)
 from library import RenamePopup
-from fetch_popups import (LyricsFetchPopup, TagFetchPopup, GainFetchPopup,
-                          CoverFetchPopup, _BaseFetchPopup)
+from fetch_popups import (LyricsFetchPopup, LyricsExportPopup, TagFetchPopup,
+                          GainFetchPopup, CoverFetchPopup, _BaseFetchPopup)
 from widgets_base import _ModalOverlay, _SpinningOverlay
 from constants import ACC, ACCH, BG, BG3, BG4, BORD, CONFIG_PATH, EQ_TYPE_PEAK, FG, FG2, GST_BANDS, MIN_DB, RAD_PCT, VIZ_BANDS, VIZ_GAMMA, _DARK_MODE, _FRAME_MS, _FRAME_S, _r, apply_theme, apply_accent, make_stylesheet, is_effective_dark, is_system_qt_theme_active
 from time import monotonic as _monotonic
@@ -581,6 +581,28 @@ class ControlBar(QFrame):
             return
         
         dlg = LyricsFetchPopup(all_tracks, parent=win)
+        _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
+        dlg.show()
+
+    def _on_lyric_export_btn(self):
+        """Open the LyricsExportPopup — from the Library Management menu."""
+        win = self.window()
+        all_tracks = list(win._lib_page.tracks) if hasattr(win, '_lib_page') and win._lib_page else []
+        if not all_tracks:
+            QMessageBox.information(win, 'No Tracks', 'Add a folder to the library first.')
+            return
+        if self._settings_popup: self._settings_popup.hide()
+
+        # Reuse the dialog if this export is already running in the background
+        workers_list = _BaseFetchPopup._active_workers.get('LyricsExportPopup', [])
+        if workers_list:
+            old_instance, old_worker, old_thread = workers_list[-1]
+            old_instance.show()
+            old_instance.raise_()
+            old_instance.activateWindow()
+            return
+
+        dlg = LyricsExportPopup(all_tracks, parent=win)
         _ModalOverlay.show_for(dlg, watch_hide=True)   # non-blocking .show() dialog — see _ModalOverlay
         dlg.show()
 

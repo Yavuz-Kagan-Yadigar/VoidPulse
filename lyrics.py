@@ -1,5 +1,6 @@
 """
-VoidPulse — lyrics engine: LRC parser, embedded tag extractor, online sources
+VoidPulse — lyrics engine: LRC parser/writer, embedded tag extractor, online
+sources
 (LrcLib, Lyrics.ovh, ChartLyrics, Genius, AZLyrics, SongLyrics, Letras),
 LyricsFetcher worker, LyricsPanel display widget.
 """
@@ -17,6 +18,10 @@ import concurrent.futures as _cf
 # ══════════════════════════════════════════════════════════════════════════════
 # ── LRC parser ────────────────────────────────────────────────────────────────
 _LRC_STAMP_RE = _re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)\]')
+_LRC_OFFSET_RE = _re.compile(r'\[offset:\s*([+-]?\d+)\s*\]', _re.I)
+# Enhanced (A2) LRC puts word stamps in angle brackets inside a stamped line.
+# The panel highlights whole lines, so the stamps are only noise — dropped.
+_LRC_WORD_RE = _re.compile(r'<\d+:\d+(?::\d+)?(?:[.,]\d+)?>')
 
 def _lrc_parse(text: str):
     """Parse LRC text into sorted [(ms, line_text)].
@@ -25,8 +30,11 @@ def _lrc_parse(text: str):
     files avoid repeating a chorus — so every leading stamp becomes its own
     entry. Matching only the first would both lose the later timing and leave
     its bracket sitting in the displayed text.
-    """
+
+    [offset:] shifts every stamp — a positive value means the lyrics show
+    sooner, per the format ([offset:]+500 → all timings ½ s earlier)."""
     lines = []
+    offset = 0
     for raw in text.splitlines():
         raw = raw.strip()
         stamps = []
@@ -37,11 +45,43 @@ def _lrc_parse(text: str):
             stamps.append(int(mm) * 60000 + round(float(ss_str.replace(':', '.')) * 1000))
             pos = m.end()
         if not stamps:
-            continue   # metadata line ([ar:…]) or plain text
-        txt = raw[pos:].strip()
+            if (mo := _LRC_OFFSET_RE.fullmatch(raw)):
+                offset = int(mo.group(1))
+            continue   # other metadata lines ([ar:…]) or plain text
+        txt = _LRC_WORD_RE.sub('', raw[pos:]).strip()
         for ms in stamps:
-            lines.append((ms, txt))
+            lines.append((max(0, ms - offset), txt))
     return sorted(lines, key=lambda x: x[0]) if lines else None
+
+def _lrc_stamp(ms: int) -> str:
+    """Milliseconds as the [mm:ss.xx] stamp LRC files carry per line."""
+    cs = round(ms / 10)   # total hundredths — rounding here keeps 59.999s
+    m, rem = divmod(cs, 6000)
+    return f'{m:02d}:{rem / 100:05.2f}'   # from overflowing into 00:60.00
+
+def _lrc_dump(synced, title: str = '', artist: str = '', album: str = '',
+              plain: str = ''):
+    """Render [(ms, text)] as LRC text — the inverse of _lrc_parse.
+
+    Consecutive entries carrying the same text are folded back into one line
+    with several stamps ([00:12.00][01:45.00]Chorus), which is how LRC files
+    store a repeated chorus. Header tags are filled from the track metadata
+    when present. With no synced lines the plain text is written as-is —
+    LRC accepts unsynced files and readers fall back to plain display."""
+    head = ''.join(f'[{k}:{v}]\n' for k, v in
+                   (('ti', title), ('ar', artist), ('al', album)) if v)
+    if synced:
+        parts = []   # [( [stamps…], text )]
+        for ms, text in synced:
+            if parts and parts[-1][1] == text:
+                parts[-1][0].append(_lrc_stamp(ms))
+            else:
+                parts.append(([_lrc_stamp(ms)], text))
+        body = ''.join(''.join(f'[{s}]' for s in sts) + text + '\n'
+                       for sts, text in parts)
+    else:
+        body = plain.strip() + '\n' if plain.strip() else ''
+    return f'{head}{body}'
 
 # ── Embedded tags ─────────────────────────────────────────────────────────────
 def _extract_embedded_lyrics(fp: str):

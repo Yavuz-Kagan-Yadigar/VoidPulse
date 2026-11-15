@@ -351,6 +351,7 @@ class MainWindow(QMainWindow):
         self._sidebar.fetch_lyrics_req.connect(self._ctrlbar._on_lyric_fetch_btn)
         self._sidebar.fetch_tags_req.connect(self._ctrlbar._on_tag_fetch_btn)
         self._sidebar.fetch_gain_req.connect(self._ctrlbar._on_gain_fetch_btn)
+        self._sidebar.export_lyrics_req.connect(self._ctrlbar._on_lyric_export_btn)
         self._sidebar.rename_batch_req.connect(self._ctrlbar._on_rename_btn)
 
 

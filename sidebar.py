@@ -136,6 +136,7 @@ class Sidebar(QWidget):
     # ControlBar, which owns the fetch dialogs (see main_window).
     fetch_covers_req  = pyqtSignal()
     fetch_lyrics_req  = pyqtSignal()
+    export_lyrics_req = pyqtSignal()
     fetch_tags_req    = pyqtSignal()
     fetch_gain_req    = pyqtSignal()
     rename_batch_req  = pyqtSignal()
@@ -300,6 +301,7 @@ class Sidebar(QWidget):
             pop.export_m3u_req.connect(self.export_m3u_req)
             pop.fetch_covers_req.connect(self.fetch_covers_req)
             pop.fetch_lyrics_req.connect(self.fetch_lyrics_req)
+            pop.export_lyrics_req.connect(self.export_lyrics_req)
             pop.fetch_tags_req.connect(self.fetch_tags_req)
             pop.fetch_gain_req.connect(self.fetch_gain_req)
             pop.rename_batch_req.connect(self.rename_batch_req)

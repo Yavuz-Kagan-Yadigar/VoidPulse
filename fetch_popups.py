@@ -1,6 +1,7 @@
 """
 VoidPulse — batch library operations run over many tracks at once, each with a
-modal progress dialog: cover art, tags, lyrics and ReplayGain loudness.
+modal progress dialog: cover art, tags, lyrics (fetch and .lrc export) and
+ReplayGain loudness.
 
 _BaseFetchPopup holds the shared dialog behaviour (progress bar, scrolling log,
 cancel/force handling, worker thread lifecycle); each concrete popup pairs a
@@ -13,8 +14,8 @@ import constants as _const_mod
 from metadata_online import (lookup_tags_online, embed_lyrics, write_tags_to_file,
                              write_replaygain_gain_tag, fetch_cover_online,
                              embed_cover_bytes)
-from lyrics import (_extract_embedded_lyrics, _src_lrclib_exact, _src_lrclib_search,
-                    _src_lyrics_ovh)
+from lyrics import (_extract_embedded_lyrics, _lrc_dump, _src_lrclib_exact,
+                    _src_lrclib_search, _src_lyrics_ovh)
 from cover_art import (extract_cover_bytes, _square_pixmap, _trim_cover_cache,
                        _cover_disk_key, _cover_disk_is_stale, _cover_disk_write_mtime,
                        _COVER_DISK_DIR, _COVER_JPEG_QUALITY, _COVER_MASTER_SIZE,
@@ -701,6 +702,97 @@ class LyricsFetchPopup(_BaseFetchPopup):
     def _on_track_done(self, fp: str, found: bool):
         name = Path(fp).stem
         self._log_add(f'{"OK  " if found else "FAIL"} {name}', found)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Library Lyrics Export Worker + Popup — embedded lyrics → .lrc sidecars
+# ══════════════════════════════════════════════════════════════════════════════
+# The inverse of the fetch job: instead of pulling lyrics into the tags, it
+# writes what the tags already hold to a same-named .lrc file next to the
+# audio — the sidecar convention most players (and DMS's media player) read.
+# Deliberately offline: fetching online is what Fetch Lyrics does first.
+
+class LibraryLyricsExportWorker(QObject):
+    """Writes each library track's embedded lyrics to a <stem>.lrc sidecar.
+    Tracks whose .lrc already exists are skipped unless force is set."""
+    progress   = pyqtSignal(int, int, str)          # current, total, track_name
+    track_done = pyqtSignal(str, str, str, bool)    # filepath, verdict, detail, ok
+    finished   = pyqtSignal(int, int)               # written_count, total_tracks
+
+    def __init__(self, tracks: list, force: bool = False):
+        super().__init__()
+        self._tracks    = list(tracks)
+        self._force     = force
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        total = len(self._tracks)
+        written = 0
+        for i, t in enumerate(self._tracks):
+            if self._cancelled:
+                break
+            fp = t.filepath
+            name = t.title or Path(fp).stem
+            self.progress.emit(i + 1, total, name)
+            if '://' in fp:   # network stream — there is no folder to write to
+                self.track_done.emit(fp, 'FAIL', '  (remote track)', False)
+                continue
+            synced, plain = _extract_embedded_lyrics(fp)
+            if not synced and not plain:
+                self.track_done.emit(fp, 'FAIL', '  (no embedded lyrics)', False)
+                continue
+            path = Path(fp).with_suffix('.lrc')
+            # An existing song.lrc or song.LRC is the user's own file; Force
+            # is the explicit "overwrite it anyway"
+            if not self._force and (path.is_file() or
+                                    path.with_suffix('.LRC').is_file()):
+                self.track_done.emit(fp, 'SKIP', '  (.lrc already exists)', False)
+                continue
+            try:
+                path.write_text(
+                    _lrc_dump(synced, t.title or '', t.artist or '',
+                              t.album or '', plain=plain or ''),
+                    encoding='utf-8')
+            except OSError as e:
+                self.track_done.emit(fp, 'FAIL', f'  ({e.strerror or e})', False)
+                continue
+            written += 1
+            detail = f'  →  {path.name}' + ('  (plain)' if not synced else '')
+            self.track_done.emit(fp, 'OK  ', detail, True)
+        self.finished.emit(written, total)
+
+
+class LyricsExportPopup(_BaseFetchPopup):
+    """Modal dialog that writes track lyrics out as .lrc sidecar files."""
+
+    def __init__(self, tracks: list, parent=None):
+        # No scan here: reading every file's tags would freeze the UI on a
+        # large library, and the worker computes the same list anyway.
+        info = (f'Writes the lyrics already embedded in <b>{len(tracks)}</b> tracks '
+                f'to a same-named <b>.lrc</b> file next to each audio file — the '
+                f'sidecar convention most lyrics players read. Runs offline, uses '
+                f'only existing tags; existing .lrc files are kept unless Force '
+                f'is set.')
+        super().__init__(tracks, 'Export Lyrics', info, len(tracks), parent)
+        self._needs = list(tracks)
+        self._force_cb.setText('Force (overwrite existing .lrc files)')
+
+    def _make_worker(self):
+        return LibraryLyricsExportWorker(self._tracks, force=self._force)
+
+    def set_tracks(self, tracks: list):
+        self._tracks = list(tracks)
+        self._needs  = list(tracks)
+        self._progress.setRange(0, max(1, len(self._needs)))
+
+    def _finished_msg(self, found: int, total: int) -> str:
+        return f'Wrote .lrc files for {found} out of {total} tracks.'
+
+    def _on_track_done(self, fp: str, verdict: str, detail: str, ok: bool):
+        self._log_add(f'{verdict} {Path(fp).stem}{detail}', ok)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
