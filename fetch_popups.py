@@ -34,6 +34,8 @@ class _BaseFetchPopup(QDialog):
     And may override _on_finished(found, total) to customise the result label.
     """
 
+    _SHOW_LFM = True   # show the Last.fm key row (off for offline jobs)
+
     # Workers still running in the background, per popup type
     _active_workers = {}  # key: popup_type_name, value: list of (instance, worker, thread)
 
@@ -65,27 +67,29 @@ class _BaseFetchPopup(QDialog):
         root.addWidget(title_lbl)
 
         # ── Last.fm API key ───────────────────────────────────────────────────
-        lfm_row = QHBoxLayout(); lfm_row.setSpacing(6)
-        lfm_lbl = QLabel('Last.fm key:')
-        lfm_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
-        lfm_lbl.setFixedWidth(72)
-        lfm_row.addWidget(lfm_lbl)
-        self._lfm_edit = QLineEdit()
-        self._lfm_edit.setPlaceholderText('API key (optional)')
-        self._lfm_edit.setFixedHeight(22)
-        self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._lfm_edit.setText(_const_mod._lastfm_api_key)
-        self._lfm_edit.setStyleSheet(
-            f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
-            f'border-radius:4px;padding:0 6px;font-size:11px;}}'
-            f'QLineEdit:focus{{border-color:{ACC};}}'
-        )
-        lfm_row.addWidget(self._lfm_edit, 1)
-        root.addLayout(lfm_row)
+        # Only popups that query Last.fm show it (_SHOW_LFM); the export job is offline.
+        if self._SHOW_LFM:
+            lfm_row = QHBoxLayout(); lfm_row.setSpacing(6)
+            lfm_lbl = QLabel('Last.fm key:')
+            lfm_lbl.setStyleSheet(f'color:{FG2};font-size:11px;')
+            lfm_lbl.setFixedWidth(72)
+            lfm_row.addWidget(lfm_lbl)
+            self._lfm_edit = QLineEdit()
+            self._lfm_edit.setPlaceholderText('API key (optional)')
+            self._lfm_edit.setFixedHeight(22)
+            self._lfm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._lfm_edit.setText(_const_mod._lastfm_api_key)
+            self._lfm_edit.setStyleSheet(
+                f'QLineEdit{{background:{BG3};color:{FG};border:1px solid {B2};'
+                f'border-radius:4px;padding:0 6px;font-size:11px;}}'
+                f'QLineEdit:focus{{border-color:{ACC};}}'
+            )
+            lfm_row.addWidget(self._lfm_edit, 1)
+            root.addLayout(lfm_row)
 
-        self._lfm_edit.textChanged.connect(self._on_lfm_text_changed)
-        if len(_const_mod._lastfm_api_key) == 32:
-            self._set_lfm_border(True)
+            self._lfm_edit.textChanged.connect(self._on_lfm_text_changed)
+            if len(_const_mod._lastfm_api_key) == 32:
+                self._set_lfm_border(True)
 
         info_lbl = QLabel(info_text)
         info_lbl.setWordWrap(True)
@@ -767,6 +771,7 @@ class LibraryLyricsExportWorker(QObject):
 
 class LyricsExportPopup(_BaseFetchPopup):
     """Modal dialog that writes track lyrics out as .lrc sidecar files."""
+    _SHOW_LFM = False
 
     def __init__(self, tracks: list, parent=None):
         # No scan here: reading every file's tags would freeze the UI on a
