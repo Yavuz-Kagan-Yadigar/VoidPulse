@@ -184,6 +184,7 @@ class Player(QObject):
         self._viz_pend_r: int  = 0            # next slot to release
         self._viz_pend_w: int  = 0            # next slot to fill
         self._viz_pend_ct: int = 0            # frames currently queued
+        self._viz_pend_t  = _np.full(self._VIZ_PEND_N, -1.0)  # stream-time (ms) per slot, -1 = unknown
         self._viz_target  = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # EMA target: last released frame
         self._viz_next_release: float = 0.0   # monotonic: when the next queued frame may be released
         self._viz_ema_wt: float = 0.0         # monotonic time of the last EMA step
@@ -2865,6 +2866,17 @@ class Player(QObject):
         # Bursts are normal — libFLAC's ~104 ms blocks deliver three messages back
         # to back, then nothing — and merging them drops two frames in three,
         # stepping the bars at ~8 Hz. _compute_viz_frame paces the queue out again.
+        # Stream-time of the frame's end, so the renderer can hold it until the
+        # sink actually reaches that position. Arrival time alone leads audible
+        # output by the sink's buffering, which differs on every start.
+        t_ms = -1.0
+        try:
+            ok, st = s.get_uint64('stream-time')
+            ok2, du = s.get_uint64('duration')
+            if ok:
+                t_ms = (st + (du if ok2 else 0)) / 1e6
+        except Exception:
+            pass
         w = self._viz_pend_w
         if self._viz_pend_ct >= self._VIZ_PEND_N:
             # Queue full: the renderer has been starved longer than the queue is
@@ -2876,6 +2888,7 @@ class Player(QObject):
             slot[:n] = raw[:n]
             if n < GST_BANDS:
                 slot[n:] = MIN_DB
+            self._viz_pend_t[w] = t_ms
             self._viz_pend_w  = (w + 1) % self._VIZ_PEND_N
             self._viz_pend_ct += 1
         self._viz_has_any = True
@@ -2932,7 +2945,15 @@ class Player(QObject):
             # ── 1a. Release one queued frame, at the spectrum's own cadence ───
             # A backlog means frames arrived faster than they were shown, so
             # drain at double rate rather than letting the lag accumulate.
-            if self._viz_pend_ct > 0 and now >= self._viz_next_release:
+            # Hold a frame until playback reaches its stream-time. The 2 s cap
+            # keeps a stale position (seek, resume) from stalling the queue.
+            hold = False
+            if self._viz_pend_ct > 0:
+                ft = self._viz_pend_t[self._viz_pend_r]
+                if ft >= 0.0:
+                    ahead = ft - self.position_ms()
+                    hold = 0.0 < ahead < 2000.0
+            if self._viz_pend_ct > 0 and now >= self._viz_next_release and not hold:
                 r = self._viz_pend_r
                 _np.copyto(self._viz_target, self._viz_pend[r])
                 self._viz_pend_r   = (r + 1) % self._VIZ_PEND_N
