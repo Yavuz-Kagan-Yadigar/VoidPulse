@@ -36,6 +36,33 @@ from blackout_overlay import BlackoutOverlay
 # SettingsPopup is instantiated lazily inside ControlBar._ensure_settings_popup
 from widgets_base import _ModalOverlay, DeviceBusyPopup, _SpinningOverlay
 
+class _CtxMenu(QMenu):
+    """Context menu whose submenu works under a finger on Wayland.
+
+    A tap that opens a submenu on press made the compositor dismiss it ~20 ms
+    later, while the finger was still down: the playlist list flashed and
+    vanished. A submenu item now ignores the press and opens on the release.
+    """
+    def mousePressEvent(self, e):
+        # Wayland dismisses a popup opened while the finger that caused it is
+        # still down, so a submenu item waits for the release (below).
+        a = self.actionAt(e.position().toPoint())
+        if a is not None and a.menu() is not None:
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        a = self.actionAt(e.position().toPoint())
+        if a is not None and a.menu() is not None:
+            sub = a.menu()
+            if not sub.isVisible():
+                sub.popup(self.mapToGlobal(QPoint(self.width(), self.actionGeometry(a).top())))
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, splash=None, open_with: str = None):
         super().__init__()
@@ -715,17 +742,16 @@ class MainWindow(QMainWindow):
 
     def _show_ctx_menu(self, src_page, row, pos):
         if not (0 <= row < len(src_page.tracks)): return
-        track = src_page.tracks[row]; m = QMenu(self)
+        track = src_page.tracks[row]; m = _CtxMenu(self)
         m.addAction('▶  Play').triggered.connect(lambda: self._play_from_page(src_page, row))
         m.addAction('＋  Add to Queue').triggered.connect(
             lambda _=False, _t=track: self._add_to_queue([_t]))
         m.addSeparator()
-        targets = [pl for pl in self._playlists if pl is not src_page]
-        if targets:
-            # Not a submenu: on touch the tap that opens one also dismisses it.
-            # A second menu opened after this one has closed has no such race.
-            m.addAction("Add to Playlist…").triggered.connect(
-                lambda: QTimer.singleShot(0, lambda: self._pick_playlist(targets, track, pos)))
+        add_sub = m.addMenu("Add to Playlist")
+        for pl in self._playlists:
+            if pl is not src_page:
+                add_sub.addAction(pl.label).triggered.connect(
+                    lambda _=False, _pl=pl: self._add_track_to_playlist(_pl, track))
         if src_page is not self._lib_page:
             m.addSeparator()
             def _rem(_, _p=src_page, _r=row):
@@ -735,13 +761,6 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("✎  Edit Tags...").triggered.connect(
             lambda: self._edit_tags(src_page, row))
-        m.exec(pos)
-
-    def _pick_playlist(self, targets, track, pos):
-        m = QMenu(self)
-        for pl in targets:
-            m.addAction(pl.label).triggered.connect(
-                lambda _=False, _pl=pl: self._add_track_to_playlist(_pl, track))
         m.exec(pos)
 
     def _add_track_to_playlist(self, pl, tr):
