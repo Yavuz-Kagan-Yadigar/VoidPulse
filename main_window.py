@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
         self._lib_page.ctx_requested.connect(self._show_ctx_menu)
         self._lib_page.col_widths_changed.connect(
             lambda w, p=self._lib_page: self._on_col_widths_changed(w, p))
+        self._lib_page.hidden_cols_changed.connect(self._on_hidden_cols_changed)
         self._tabs.addTab(self._lib_page, '  Library')
         self._cur_page = self._lib_page
 
@@ -719,19 +720,12 @@ class MainWindow(QMainWindow):
         m.addAction('＋  Add to Queue').triggered.connect(
             lambda _=False, _t=track: self._add_to_queue([_t]))
         m.addSeparator()
-        add_sub = m.addMenu("Add to Playlist")
-        for pl in self._playlists:
-            if pl is not src_page:
-                def _add(_, _pl=pl, _tr=track):
-                    fps = {t.filepath for t in _pl.tracks}
-                    if _tr.filepath not in fps:
-                        tracks = list(_pl.tracks)
-                        # Insert in place rather than re-sorting the playlist
-                        sk = _tr.sort_key()
-                        idx = bisect.bisect_left([t.sort_key() for t in tracks], sk)
-                        tracks.insert(idx, _tr)
-                        _pl.set_tracks(tracks, _pl.playing_idx); self._save_config()
-                add_sub.addAction(pl.label).triggered.connect(_add)
+        targets = [pl for pl in self._playlists if pl is not src_page]
+        if targets:
+            # Not a submenu: on touch the tap that opens one also dismisses it.
+            # A second menu opened after this one has closed has no such race.
+            m.addAction("Add to Playlist…").triggered.connect(
+                lambda: QTimer.singleShot(0, lambda: self._pick_playlist(targets, track, pos)))
         if src_page is not self._lib_page:
             m.addSeparator()
             def _rem(_, _p=src_page, _r=row):
@@ -742,6 +736,22 @@ class MainWindow(QMainWindow):
         m.addAction("✎  Edit Tags...").triggered.connect(
             lambda: self._edit_tags(src_page, row))
         m.exec(pos)
+
+    def _pick_playlist(self, targets, track, pos):
+        m = QMenu(self)
+        for pl in targets:
+            m.addAction(pl.label).triggered.connect(
+                lambda _=False, _pl=pl: self._add_track_to_playlist(_pl, track))
+        m.exec(pos)
+
+    def _add_track_to_playlist(self, pl, tr):
+        if tr.filepath in {t.filepath for t in pl.tracks}:
+            return
+        tracks = list(pl.tracks)
+        # Insert in place rather than re-sorting the playlist
+        idx = bisect.bisect_left([t.sort_key() for t in tracks], tr.sort_key())
+        tracks.insert(idx, tr)
+        pl.set_tracks(tracks, pl.playing_idx); self._save_config()
 
     def _invalidate_cover_cache(self, fp: str):
         """Remove all cached cover data for fp so the next paint reloads it.
@@ -1252,15 +1262,17 @@ class MainWindow(QMainWindow):
 
         if refresh:
             for pl in self._playlists:
-                if pl.label == label:
+                if pl.label == label or getattr(pl, '_src_path', None) == path:
                     pl.set_tracks(tracks); self._rebuild_library()
                     self._status.showMessage(f'"{label}" refreshed — {len(tracks)} tracks', 4000)
                     self._save_config(); return
 
         page = PlaylistPage(tracks, label=label)
+        page._src_path = path
         page.play_track.connect(self._play_from_page)
         page.ctx_requested.connect(self._show_ctx_menu)
         page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
+        page.hidden_cols_changed.connect(self._on_hidden_cols_changed)
         page.set_tracks(tracks)
         saved_ratios = getattr(self, '_last_col_widths', None) or TrackTable._DEFAULT_COL_RATIOS
         page.table.restore_col_widths(saved_ratios)
@@ -1335,6 +1347,9 @@ class MainWindow(QMainWindow):
     def _remove_playlist(self, idx):
         if not (0 <= idx < len(self._playlists)): return
         page = self._playlists.pop(idx)
+        # Else the next refresh rescans the path and brings the playlist back
+        for p in (getattr(page, '_src_path', None), getattr(page, '_m3u_path', None)):
+            self._known_paths.discard(p)
         for i in range(self._tabs.count()):
             if self._tabs.widget(i) is page:
                 self._tabs.removeTab(i)
@@ -2228,6 +2243,14 @@ class MainWindow(QMainWindow):
                 page.table.restore_col_widths(widths)
         self._save_config()
 
+    def _on_hidden_cols_changed(self, hidden: list):
+        """User toggled a list column — apply to every page and save."""
+        TrackTable._HIDDEN_COLS = set(hidden)
+        for page in [self._lib_page] + self._playlists:
+            if page is not None:
+                page.table.set_hidden_cols(hidden)
+        self._save_config()
+
     def _save_config(self):
         # Don't save while the startup playlist loader is still running — _playlists
         # is only partially populated at that point, so writing config now would
@@ -2280,10 +2303,9 @@ class MainWindow(QMainWindow):
                 cfg['active_tab_label'] = (self._tabs.tabText(self._tabs.currentIndex())
                                            .strip())
             # Persist table column ratios (proportional, sum ≈ 1.0)
-            total_w = sum(self._lib_page.table.columnWidth(c) for c in range(len(COLS)))
-            if total_w > 0:
-                cfg['table_col_widths'] = [self._lib_page.table.columnWidth(c) / total_w
-                                           for c in range(len(COLS))]
+            # (the stored ratios, not columnWidth: hidden columns report 0)
+            cfg['table_col_widths'] = list(self._lib_page.table._col_ratios)
+            cfg['hidden_cols'] = sorted(TrackTable._HIDDEN_COLS)
             # Persist the dock's own split (lyrics over queue) as a ratio
             cfg['right_dock_ratio'] = round(self._dock_ratio, 4)
             # Persist splitter sizes (sidebar / content / right dock)
@@ -2444,6 +2466,9 @@ class MainWindow(QMainWindow):
             if data.get('queue_panel_open', False):
                 QTimer.singleShot(200, self._open_queue_panel_from_config)
             # Restore table column ratios (deferred so viewport is fully sized)
+            TrackTable._HIDDEN_COLS = {c for c in data.get('hidden_cols', [])
+                                       if isinstance(c, int)}
+            self._lib_page.table.set_hidden_cols(TrackTable._HIDDEN_COLS)
             col_widths = data.get('table_col_widths', [])
             if col_widths:
                 self._last_col_widths = col_widths
@@ -2508,9 +2533,14 @@ class MainWindow(QMainWindow):
     def _on_config_playlist_ready(self, tracks: list, label: str):
         """Called on main thread for each playlist loaded by ConfigPlaylistLoader."""
         page = PlaylistPage(tracks, label=label)
+        for kp in self._known_paths:
+            if (Path(kp).stem if kp.endswith(('.m3u', '.m3u8'))
+                    else os.path.basename(kp.rstrip('/\\'))) == label:
+                page._src_path = kp; break
         page.play_track.connect(self._play_from_page)
         page.ctx_requested.connect(self._show_ctx_menu)
         page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
+        page.hidden_cols_changed.connect(self._on_hidden_cols_changed)
         page.set_tracks(tracks)
         # Apply view settings (settings popup already initialised by init_from_config)
         pop = self._ctrlbar._settings_popup

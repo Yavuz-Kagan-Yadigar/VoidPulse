@@ -609,8 +609,13 @@ class _TouchHeaderView(QHeaderView):
     touch target centred on the visible 1 px divider line.
     """
 
+    menu_requested = pyqtSignal(QPoint)   # global pos: right click or long press
+
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
+        self._lp_timer = QTimer(self); self._lp_timer.setSingleShot(True)
+        self._lp_timer.setInterval(550); self._lp_timer.timeout.connect(self._lp_fire)
+        self._lp_start = QPoint(); self._lp_gpos = QPoint(); self._lp_fired = False
         self._drag_col   = -1   # section being resized (-1 = none)
         self._drag_start = 0    # global x at drag start
         self._drag_orig  = 0    # section width at drag start
@@ -642,9 +647,23 @@ class _TouchHeaderView(QHeaderView):
                 self._drag_orig  = self.sectionSize(col)
                 e.accept()
                 return
+            self._lp_fired = False
+            self._lp_start = e.position().toPoint()
+            self._lp_gpos  = e.globalPosition().toPoint()
+            self._lp_timer.start()
         super().mousePressEvent(e)
 
+    def _lp_fire(self):
+        self._lp_fired = True
+        self.menu_requested.emit(self._lp_gpos)
+
+    def contextMenuEvent(self, e):
+        self.menu_requested.emit(e.globalPos())
+
     def mouseMoveEvent(self, e):
+        if self._lp_timer.isActive() and \
+                (e.position().toPoint() - self._lp_start).manhattanLength() > 10:
+            self._lp_timer.stop()
         if self._drag_col >= 0:
             delta = e.globalPosition().toPoint().x() - self._drag_start
             new_w = max(self.minimumSectionSize(), self._drag_orig + delta)
@@ -655,6 +674,11 @@ class _TouchHeaderView(QHeaderView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        self._lp_timer.stop()
+        if self._lp_fired:   # the long press already opened the menu: no sort click
+            self._lp_fired = False
+            e.accept()
+            return
         if self._drag_col >= 0 and e.button() == Qt.MouseButton.LeftButton:
             self._drag_col = -1
             self._update_cursor(e.position().toPoint().x())
@@ -738,6 +762,8 @@ class TrackTable(QTableWidget):
     row_activated  = pyqtSignal(int)
     ctx_requested  = pyqtSignal(int, QPoint)
     col_widths_changed = pyqtSignal(list)   # emitted after user resizes a column
+    hidden_cols_changed = pyqtSignal(list)  # emitted after user toggles a column
+    _HIDDEN_COLS: set = set()               # shared: every table starts with the same set
 
     # Proportional column widths, summing to 1.0
     _DEFAULT_COL_RATIOS = [w / 928 for w in (72, 260, 180, 180, 92, 82, 62)]  # 928 = sum
@@ -755,6 +781,7 @@ class TrackTable(QTableWidget):
         # Wider resize grab zone for touch
         th = _TouchHeaderView(self)
         self.setHorizontalHeader(th)
+        th.menu_requested.connect(self._show_col_menu)
         self.verticalHeader().setVisible(False)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -812,6 +839,8 @@ class TrackTable(QTableWidget):
         self._col_resize_timer.setInterval(400)
         self._col_resize_timer.timeout.connect(self._emit_col_widths)
         self._fp_to_row: dict = {}   # filepath → row index, O(1) cover-loaded lookup
+        for c in self._HIDDEN_COLS:
+            self.setColumnHidden(c, True)
         _ensure_async_cover_loader().cover_loaded.connect(self._on_cover_loaded)
 
     @property
@@ -891,10 +920,15 @@ class TrackTable(QTableWidget):
 
     def _emit_col_widths(self):
         """Convert current pixel widths to ratios and emit."""
-        total = sum(self.columnWidth(c) for c in range(len(COLS)))
+        vis = [c for c in range(len(COLS)) if not self.isColumnHidden(c)]
+        total = sum(self.columnWidth(c) for c in vis)
         if total <= 0:
             return
-        ratios = [self.columnWidth(c) / total for c in range(len(COLS))]
+        # Hidden columns keep their old ratio so showing them again restores the width
+        ratios = list(self._col_ratios)
+        osum = sum(ratios[c] for c in vis)
+        for c in vis:
+            ratios[c] = self.columnWidth(c) / total * osum
         self._col_ratios = ratios
         self._user_dragging = False   # drag finished, ratios committed
         self.col_widths_changed.emit(ratios)
@@ -907,14 +941,17 @@ class TrackTable(QTableWidget):
         ratios = self._col_ratios
         if not ratios or len(ratios) != len(COLS):
             ratios = self._DEFAULT_COL_RATIOS
-        # The last column absorbs the rounding remainder
-        widths = [max(30, int(r * vp_w)) for r in ratios]
-        diff = vp_w - sum(widths)
-        widths[-1] = max(30, widths[-1] + diff)
+        # Hidden columns take no space; the last visible one absorbs the rounding remainder
+        vis = [c for c in range(len(COLS)) if not self.isColumnHidden(c)]
+        if not vis:
+            return
+        rsum = sum(ratios[c] for c in vis) or 1
+        widths = [max(30, int(ratios[c] / rsum * vp_w)) for c in vis]
+        widths[-1] = max(30, widths[-1] + vp_w - sum(widths))
         hh = self.horizontalHeader()
         hh.sectionResized.disconnect(self._on_section_resized)
         try:
-            for col, w in enumerate(widths):
+            for col, w in zip(vis, widths):
                 self.setColumnWidth(col, w)
         finally:
             hh.sectionResized.connect(self._on_section_resized)
@@ -940,6 +977,32 @@ class TrackTable(QTableWidget):
             return
         self._col_ratios = [r / total for r in ratios]
         self._apply_ratios()
+
+    def set_hidden_cols(self, hidden):
+        """Hide exactly `hidden` (column indices); at least one column stays."""
+        hidden = {c for c in hidden if 0 <= c < len(COLS)}
+        if len(hidden) >= len(COLS):
+            hidden = set()
+        for c in range(len(COLS)):
+            self.setColumnHidden(c, c in hidden)
+        self._apply_ratios()
+
+    def _show_col_menu(self, gpos):
+        """Column picker, from a right click or long press on the header."""
+        m = QMenu(self)
+        shown = [c for c in range(len(COLS)) if not self.isColumnHidden(c)]
+        for c, name in enumerate(COLS):
+            a = m.addAction(name); a.setCheckable(True)
+            a.setChecked(c in shown)
+            if c in shown and len(shown) == 1:
+                a.setEnabled(False)   # the last visible column cannot go
+            a.toggled.connect(lambda on, c=c: self._toggle_col(c, on))
+        m.exec(gpos)
+
+    def _toggle_col(self, col, on):
+        hidden = {c for c in range(len(COLS)) if self.isColumnHidden(c)}
+        hidden.discard(col) if on else hidden.add(col)
+        self.hidden_cols_changed.emit(sorted(hidden))
 
     def _emit_ctx(self, pos):
         item = self.itemAt(pos)
@@ -1879,6 +1942,7 @@ class PlaylistPage(QWidget):
     play_track    = pyqtSignal(object, int)
     ctx_requested = pyqtSignal(object, int, QPoint)
     col_widths_changed = pyqtSignal(list)   # forwarded from TrackTable
+    hidden_cols_changed = pyqtSignal(list)  # forwarded from TrackTable
 
     def __init__(self, tracks=None, label='', parent=None):
         super().__init__(parent)
@@ -1897,6 +1961,7 @@ class PlaylistPage(QWidget):
         self.table.row_activated.connect(lambda r: self.play_track.emit(self, r))
         self.table.ctx_requested.connect(lambda r, pos: self.ctx_requested.emit(self, r, pos))
         self.table.col_widths_changed.connect(self.col_widths_changed)
+        self.table.hidden_cols_changed.connect(self.hidden_cols_changed)
         self.gallery.row_activated.connect(lambda r: self.play_track.emit(self, r))
         self.gallery.ctx_requested.connect(lambda r, pos: self.ctx_requested.emit(self, r, pos))
 
