@@ -272,7 +272,7 @@ class BlackoutOverlay(QWidget):
             font = p.font(); font.setPixelSize(22); font.setBold(True); p.setFont(font)
             p.setPen(RED)
             p.drawText(QRectF(0, 0, w, 30), CENT,
-                       QDateTime.currentDateTime().toString('HH:mm:ss'))
+                       QDateTime.currentDateTime().toString('HH:mm'))
         else:
             font = p.font()
 
