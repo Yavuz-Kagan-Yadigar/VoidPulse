@@ -82,6 +82,11 @@ class ControlBar(QFrame):
         # Monotonic deadline while the ring buffer is being played out after
         # playback stopped; 0 when not draining. See _on_playing_changed.
         self._viz_drain_until = 0.0
+        self._viz_drain_ms    = 0.0   # length of the drain window, for the fade ramp
+        # With audio Fade=0 there is no gain ramp to follow, so the painted
+        # bars get a short visual ramp of their own on play and on pause.
+        self._viz_fade_in_until = 0.0
+        self._VIZ_FADE_IN_MS    = 350.0
 
         # Paint buffers, rebuilt by _precompute_bars and reused every frame
         self._paint_bar_px      = _np.zeros(VIZ_BANDS, dtype=_np.int32)
@@ -1209,10 +1214,10 @@ class ControlBar(QFrame):
 
     def _on_log_toggle(self, on: bool):
         self._log_scale = on
-        # Flush stale bars so the old mapping does not bleed into the first frame
-        self._player._viz_bar_buf[:] = 0.0
-        self._player._viz_spec[:]    = MIN_DB
-        self._player._viz_reset_queue()
+        # Rebuild the freq→bin tables only. The queued frames are raw dB
+        # magnitudes, so they stay valid across the mapping change (and with
+        # the stream-time gate, clearing them would blank the bars for the
+        # sink's whole look-ahead).
         self._precompute_bars()
         self.update()
 
@@ -1401,8 +1406,9 @@ class ControlBar(QFrame):
         self._player._viz_spec[:] = MIN_DB
         self._player._viz_reset_queue()
         self._player._viz_bar_buf[:] = 0.0
-        # Drop spectrum frames for 150 ms so pre-seek audio never shows up
-        self._player._viz_discard_until = _monotonic() + 0.15
+        # Drop stale pre-seek frames for 150 ms; stream-time-aware so the new
+        # pre-fill burst still reaches the gate (see _begin_viz_discard).
+        self._player._begin_viz_discard(150.0)
         # Also drop the delay-compensation ring buffer, or a nonzero Delay
         # setting replays pre-seek frames for the next delay_ms. The display
         # buffer itself must be cleared too — an empty ring buffer makes
@@ -1476,11 +1482,36 @@ class ControlBar(QFrame):
             if eligible.any():
                 best_idx = int(_np.argmax(_np.where(eligible, ts, -1.0)))
                 _np.copyto(self._viz_display_buf, self._viz_rbuf[best_idx])
-            # Otherwise the buffer is still filling — keep the previous frame
+            else:
+                # Buffer refilling after a seek/resume: the old frames are all
+                # eligible but stale, so do not freeze on them. Show the live
+                # frame until a fresh one ages past delay_ms.
+                _np.copyto(self._viz_display_buf, src)
         else:
             self._viz_rbuf_head  = 0
             self._viz_rbuf_count = 0
             _np.copyto(self._viz_display_buf, src)
+
+        if self._player._fade_ms <= 0:
+            # Audio Fade=0 leaves the frames at full height in both directions,
+            # so give the painted bars their own short animation. With a real
+            # fade the frames already carry the ramp — never apply it twice.
+            if draining and self._viz_drain_ms > 0.0:
+                # Replaying the ring unchanged would keep the bars dancing and
+                # then cut them off at the end of the drain. Collapse them
+                # over the window instead.
+                left = ((self._viz_drain_until - _now)
+                        / (self._viz_drain_ms * 0.001))
+                left = max(0.0, min(1.0, left))
+                if left < 1.0:
+                    self._viz_display_buf *= left
+            elif self._viz_fade_in_until > 0.0:
+                if _now >= self._viz_fade_in_until:
+                    self._viz_fade_in_until = 0.0
+                else:
+                    up = 1.0 - ((self._viz_fade_in_until - _now)
+                                / (self._VIZ_FADE_IN_MS * 0.001))
+                    self._viz_display_buf *= max(0.0, min(1.0, up))
 
         if self._overlay_viz_enabled:
             # Delay-adjusted frame, so the OLED overlay's bars line up with the
@@ -1563,7 +1594,11 @@ class ControlBar(QFrame):
             self._paint_bord_pen = QPen(QColor(BORD), 1)
             self._paint_bg_brush = QBrush(QColor(BG))
 
-        if self._viz_on and not self._viz_paused:
+        # While paused, the only thing worth drawing is the post-pause drain:
+        # without this the bars are painted over with the background the
+        # instant pause is signalled, even though _render_tick is still walking
+        # the delayed frames out (and fading them) for Delay milliseconds.
+        if self._viz_on and (not self._viz_paused or self._viz_drain_until > 0.0):
             bh = self._viz_display_buf
 
             if self._player._viz_has_any and len(bh) == VIZ_BANDS:
@@ -1805,6 +1840,16 @@ class ControlBar(QFrame):
     def _on_playing_changed(self, playing: bool):
         if playing:
             self._viz_drain_until = 0.0   # cancel a drain still in flight
+            self._viz_drain_ms = 0.0
+            if self._player._fade_ms <= 0:
+                self._viz_fade_in_until = (_monotonic()
+                                           + self._VIZ_FADE_IN_MS * 0.001)
+            # The ring buffer holds frames from the paused stretch. Clear it
+            # so the delayed display does not freeze on the last pre-pause
+            # frame for a whole Delay while fresh frames refill it.
+            self._viz_rbuf_head  = 0
+            self._viz_rbuf_count = 0
+            self._viz_rbuf_ts.fill(0.0)
             _focus_paused = getattr(self, '_focus_paused', False)
             self._viz_paused = _focus_paused
             self._player.set_viz_active(self._viz_on and not _focus_paused)
@@ -1815,7 +1860,7 @@ class ControlBar(QFrame):
         else:
             # Silence the spectrum element before _destroy() hands the dying
             # pipeline off for teardown, otherwise its FFT keeps running at
-            # 30 fps while the new pipeline prerolls.
+            # 60 fps while the new pipeline prerolls.
             self._player.set_viz_active(False)
             # A pause fade ends at the instant the pipeline pauses, but with a
             # Delay set the bars are showing the frame from delay_ms ago — so at
@@ -1827,22 +1872,33 @@ class ControlBar(QFrame):
             needs_render = ((self._viz_on and not self._overlay_open)
                             or self._overlay_viz_enabled)
             if self._delay_ms > 0 and self._viz_rbuf_count > 0 and needs_render:
-                self._viz_drain_until = _monotonic() + self._delay_ms * 0.001
+                self._viz_drain_ms = float(self._delay_ms)
+                self._viz_drain_until = _monotonic() + self._viz_drain_ms * 0.001
+                # paintEvent must keep drawing while paused for this to be seen
+                self.update()
                 self._start_render_timer()
                 return
             self._finish_viz_stop()
 
     def _finish_viz_stop(self):
-        """Park the visualiser: bars away, timer off, spectrum state cleared.
+        """Park the visualiser: bars away and render timer off.
 
         Split out of _on_playing_changed so the delay ring buffer can be drained
         first — everything here is destructive to what the drain is showing.
+
+        The spectrum queue and its EMA state are deliberately kept. On a pause
+        the sink still holds the lead (measured ~2.1 s) of audio that was
+        already analysed on its way in, and the stream-time gate must release
+        exactly those frames when playback resumes. Clearing the queue leaves
+        only frames stamped ~2.1 s ahead of the frozen position, so the bars
+        stay at the floor through the whole fade-in and then pop in. Only the
+        published frame is cleared here; seek, track change and teardown drop
+        the queue, where the buffered frames really are stale.
         """
         self._viz_drain_until = 0.0
+        self._viz_drain_ms = 0.0
         self._viz_paused = True
         self._stop_render_timer()
-        self._player._viz_spec[:] = MIN_DB
-        self._player._viz_reset_queue()
         self._player._viz_bar_buf[:] = 0.0
         self.update()
         _bref = getattr(self, '_blackout_ref', None)

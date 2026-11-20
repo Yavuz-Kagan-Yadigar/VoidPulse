@@ -123,12 +123,33 @@ class Player(QObject):
     _sig_dur_gst_ms   = pyqtSignal(int)           # GLib thread → main thread: confirmed duration (ms)
     _sig_gain_analyzed = pyqtSignal(str, float)   # background thread → main thread: (filepath, gain_db)
 
-    _SPEC_INTERVAL_NS = int(1_000_000_000 / 30)  # 30fps spectrum — reduces GIL contention vs 60fps
-    _SPEC_INTERVAL_S  = 1.0 / 30.0
-    # Spectrum frames buffered between arrival and display. Sized for the worst
-    # real burst: libFLAC's ~3 messages per decode block, doubled for a block
-    # that lands while the render timer is starved.
-    _VIZ_PEND_N = 8
+    _SPEC_INTERVAL_NS = int(1_000_000_000 / 60)  # 60fps spectrum, matching the render cadence
+    _SPEC_INTERVAL_S  = 1.0 / 60.0
+    # Inertia (viz_inertia) is defined per 1/30 s interval. The EMA exponent is
+    # scaled by dt / this constant, so the settling time stays the same in wall
+    # clock terms whatever the spectrum or render cadence is. Keep it at 30 Hz
+    # even though frames now arrive at 60: raising it would make every setting
+    # twice as snappy.
+    _VIZ_EMA_INTERVAL_S = 1.0 / 30.0
+    # Spectrum frames buffered between arrival and display. Each frame is held
+    # until playback reaches its stream-time, so this queue has to span the
+    # sink's lead: measured ~2.1 s of look-ahead in the real app (pipewiresink
+    # plus libFLAC's ~104 ms decode blocks). 256 slots at 60 fps cover 4.3 s —
+    # that lead plus a second lead's worth of frames on resume (the retained
+    # queue plus the new pre-fill burst), decode bursts and render jitter.
+    # 256 * 2048 * 4 B is ~2 MB.
+    _VIZ_PEND_N = 256
+    # A stamp further ahead than this is not something the gate can hold for:
+    # either the position is stale (seek/resume) or the sink leads by more than
+    # the queue can cover. Such a frame is released instead of held, so the
+    # bars fall back to arrival pacing rather than freezing. Kept above the
+    # measured ~2.1 s lead and below _VIZ_PEND_N * _SPEC_INTERVAL_S (4.3 s).
+    _VIZ_HOLD_MAX_MS = 3000.0
+    # During the post-load/seek/resume discard window, only frames this far
+    # *behind* the playback position are treated as stale. The decoder's
+    # pre-fill burst is stamped ahead of the position and must be kept: those
+    # are the first frames the gate releases once playback starts.
+    _VIZ_STALE_TOL_MS = 50.0
 
     # Candidate (pre-spectrum chain, sink) pairs in priority order: PipeWire
     # first (bit-perfect), then PulseAudio, then autoaudiosink. Within each sink:
@@ -177,14 +198,15 @@ class Player(QObject):
         self._viz_bt: object = None
         self._viz_inertia: float = 0.5
         self._viz_overlay_cb: object = None  # callable(list) for overlay frames
-        self._viz_discard_until: float = 0.0  # wall-clock: discard frames before this
+        self._viz_discard_until: float = 0.0  # wall-clock end of the stale-content window
+        self._viz_discard_ms: float = self._VIZ_STALE_TOL_MS  # staleness threshold inside the window
         self._viz_has_any: bool = False       # True once first spectrum arrives after load
         # Spectrum queue: _store_spectrum fills it, _compute_viz_frame drains it
         self._viz_pend    = _np.full((self._VIZ_PEND_N, GST_BANDS), MIN_DB, dtype=_np.float32)
         self._viz_pend_r: int  = 0            # next slot to release
         self._viz_pend_w: int  = 0            # next slot to fill
         self._viz_pend_ct: int = 0            # frames currently queued
-        self._viz_pend_t  = _np.full(self._VIZ_PEND_N, -1.0)  # stream-time (ms) per slot, -1 = unknown
+        self._viz_pend_t  = _np.full(self._VIZ_PEND_N, -1.0)  # stream-time (ms) of the frame's end, -1 = unknown
         self._viz_target  = _np.full(GST_BANDS, MIN_DB, dtype=_np.float32)  # EMA target: last released frame
         self._viz_next_release: float = 0.0   # monotonic: when the next queued frame may be released
         self._viz_ema_wt: float = 0.0         # monotonic time of the last EMA step
@@ -683,11 +705,11 @@ class Player(QObject):
         self._spec_el = None
         if self._has_spec:
             # Built dormant (an interval so long it never fires) and only enabled
-            # by _update_spec_active() below. Starting at 30 fps and disabling
-            # afterwards races: from track 2 on the pipeline reaches PLAYING
-            # before the element is linked, and changing interval mid-stream does
-            # not abandon an accumulation window already in progress, so the FFT
-            # can keep running.
+            # by _update_spec_active() below. Starting at the active interval and
+            # disabling afterwards races: from track 2 on the pipeline reaches
+            # PLAYING before the element is linked, and changing interval
+            # mid-stream does not abandon an accumulation window already in
+            # progress, so the FFT can keep running.
             _DORMANT_INTERVAL = 3_600_000_000_000  # 1 hour in ns — never fires
             spec_desc = (
                 f'audioconvert ! audio/x-raw,format=F32LE '
@@ -843,8 +865,9 @@ class Player(QObject):
             self._gst_pos_adv_wt   = -1.0
             # Fast position updates so the seekbar snaps back immediately
             self._start_pos_burst(8)
-            # Drop frames buffered during the pause so the viz does not jump
-            self._viz_discard_until = _monotonic() + 0.15
+            # Drop stale frames buffered during the pause so the viz does not
+            # jump; the fresh pre-fill burst stays (see _begin_viz_discard).
+            self._begin_viz_discard(150.0)
             self.sig_playing.emit(True)
             # query_position right after set_state(PLAYING) is unreliable — the
             # clock has not restarted yet, which shows up as 1-2 s of drift.
@@ -875,8 +898,8 @@ class Player(QObject):
 
         if silent:
             # Keep _pos_playing=True so anchor interpolation continues.
-            # Discard viz frames for a short window so glitchy frames don't show.
-            self._viz_discard_until = _monotonic() + 0.6   # 600 ms discard
+            # Discard stale viz frames so glitchy frames don't show.
+            self._begin_viz_discard(600.0)
         else:
             self.sig_busy.emit(True)
             self._pos_playing = False   # interpolation off until pipeline is live
@@ -884,7 +907,7 @@ class Player(QObject):
             self._viz_bar_buf[:] = 0.0
             self._viz_spec[:] = MIN_DB
             self._viz_reset_queue()
-            self._viz_discard_until = _monotonic() + 0.5   # 500 ms discard post-load
+            self._begin_viz_discard(500.0)
 
         self._pause_ts = 0.0
         self._gst_pos_adv_ms   = -1.0
@@ -1110,7 +1133,7 @@ class Player(QObject):
             self._viz_spec[:] = MIN_DB
             self._viz_bar_buf[:] = 0.0
             self._viz_reset_queue()
-            self._viz_discard_until = _monotonic() + 0.15   # skip buffered pre-seek frames
+            self._begin_viz_discard(150.0)   # skip buffered pre-seek frames
             self._pipe.seek_simple(
                 Gst.Format.TIME,
                 Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
@@ -1361,13 +1384,15 @@ class Player(QObject):
         if pipe is None:
             return False
         # The detached pipeline keeps playing through the crossfade, but its
-        # spectrum element would otherwise go on posting 30 fps messages that
+        # spectrum element would otherwise go on posting 60 fps messages that
         # nothing reads. Silence it, then stop polling this pipeline, before
         # the reference is dropped and it becomes a ghost.
         if self._spec_el is not None:
             try:
                 self._spec_el.set_property('post-messages', False)
-                self._spec_el.set_property('interval', 1000000000)
+                # Dormant interval, matching _update_spec_active: a 1 s interval
+                # would still run an FFT every second for nothing.
+                self._spec_el.set_property('interval', 3_600_000_000_000)
             except Exception:
                 pass
         self._bus_timer.stop()
@@ -1476,12 +1501,14 @@ class Player(QObject):
             if self._pipe and self._playing:
                 self.play_pause(fade=False)
             # The bars are driven by _viz_gain(), which reads _fade_gain — and
-            # the line below puts that back to unity. Zero them here or the last
-            # frame of the fade-out, drawn from a pipeline that is now silent,
-            # would spring back to full height and freeze there, since the
-            # render timer stops as soon as playback does.
+            # the line below puts that back to unity. Zero the published frame
+            # here or the last frame of the fade-out, drawn from a pipeline that
+            # is now silent, would spring back to full height and freeze there,
+            # since the render timer stops as soon as playback does. The
+            # spectrum queue and EMA state are left alone: _finish_viz_stop
+            # keeps them so the first frames of a resume land at the right
+            # stream-time instead of leaving the bars blank for a whole lead.
             self._viz_bar_buf[:] = 0.0
-            self._viz_spec[:] = MIN_DB
             # Back to unity while the pipeline is paused (so inaudible), which
             # keeps the invariant that the pipe's volume always equals
             # _effective_volume() — a later resume that does not fade, because
@@ -1527,14 +1554,19 @@ class Player(QObject):
 
         Pre-computes every per-frame lookup so _compute_viz_frame is purely
         in-place numpy with zero Python-level allocation per call.
+
+        Deliberately keeps the queued frames and the EMA state: they hold raw
+        GST_BANDS dB magnitudes, which are independent of ba/bb/bt — the
+        mapping is applied when a frame is released, not when it is queued.
+        ControlBar rebuilds these tables on every resize, so dropping the queue
+        here would throw away the ~2.1 s of look-ahead it buffers and blank the
+        bars until playback caught up again.
         """
         self._viz_ba      = ba
         self._viz_bb      = bb
         self._viz_bt      = bt
         self._viz_inertia = inertia
         self._viz_overlay_cb = overlay_cb
-        self._viz_spec[:] = MIN_DB   # reset inertia on table change
-        self._viz_reset_queue()      # queued frames belong to the old mapping
 
     def set_viz_gamma(self, g: float):
         """Bar-height gamma, from config.json's viz_gamma.
@@ -1561,7 +1593,7 @@ class Player(QObject):
         need = self._viz_on or self._overlay_needs_spec
         if self._spec_el:
             self._spec_el.set_property('post-messages', bool(need))
-            # 30 fps when active, an hour (i.e. never) when not
+            # 60 fps when active, an hour (i.e. never) when not
             interval = self._SPEC_INTERVAL_NS if need else 3_600_000_000_000
             self._spec_el.set_property('interval', interval)
 
@@ -2452,6 +2484,7 @@ class Player(QObject):
             self._viz_bar_buf[:] = 0.0
             self._viz_spec[:] = MIN_DB
             self._viz_discard_until = 0.0
+            self._viz_discard_ms = 0.0
         self._viz_reset_queue()
         self._viz_has_any = False
         self._viz_mag_field_idx = -1   # reset field cache — new pipeline may differ
@@ -2787,6 +2820,21 @@ class Player(QObject):
             s = msg.get_structure()
             if s and s.get_name() == 'spectrum': self._store_spectrum(s)
 
+    def _begin_viz_discard(self, ms: float, stale_ms: float = None):
+        """Open a short window that drops stale spectrum content.
+
+        A load, seek or resume leaves frames from the old position in flight.
+        Discarding by wall-clock alone also throws away the decoder's pre-fill
+        burst — frames stamped *ahead* of the new position, which are exactly
+        the ones the stream-time gate needs to release first. With a 500 ms
+        blind window the first surviving frame was ~1.7 s ahead, so the bars
+        sat at the floor for the whole lead. _store_spectrum now filters by
+        stream-time instead; the window only bounds how long that check runs.
+        """
+        self._viz_discard_ms = (float(stale_ms) if stale_ms is not None
+                                else self._VIZ_STALE_TOL_MS)
+        self._viz_discard_until = _monotonic() + float(ms) * 0.001
+
     def _store_spectrum(self, s):
         """Queue one spectrum message's magnitudes for the renderer.
 
@@ -2806,13 +2854,10 @@ class Player(QObject):
             self._last_parsed_serial = serial
             self._viz_spec[:] = MIN_DB
             self._viz_reset_queue()
-            self._viz_discard_until = _monotonic() + 0.15
+            self._begin_viz_discard(150.0)
             return
 
-        # ── Discard window ────────────────────────────────────────────────────
         now = _monotonic()
-        if now < self._viz_discard_until:
-            return
 
         # ── Magnitude extraction ──────────────────────────────────────────────
         # Fast path via GstValueList, avoiding a full s.to_string(). The field
@@ -2863,9 +2908,10 @@ class Player(QObject):
             return
 
         # Each frame is queued whole instead of folded into the previous one.
-        # Bursts are normal — libFLAC's ~104 ms blocks deliver three messages back
-        # to back, then nothing — and merging them drops two frames in three,
-        # stepping the bars at ~8 Hz. _compute_viz_frame paces the queue out again.
+        # Bursts are normal — libFLAC's ~104 ms blocks deliver ~6 messages back
+        # to back, then nothing — and merging them drops most frames, stepping
+        # the bars. The stream-time gate below holds each frame until the sink
+        # reaches it, so the queue has to be deep enough to span the lead.
         # Stream-time of the frame's end, so the renderer can hold it until the
         # sink actually reaches that position. Arrival time alone leads audible
         # output by the sink's buffering, which differs on every start.
@@ -2877,12 +2923,30 @@ class Player(QObject):
                 t_ms = (st + (du if ok2 else 0)) / 1e6
         except Exception:
             pass
+
+        # ── Content-aware discard window ─────────────────────────────────────
+        # After a load/seek/resume, frames already in flight carry the old
+        # position's audio. Drop only those: a stamp behind the new position
+        # means the content has already been heard. Frames stamped *ahead* are
+        # the decoder's pre-fill of the new position and must be queued — a
+        # blind wall-clock window discarded exactly those, leaving the first
+        # surviving frame ~1.7 s ahead and the bars at the floor for a lead.
+        # Without a stamp the frame cannot be gated, so it is dropped too.
+        if (now < self._viz_discard_until
+                and (t_ms < 0.0
+                     or t_ms < self.position_ms() - self._viz_discard_ms)):
+            return
+
         w = self._viz_pend_w
         if self._viz_pend_ct >= self._VIZ_PEND_N:
             # Queue full: the renderer has been starved longer than the queue is
-            # deep. Fold peak-wise into the newest frame so transients survive.
+            # deep. Fold peak-wise into the newest frame so transients survive,
+            # and advance its stamp: the merged frame now carries audio up to
+            # this message's end, so it must not be released earlier than that.
             newest = (w - 1) % self._VIZ_PEND_N
             _np.maximum(self._viz_pend[newest, :n], raw[:n], out=self._viz_pend[newest, :n])
+            if t_ms >= 0.0:
+                self._viz_pend_t[newest] = t_ms
         else:
             slot = self._viz_pend[w]
             slot[:n] = raw[:n]
@@ -2898,6 +2962,10 @@ class Player(QObject):
         self._viz_pend_r  = 0
         self._viz_pend_w  = 0
         self._viz_pend_ct = 0
+        # Stamp buffer shares the ring indices with the data; leaving old
+        # stream-times behind would hold the first frames of the new stream
+        # against the previous track's position.
+        self._viz_pend_t.fill(-1.0)
         self._viz_next_release = 0.0
         self._viz_ema_wt  = 0.0
         self._viz_target[:] = MIN_DB
@@ -2912,8 +2980,8 @@ class Player(QObject):
         allocation (and so GC pressure) down.
 
         Pipeline:
-          1. Release at most one queued spectrum frame, paced at the spectrum
-             element's own 30 Hz, then one EMA step towards it sized by the
+          1. Release every queued spectrum frame whose stream-time playback has
+             reached, then one EMA step towards the newest of them sized by the
              real elapsed time.
           2. Linear interpolation from GST_BANDS FFT bins → VIZ_BANDS display bars
           3. Clip + normalise dB to [0, 1]
@@ -2927,7 +2995,7 @@ class Player(QObject):
 
         Runs on every frame rather than only when a message arrived: gating it on
         arrivals ties the visible frame rate to the codec's decode block size
-        (~8 fps on FLAC versus 30 on Opus).
+        (~8 fps on FLAC versus 60 on Opus).
         """
         ba = self._viz_ba
         bb = self._viz_bb
@@ -2942,35 +3010,49 @@ class Player(QObject):
             alpha = max(0.0, min(1.0, float(self._viz_inertia)))
             now   = _monotonic()
 
-            # ── 1a. Release one queued frame, at the spectrum's own cadence ───
-            # A backlog means frames arrived faster than they were shown, so
-            # drain at double rate rather than letting the lag accumulate.
-            # Hold a frame until playback reaches its stream-time. The 2 s cap
-            # keeps a stale position (seek, resume) from stalling the queue.
-            hold = False
-            if self._viz_pend_ct > 0:
-                ft = self._viz_pend_t[self._viz_pend_r]
+            # ── 1a. Release the frames playback has reached ───────────────────
+            # Each frame carries the stream-time of its end. Holding it until
+            # position_ms() gets there lines the bars up with what is audible
+            # instead of what has merely been decoded: playbin analyses ~2.1 s
+            # ahead of the sink, so arrival time alone runs the bars ahead.
+            #
+            # Release stops at the first frame still in the future. A late
+            # render tick leaves more than one frame due at once; they are all
+            # released (only the newest survives into _viz_target), so the
+            # display catches up to playback instead of accumulating lag and
+            # then stalling when the queue fills.
+            pos_ms   = self.position_ms()
+            released = 0
+            while self._viz_pend_ct > 0 and released < self._VIZ_PEND_N:
+                r  = self._viz_pend_r
+                ft = self._viz_pend_t[r]
                 if ft >= 0.0:
-                    ahead = ft - self.position_ms()
-                    hold = 0.0 < ahead < 2000.0
-            if self._viz_pend_ct > 0 and now >= self._viz_next_release and not hold:
-                r = self._viz_pend_r
+                    ahead = ft - pos_ms
+                    # Hold only while the frame is in the plausible future.
+                    # Anything further ahead than the gate supports (a stale
+                    # position after seek/resume, or a sink leading by more
+                    # than _VIZ_HOLD_MAX_MS) falls through to a release:
+                    # unsynced bars beat a queue that never drains.
+                    if 0.0 < ahead <= self._VIZ_HOLD_MAX_MS:
+                        break
+                elif now < self._viz_next_release:
+                    # No stream-time on this frame (older binding or pipeline):
+                    # fall back to release pacing at the spectrum cadence.
+                    break
                 _np.copyto(self._viz_target, self._viz_pend[r])
-                self._viz_pend_r   = (r + 1) % self._VIZ_PEND_N
+                self._viz_pend_r = (r + 1) % self._VIZ_PEND_N
                 self._viz_pend_ct -= 1
-                step = self._SPEC_INTERVAL_S
-                if self._viz_pend_ct >= 3:
-                    step *= 0.5
-                self._viz_next_release = max(now, self._viz_next_release) + step
+                released += 1
+                self._viz_next_release = max(now, self._viz_next_release) + self._SPEC_INTERVAL_S
 
             # ── 1b. Inertia: one EMA step, exponent scaled by elapsed time ────
-            # alpha is defined per spectrum interval (1/30 s), so raising it to
+            # alpha is defined per 1/30 s interval, so raising it to
             # (dt / interval) keeps the settling speed the same whatever the render
             # cadence or block size is. After a reset there is no previous
             # timestamp, so the first step counts as exactly one interval.
-            dt = now - self._viz_ema_wt if self._viz_ema_wt > 0.0 else self._SPEC_INTERVAL_S
+            dt = now - self._viz_ema_wt if self._viz_ema_wt > 0.0 else self._VIZ_EMA_INTERVAL_S
             self._viz_ema_wt = now
-            exp = min(8.0, max(0.0, dt / self._SPEC_INTERVAL_S))
+            exp = min(8.0, max(0.0, dt / self._VIZ_EMA_INTERVAL_S))
             if alpha <= 0.0:
                 ea = 0.0
             elif alpha >= 1.0:
