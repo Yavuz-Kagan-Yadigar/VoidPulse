@@ -800,7 +800,7 @@ class TrackTable(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda pos: self._emit_ctx(pos))
         hh = self.horizontalHeader()
-        hh.setSectionsMovable(False)
+        hh.setSectionsMovable(True)   # grab & reorder columns with mouse or touch
         hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         # Interactive plus no cascading: dragging a divider resizes only that column
         # and its right neighbour, leaving the rest alone.
@@ -936,10 +936,9 @@ class TrackTable(QTableWidget):
             ratios[c] = self.columnWidth(c) / total * osum
         self._col_ratios = ratios
         self._user_dragging = False   # drag finished, ratios committed
-        # Re-fit to the viewport: shrinking a column (the last one especially)
-        # would otherwise leave the columns short of the right edge, and the row
-        # separators, which are per-cell, stop there.
-        self._apply_ratios()
+        # Do NOT re-fit here: re-applying the ratios right after a drag
+        # rewrites the widths the user just set and makes columns keep
+        # resizing. The fit happens on the next viewport resize instead.
         self.col_widths_changed.emit(ratios)
 
     def _apply_ratios(self):
@@ -987,6 +986,19 @@ class TrackTable(QTableWidget):
         self._col_ratios = [r / total for r in ratios]
         self._apply_ratios()
 
+    def restore_col_order(self, order):
+        '''Restore the visual order of columns (list of logical indices).'''
+        hh = self.horizontalHeader()
+        if not order:
+            return
+        for visual, logical in enumerate(order):
+            # Skip hidden or out-of-range indices gracefully.
+            if not (0 <= logical < len(COLS)):
+                continue
+            try:
+                hh.moveSection(hh.visualIndex(logical), visual)
+                pass
+
     def set_hidden_cols(self, hidden):
         """Hide exactly `hidden` (column indices); at least one column stays."""
         hidden = {c for c in hidden if 0 <= c < len(COLS)}
@@ -1010,7 +1022,14 @@ class TrackTable(QTableWidget):
 
     def _toggle_col(self, col, on):
         hidden = {c for c in range(len(COLS)) if self.isColumnHidden(c)}
-        hidden.discard(col) if on else hidden.add(col)
+        if not on:
+            shown = [c for c in range(len(COLS)) if c not in hidden]
+            if len(shown) <= 1 and col in shown:
+                # keep at least one column visible
+                return
+            hidden.add(col)
+        else:
+            hidden.discard(col)
         self.hidden_cols_changed.emit(sorted(hidden))
 
     def _emit_ctx(self, pos):

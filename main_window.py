@@ -1296,6 +1296,9 @@ class MainWindow(QMainWindow):
         page.set_tracks(tracks)
         saved_ratios = getattr(self, '_last_col_widths', None) or TrackTable._DEFAULT_COL_RATIOS
         page.table.restore_col_widths(saved_ratios)
+        saved_order = getattr(self, '_last_col_order', None)
+        if saved_order:
+            page.table.restore_col_order(saved_order)
         pop = self._ctrlbar._ensure_settings_popup()
         page.set_covers_on(pop.cover_on())
         page.set_view_mode(pop.view_mode())
@@ -2265,6 +2268,9 @@ class MainWindow(QMainWindow):
 
     def _on_hidden_cols_changed(self, hidden: list):
         """User toggled a list column — apply to every page and save."""
+        hidden = [c for c in hidden if isinstance(c, int) and 0 <= c < len(COLS)]
+        if len(hidden) >= len(COLS):
+            hidden = []
         TrackTable._HIDDEN_COLS = set(hidden)
         for page in [self._lib_page] + self._playlists:
             if page is not None:
@@ -2326,6 +2332,9 @@ class MainWindow(QMainWindow):
             # (the stored ratios, not columnWidth: hidden columns report 0)
             cfg['table_col_widths'] = list(self._lib_page.table._col_ratios)
             cfg['hidden_cols'] = sorted(TrackTable._HIDDEN_COLS)
+            # Only save valid (non-hidden) column logical indexes; hidden cols report -1.
+            hh = self._lib_page.table.horizontalHeader()
+            cfg['col_order'] = [i for i in (hh.logicalIndex(j) for j in range(hh.count())) if 0 <= i < len(COLS)]
             # Persist the dock's own split (lyrics over queue) as a ratio
             cfg['right_dock_ratio'] = round(self._dock_ratio, 4)
             # Persist splitter sizes (sidebar / content / right dock)
@@ -2487,16 +2496,28 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(200, self._open_queue_panel_from_config)
             # Restore table column ratios (deferred so viewport is fully sized)
             TrackTable._HIDDEN_COLS = {c for c in data.get('hidden_cols', [])
-                                       if isinstance(c, int)}
+                                       if isinstance(c, int) and 0 <= c < len(COLS)}
+            # Never restore an all-hidden state.
+            if len(TrackTable._HIDDEN_COLS) >= len(COLS):
+                TrackTable._HIDDEN_COLS = set()
             self._lib_page.table.set_hidden_cols(TrackTable._HIDDEN_COLS)
             col_widths = data.get('table_col_widths', [])
             if col_widths:
                 self._last_col_widths = col_widths
-                def _apply_saved_ratios(r=col_widths):
+            col_order = data.get('col_order')
+            if col_order:
+                self._last_col_order = col_order
+                self._lib_page.table.restore_col_order(col_order)
+            def _apply_saved_ratios(r=col_widths):
+                if r:
                     self._lib_page.table.restore_col_widths(r)
                     for pl in self._playlists:
                         pl.table.restore_col_widths(r)
-                QTimer.singleShot(0, _apply_saved_ratios)
+                if col_order:
+                    self._lib_page.table.restore_col_order(col_order)
+                    for pl in self._playlists:
+                        pl.table.restore_col_order(col_order)
+            QTimer.singleShot(0, _apply_saved_ratios)
             # Restore splitter sizes
             splitter_sizes = data.get('splitter_sizes', [])
             if splitter_sizes and len(splitter_sizes) >= 2:
@@ -2562,6 +2583,12 @@ class MainWindow(QMainWindow):
         page.col_widths_changed.connect(lambda w, p=page: self._on_col_widths_changed(w, p))
         page.hidden_cols_changed.connect(self._on_hidden_cols_changed)
         page.set_tracks(tracks)
+        saved_ratios = getattr(self, '_last_col_widths', None)
+        if saved_ratios:
+            page.table.restore_col_widths(saved_ratios)
+        saved_order = getattr(self, '_last_col_order', None)
+        if saved_order:
+            page.table.restore_col_order(saved_order)
         # Apply view settings (settings popup already initialised by init_from_config)
         pop = self._ctrlbar._settings_popup
         if pop is not None:
