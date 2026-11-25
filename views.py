@@ -995,9 +995,7 @@ class TrackTable(QTableWidget):
             # Skip hidden or out-of-range indices gracefully.
             if not (0 <= logical < len(COLS)):
                 continue
-            try:
-                hh.moveSection(hh.visualIndex(logical), visual)
-                pass
+            hh.moveSection(hh.visualIndex(logical), visual)
 
     def set_hidden_cols(self, hidden):
         """Hide exactly `hidden` (column indices); at least one column stays."""
